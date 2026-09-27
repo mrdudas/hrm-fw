@@ -1,0 +1,10 @@
+# Use the external 32.768 kHz crystal (confirmed present on the board)
+CONFIG_CLOCK_CONTROL_NRF_K32SRC_XTAL=y
+CONFIG_CLOCK_CONTROL_NRF_K32SRC_50PPM=y
+
+CONFIG_GPIO=y
+
+# No UART pins broken out on the WLCSP strap — console/log go over SEGGER RTT
+CONFIG_SERIAL=n
+CONFIG_CONSOLE=n
+CONFIG_UART_CONSOLE=n

@@ -1,0 +1,12 @@
+# Zephyr / CMake build outputs
+build/
+*/build/
+*.hex
+*.elf
+*.map
+# Python
+__pycache__/
+*.pyc
+host/venv/
+# runtime dumps
+dump/

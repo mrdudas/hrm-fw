@@ -1,0 +1,57 @@
+/dts-v1/;
+#include <nordic/nrf52805_caaa.dtsi>
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc.h>
+
+/ {
+	model = "Decathlon HRM Belt (nRF52805)";
+	compatible = "decathlon,hrm";
+
+	chosen {
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_partition;
+	};
+
+	/* Heartbeat analog input: RS8034 op-amp output -> P0.05 / AIN3 (ball F6) */
+	zephyr_user: zephyr,user {
+		io-channels = <&adc 3>;
+	};
+};
+
+&adc {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@3 {
+		reg = <3>;
+		zephyr,gain = "ADC_GAIN_1_4";
+		zephyr,reference = "ADC_REF_VDD_1_4";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 10)>;
+		zephyr,input-positive = <NRF_SAADC_AIN3>;   /* AIN3 = P0.05 = ball F6 */
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <2>;
+	};
+};
+
+&gpio0    { status = "okay"; };
+&gpiote   { status = "okay"; };
+
+/* nRF52805 flash: 192 kB. Single app slot (no MCUboot — we flash via SWD). */
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		slot0_partition: partition@0 {
+			label = "image-0";
+			reg = <0x00000000 DT_SIZE_K(188)>;
+		};
+		storage_partition: partition@2f000 {
+			label = "storage";
+			reg = <0x0002f000 DT_SIZE_K(4)>;
+		};
+	};
+};
