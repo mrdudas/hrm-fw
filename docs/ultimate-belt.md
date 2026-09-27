@@ -89,6 +89,13 @@ MCU (that's why we pay for the FPU), so a cheap analog AFE is the right call.
   during exercise (the thing the nRF52805 couldn't do).
 - **Motion-wake**: LSM6DSOX INT1 → GPIO sense → System OFF, exactly like the v1
   SC7A20/P0.14 mechanism.
+- **OTA firmware update over BLE** — MCUboot (dual-slot) + MCUmgr/SMP-over-BLE
+  (push with the *nRF Device Manager* app). Configs: `CONFIG_BOOTLOADER_MCUBOOT`,
+  `CONFIG_MCUMGR`, `CONFIG_MCUMGR_TRANSPORT_BT`, `CONFIG_MCUMGR_GRP_IMG/OS`, plus
+  `boot`/`slot0`/`slot1` flash partitions. **This is a v2-only feature:** it needs
+  bootloader + two full app slots, which fit trivially in the 1 MB flash but
+  **not** in the nRF52805's 192 KB (~109 KB app leaves no room for a 2nd slot).
+  → v1 stays SWD-only, v2 is field-updatable.
 - Optional: LSM6DSOX **MLC** for onboard activity/gesture classification.
 
 ## Open decisions
