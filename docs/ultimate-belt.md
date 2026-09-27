@@ -43,8 +43,8 @@ LiPo  -> nPM1100                          SWD pads -----+  LED
 ## Bill of materials (core)
 | Ref | Part | Role | Why |
 |---|---|---|---|
-| U1 | **nRF5340** (bare `nRF5340-QKAA`, or module `Raytac MDBT53` / Fanstel) | MCU + BLE 5.x + ANT+ | Dual-core M33: app core (128 MHz, **FPU + DSP**, 512 KB RAM) for heavy DSP, separate net core for the radio. Zephyr-native → our code ports over. **Module = no RF tuning, pre-certified.** |
-| U2 | **MAX30003** | Single-lead ECG AFE (SPI) | Purpose-built wearable ECG: ~15.5-bit, built-in HP/LP + 50/60 Hz notch, lead-off detect, **hardware R-to-R** (low-power RR fallback), streams raw ECG FIFO for our own DSP. ~85 µW. |
+| U1 | **nRF52840** module (E73/Raytac, ~$3-6) *or* **nRF5340** (~$8-12) | MCU + BLE 5.x + ANT+ | nRF52840: M4F @64 MHz, **FPU**, 256 KB RAM — plenty for single-channel ECG DSP (wavelet/LMS) and cheap. nRF5340: dual-core M33 (128 MHz FPU+DSP, 512 KB) if you want the radio on a separate core / ML headroom. Both Zephyr-native → our code ports over. **Module = no RF tuning, pre-certified.** |
+| U2 | **AD8232** / AD8233 (~$2-4) *or* **MAX30003** (~$5-8) | ECG AFE | **Key insight: with a DSP-capable MCU, the digital filtering lives in firmware — so a cheap ANALOG AFE is the smart pick.** AD8232 = in-amp + configurable HP/LP + right-leg drive (50 Hz common-mode) + lead-off, analog out → MCU SAADC. Handles 3 of the 4 noise sources in hardware, far better than a discrete op-amp, a fraction of the MAX30003 cost. MAX30003 only wins when you want a *low-power* MCU that offloads DSP (not our case). Note: AD8232 is optimized for 3-electrode; a 2-electrode chest strap loses some RLD 50 Hz rejection → covered by the software notch. |
 | U3 | **LSM6DSOX** | 6-axis IMU (accel+gyro) + ML core | Gyro gives a proper motion reference for adaptive artifact removal; embedded step/tilt + a **machine-learning core** for on-device activity classification. (SC7A20 is accel-only.) |
 | U4 | **nPM1100** | PMIC: LiPo charger + buck regulator | Nordic's companion PMIC — USB-C charging + efficient buck for the rails. Tiny, made for nRF wearables. |
 | BT1 | LiPo 100–200 mAh | Battery | Rechargeable, more headroom than CR2032 for the AFE+DSP. |
@@ -56,6 +56,17 @@ LiPo  -> nPM1100                          SWD pads -----+  LED
 **Coin-cell variant:** drop U4+BT1+J1, run everything from a CR2032 through a
 low-Iq LDO; simplest, but tighter energy budget with the AFE always on. The
 rechargeable LiPo path is the "ultimate" choice.
+
+### Cost tiers
+| | Value pick (cheap) | No-compromise |
+|---|---|---|
+| MCU | nRF52840 module (~$3-6) | nRF5340 (~$8-12) |
+| ECG AFE | **AD8232** analog (~$2-4) | MAX30003 digital (~$5-8) |
+| IMU | LSM6DSO accel+gyro (~$3) | LSM6DSOX (+ML core) |
+| Power | CR2032 + LDO | LiPo + nPM1100 + USB-C |
+
+**Recommended value build: nRF52840 + AD8232 + LSM6DSO** — the DSP lives in the
+MCU (that's why we pay for the FPU), so a cheap analog AFE is the right call.
 
 ## Key connections
 | Bus / signal | From → To | Notes |
