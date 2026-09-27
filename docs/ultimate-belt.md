@@ -1,0 +1,101 @@
+# Ultimate Belt — v2 hardware design
+
+A ground-up successor to the reflashed Decathlon strap: a wearable **ECG + HRV +
+motion** platform strong enough for real signal processing (wavelet / accel-
+referenced adaptive filtering, on-device activity ML), while staying low power
+and BLE/ANT+ native. The current Zephyr firmware (HR/RR, raw ECG, accel, steps,
+motion-wake, dual connection) ports over almost unchanged.
+
+## Design goals
+- Clean ECG via a real AFE (not a discrete op-amp) → better HRV, motion tolerance.
+- MCU with FPU + DSP + RAM for wavelet / LMS-RLS adaptive filtering and ML.
+- 6-axis IMU (accel **+ gyro**) as the motion reference for artifact removal, and
+  for cadence/activity.
+- Rechargeable (LiPo + USB-C), or a coin-cell variant.
+- Reuse the fabric chest-strap electrodes.
+
+## Block diagram
+```mermaid
+flowchart LR
+  ELEC["Chest electrodes<br/>(2 snaps)"] -->|RC + ESD| AFE
+  AFE["MAX30003<br/>ECG AFE (SPI)"] -->|"SPI + INTB (RtoR/DRDY)"| MCU
+  IMU["LSM6DSOX<br/>accel+gyro + ML core"] -->|"SPI + INT1 (motion wake)"| MCU
+  MCU["nRF5340<br/>M33 128MHz +FPU/DSP · 512KB RAM<br/>app core = DSP · net core = BLE"]
+  MCU -->|BLE 5.x / ANT+| PHONE["Phone / watch / bike computer"]
+  PMIC["nPM1100 PMIC<br/>LiPo charger + buck"] -->|VDD 1.8/3.0V| MCU
+  PMIC --> AFE
+  PMIC --> IMU
+  USB["USB-C"] -->|VBUS charge| PMIC
+  USB -->|D+/D- DFU| MCU
+  BATT["LiPo 100-200 mAh"] --> PMIC
+  SWD["SWD pads (SWDIO/SWCLK)"] --- MCU
+  LED["Status LED"] --- MCU
+```
+
+Plain-text version:
+```
+electrodes -RC/ESD-> MAX30003 (ECG AFE) --SPI+INT--> nRF5340 --BLE/ANT+-> hosts
+                     LSM6DSOX (IMU)      --SPI+INT-->   |
+USB-C -> nPM1100 (charge+buck) -> 1.8/3.0V rails ------>+  (+ AFE, IMU)
+LiPo  -> nPM1100                          SWD pads -----+  LED
+```
+
+## Bill of materials (core)
+| Ref | Part | Role | Why |
+|---|---|---|---|
+| U1 | **nRF5340** (bare `nRF5340-QKAA`, or module `Raytac MDBT53` / Fanstel) | MCU + BLE 5.x + ANT+ | Dual-core M33: app core (128 MHz, **FPU + DSP**, 512 KB RAM) for heavy DSP, separate net core for the radio. Zephyr-native → our code ports over. **Module = no RF tuning, pre-certified.** |
+| U2 | **MAX30003** | Single-lead ECG AFE (SPI) | Purpose-built wearable ECG: ~15.5-bit, built-in HP/LP + 50/60 Hz notch, lead-off detect, **hardware R-to-R** (low-power RR fallback), streams raw ECG FIFO for our own DSP. ~85 µW. |
+| U3 | **LSM6DSOX** | 6-axis IMU (accel+gyro) + ML core | Gyro gives a proper motion reference for adaptive artifact removal; embedded step/tilt + a **machine-learning core** for on-device activity classification. (SC7A20 is accel-only.) |
+| U4 | **nPM1100** | PMIC: LiPo charger + buck regulator | Nordic's companion PMIC — USB-C charging + efficient buck for the rails. Tiny, made for nRF wearables. |
+| BT1 | LiPo 100–200 mAh | Battery | Rechargeable, more headroom than CR2032 for the AFE+DSP. |
+| J1 | USB-C receptacle | Charge + DFU | Charging (to nPM1100 VBUS) and USB DFU/serial (to nRF5340 USB). |
+| — | 2× electrode snaps + RC/ESD | ECG front end | Reuse the fabric strap; RC anti-alias + TVS/ESD to the AFE inputs. |
+| DS1 | LED | Status | wake/heartbeat/charge indication. |
+| — | decoupling, RC filters, matching (if bare chip) | passives | per datasheets. |
+
+**Coin-cell variant:** drop U4+BT1+J1, run everything from a CR2032 through a
+low-Iq LDO; simplest, but tighter energy budget with the AFE always on. The
+rechargeable LiPo path is the "ultimate" choice.
+
+## Key connections
+| Bus / signal | From → To | Notes |
+|---|---|---|
+| **ECG SPI** | MAX30003 ↔ nRF5340 (SCK/MOSI/MISO/CSB) | dedicated SPIM |
+| **AFE INTB** | MAX30003 → nRF5340 GPIO | R-to-R / FIFO-ready interrupt |
+| **IMU SPI** (or I²C) | LSM6DSOX ↔ nRF5340 | can share the SPI bus with a 2nd CSB |
+| **IMU INT1** | LSM6DSOX → nRF5340 GPIO (sense-wake) | **motion-wake from System OFF**, same trick as v1 (P0.14) |
+| **USB** | USB-C D+/D- → nRF5340 | DFU + serial |
+| **VBUS** | USB-C → nPM1100 | charging |
+| **Rails** | nPM1100 → VDD (MCU 1.8–3.0 V; AFE analog 1.8 V) | keep AFE analog quiet (separate/filtered) |
+| **SWD** | SWDIO/SWCLK pads → nRF5340 | or a Tag-Connect footprint (no more hair-wire soldering!) |
+
+## Firmware plan (reuse v1)
+- Zephyr on the nRF5340 **app core**; BLE/ANT on the **net core** (Nordic's split image). Our services (HR/RR, raw ECG, accel+steps) drop in.
+- **MAX30003 driver over SPI**: stream the ECG FIFO into the app core; keep its
+  hardware R-to-R as a low-power/no-DSP fallback.
+- With FPU + 512 KB: real **wavelet (DWT) QRS**, and the **LSM6DSOX gyro/accel as
+  the reference input to an LMS/RLS adaptive filter** to subtract motion artifact
+  during exercise (the thing the nRF52805 couldn't do).
+- **Motion-wake**: LSM6DSOX INT1 → GPIO sense → System OFF, exactly like the v1
+  SC7A20/P0.14 mechanism.
+- Optional: LSM6DSOX **MLC** for onboard activity/gesture classification.
+
+## Open decisions
+1. **Module vs bare nRF5340** — module (Raytac/Fanstel) is far easier for a first
+   spin (no antenna/matching, certified); bare chip is smaller/cheaper at volume.
+2. **MAX30003 (1-ch, wearable-optimized) vs ADS1292R (2-ch, 24-bit, respiration
+   via bio-Z)** — MAX30003 for pure ECG/HRV; ADS1292R if you want a 2nd channel or
+   impedance-respiration.
+3. **LiPo + nPM1100 vs CR2032 + LDO** — rechargeable vs simplest.
+4. **Debug**: Tag-Connect footprint vs test pads.
+5. Keep **ANT+** (net core supports it) for the bike/rowing computers that speak it
+   — note: the old Mr. Rudolf rower needs **5 kHz analog**, which none of this
+   emits; that receiver is legacy-analog-only.
+
+## Next steps
+- Pick module vs bare + AFE choice → freeze the core BOM.
+- Draw the schematic (KiCad), starting from the nRF5340, MAX30003 and nPM1100
+  reference designs / EVKs.
+- Prototype the DSP on an **nRF5340-DK + MAX30003 EVK** first (no PCB spin), port
+  the v1 firmware, validate wavelet + accel-referenced motion filtering, then lay
+  out the belt PCB.
