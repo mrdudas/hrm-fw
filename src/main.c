@@ -19,6 +19,7 @@
 #include <zephyr/drivers/adc.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/poweroff.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
@@ -193,44 +194,51 @@ static K_SEM_DEFINE(tick_sem, 0, 1);
 static void tick(struct k_timer *t) { k_sem_give(&tick_sem); }
 static K_TIMER_DEFINE(sample_timer, tick, NULL);
 
-/* ---- Low-power contact sniff (nRF52805 has no LPCOMP for analog wake) --
- * Off-body the electrode is flat (~239, p2p ~13); on-body it swings hugely.
- * We stop sampling + advertising and wake the CPU every 2 s for a short burst
- * to check for that swing, so average current stays in the tens-of-µA range. */
-#define ONBODY_P2P 200
+/* ---- SC7A20 accelerometer: motion-wake (I2C bit-bang, SCL=P0.16, SDA=P0.18,
+ * addr 0x19). Its INT1 pin is wired to nRF P0.14 (active-high). We arm a motion
+ * (any-axis high-g) latched interrupt, then sleep in System OFF and wake via the
+ * P0.14 GPIO SENSE -> true ~µA deep sleep, movement wakes it. */
+#define ACC_SCL 16
+#define ACC_SDA 18
+#define ACC_ADDR 0x19
+#define ACC_INT_PIN 14
+#define AD() k_busy_wait(6)
+static inline void a_scl_hi(void){ nrf_gpio_cfg_input(ACC_SCL, NRF_GPIO_PIN_PULLUP); }
+static inline void a_sda_hi(void){ nrf_gpio_cfg_input(ACC_SDA, NRF_GPIO_PIN_PULLUP); }
+static inline void a_sda_lo(void){ nrf_gpio_pin_clear(ACC_SDA); nrf_gpio_cfg_output(ACC_SDA); }
+static inline int  a_sda_rd(void){ return nrf_gpio_pin_read(ACC_SDA); }
+static inline void a_scl_hic(void){ a_scl_hi(); }
+static inline void a_scl_loc(void){ nrf_gpio_pin_clear(ACC_SCL); nrf_gpio_cfg_output(ACC_SCL); }
+static void a_st(void){ a_sda_hi(); a_scl_hic(); AD(); a_sda_lo(); AD(); a_scl_loc(); AD(); }
+static void a_sp(void){ a_sda_lo(); AD(); a_scl_hic(); AD(); a_sda_hi(); AD(); }
+static int a_wrb(uint8_t b){ for(int i=0;i<8;i++){(b&0x80)?a_sda_hi():a_sda_lo();AD();a_scl_hic();AD();a_scl_loc();AD();b<<=1;} a_sda_hi();AD();a_scl_hic();AD();int k=(a_sda_rd()==0);a_scl_loc();AD();return k; }
+static uint8_t a_rdb(int ack){ uint8_t v=0;a_sda_hi();for(int i=0;i<8;i++){v<<=1;a_scl_hic();AD();if(a_sda_rd())v|=1;a_scl_loc();AD();}ack?a_sda_lo():a_sda_hi();AD();a_scl_hic();AD();a_scl_loc();AD();a_sda_hi();return v; }
+static void acc_wr(uint8_t r,uint8_t v){ a_st();a_wrb((ACC_ADDR<<1)|0);a_wrb(r);a_wrb(v);a_sp(); }
+static uint8_t acc_rd(uint8_t r){ a_st();a_wrb((ACC_ADDR<<1)|0);a_wrb(r);a_st();a_wrb((ACC_ADDR<<1)|1);uint8_t v=a_rdb(0);a_sp();return v; }
 
-static bool require_offbody;   /* 3 h latch: must be removed before re-arming */
-
-static int sniff_p2p(void)
+static void accel_init_motion_int(void)
 {
-	int lo = 100000, hi = -100000;
-	for (int i = 0; i < 24; i++) {
-		if (adc_read_dt(&adc_ch, &adc_seq) == 0) {
-			if (adc_raw < lo) lo = adc_raw;
-			if (adc_raw > hi) hi = adc_raw;
-		}
-		k_msleep(4);
-	}
-	return hi - lo;
+	a_scl_hi(); a_sda_hi(); k_msleep(5);
+	acc_wr(0x20, 0x57);   /* CTRL1: 100Hz, XYZ on */
+	acc_wr(0x21, 0x01);   /* CTRL2: HPIS1 = high-pass filter on INT1 (removes gravity!) */
+	acc_wr(0x23, 0x08);   /* CTRL4: HR, +/-2g */
+	acc_wr(0x22, 0x40);   /* CTRL3: I1_IA1 -> INT1 pin */
+	acc_wr(0x24, 0x08);   /* CTRL5: latch INT1 */
+	acc_wr(0x32, 0x12);   /* INT1_THS: motion threshold (~290 mg dynamic) */
+	acc_wr(0x33, 0x00);   /* INT1_DURATION = 0 */
+	(void)acc_rd(0x26);   /* dummy read REFERENCE: reset the HP filter */
+	acc_wr(0x30, 0x2A);   /* INT1_CFG: OR of XH|YH|ZH (any-axis MOTION now) */
+	(void)acc_rd(0x31);   /* clear latch */
 }
 
-static void low_power_until_contact(void)
+static void enter_deep_sleep(void)
 {
 	bt_le_adv_stop();
-	k_timer_stop(&sample_timer);
 	led_off();
-	while (1) {
-		k_sleep(K_SECONDS(2));           /* CPU idles (~µA) */
-		bool onbody = sniff_p2p() > ONBODY_P2P;
-		if (require_offbody) {
-			if (!onbody) require_offbody = false;   /* removed -> re-arm */
-		} else if (onbody) {
-			break;                       /* worn -> wake up */
-		}
-	}
-	for (int i = 0; i < 2; i++) { led_on(); k_msleep(60); led_off(); k_msleep(120); }
-	k_work_submit(&adv_work);
-	k_timer_start(&sample_timer, K_NO_WAIT, K_USEC(1000000 / SAMPLE_HZ));
+	(void)acc_rd(0x31);   /* clear pending motion INT so P0.14 is low */
+	nrf_gpio_cfg_sense_input(ACC_INT_PIN, NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_SENSE_HIGH);
+	k_msleep(2);
+	sys_poweroff();       /* System OFF; P0.14 high (motion) wakes -> reboot */
 }
 
 int main(void)
@@ -243,6 +251,8 @@ int main(void)
 
 	nrf_gpio_cfg_output(LED_PIN);
 	for (int i = 0; i < 2; i++) { led_on(); k_msleep(60); led_off(); k_msleep(120); } /* wake blink */
+
+	accel_init_motion_int();   /* arm SC7A20 motion INT -> P0.14 for deep-sleep wake */
 
 	if (!adc_is_ready_dt(&adc_ch) || adc_channel_setup_dt(&adc_ch)) {
 		LOG_ERR("ADC setup failed");
@@ -277,15 +287,11 @@ int main(void)
 			rn = 0;
 		}
 
-		/* power management: low-power sniff if off-body or session > 3 h */
+		/* power management: deep sleep (System OFF) if off-body or session > 3 h;
+		 * SC7A20 motion INT on P0.14 wakes the chip -> reboot -> re-check for beats */
 		int64_t now = k_uptime_get();
-		bool offbody  = (now - last_beat_ms  > OFFBODY_MS);
-		bool too_long = (now - active_start  > MAX_ACTIVE_MS);
-		if (offbody || too_long) {
-			require_offbody = too_long;      /* 3 h -> must remove before restart */
-			low_power_until_contact();
-			active_start = k_uptime_get();   /* fresh session */
-			last_beat_ms = active_start;
+		if ((now - last_beat_ms > OFFBODY_MS) || (now - active_start > MAX_ACTIVE_MS)) {
+			enter_deep_sleep();   /* does not return */
 		}
 	}
 }
