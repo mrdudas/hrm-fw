@@ -102,6 +102,20 @@ BT_GATT_SERVICE_DEFINE(cap_svc,
 	BT_GATT_CCC(cap_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
 
+/* ---- Accelerometer data service: raw X/Y/Z (int16) + step count (u16) ---- */
+#define ACCS_SVC BT_UUID_128_ENCODE(0xa1b30001,0x0000,0x1000,0x8000,0x00805f9b34fb)
+#define ACCS_CHR BT_UUID_128_ENCODE(0xa1b30002,0x0000,0x1000,0x8000,0x00805f9b34fb)
+static struct bt_uuid_128 accs_svc_uuid = BT_UUID_INIT_128(ACCS_SVC);
+static struct bt_uuid_128 accs_chr_uuid = BT_UUID_INIT_128(ACCS_CHR);
+static uint8_t accs_ccc;
+static void accs_ccc_changed(const struct bt_gatt_attr *a, uint16_t v) { accs_ccc = (v == BT_GATT_CCC_NOTIFY); }
+BT_GATT_SERVICE_DEFINE(accs_svc,
+	BT_GATT_PRIMARY_SERVICE(&accs_svc_uuid),
+	BT_GATT_CHARACTERISTIC(&accs_chr_uuid.uuid, BT_GATT_CHRC_NOTIFY,
+			       BT_GATT_PERM_NONE, NULL, NULL, NULL),
+	BT_GATT_CCC(accs_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+);
+
 /* ---- Advertising ----------------------------------------------------- */
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -114,8 +128,9 @@ static void adv_work_fn(struct k_work *w)
 	LOG_INF("advertising %s", e ? "FAILED" : "started");
 }
 static K_WORK_DEFINE(adv_work, adv_work_fn);
+static void connected(struct bt_conn *c, uint8_t err) { if (!err) k_work_submit(&adv_work); }  /* keep advertising for a 2nd host */
 static void disconnected(struct bt_conn *c, uint8_t r) { k_work_submit(&adv_work); }
-BT_CONN_CB_DEFINE(conn_cb) = { .disconnected = disconnected };
+BT_CONN_CB_DEFINE(conn_cb) = { .connected = connected, .disconnected = disconnected };
 static void bt_ready(int e) { if (!e) k_work_submit(&adv_work); }
 
 /* ---- Power / status LED --------------------------------------------- */
@@ -241,6 +256,39 @@ static void enter_deep_sleep(void)
 	sys_poweroff();       /* System OFF; P0.14 high (motion) wakes -> reboot */
 }
 
+/* Read OUT_X/Y/Z (auto-increment) as three int16 (left-justified raw counts). */
+static int acc_read6(int16_t *xyz)
+{
+	a_st(); if (!a_wrb((ACC_ADDR << 1) | 0)) { a_sp(); return 0; }
+	a_wrb(0x28 | 0x80);   /* OUT_X_L, auto-increment */
+	a_st(); if (!a_wrb((ACC_ADDR << 1) | 1)) { a_sp(); return 0; }
+	uint8_t b[6];
+	for (int i = 0; i < 6; i++) b[i] = a_rdb(i < 5);
+	a_sp();
+	xyz[0] = (int16_t)(b[1] << 8 | b[0]);
+	xyz[1] = (int16_t)(b[3] << 8 | b[2]);
+	xyz[2] = (int16_t)(b[5] << 8 | b[4]);
+	return 1;
+}
+
+/* Simple pedometer: peak-detect the high-passed L1 acceleration magnitude. */
+static uint16_t step_count;
+static void step_update(int16_t x, int16_t y, int16_t z)
+{
+	static int32_t base; static bool armed = true; static int64_t last_ms;
+	static int warm;
+	int32_t m = (x < 0 ? -x : x) + (y < 0 ? -y : y) + (z < 0 ? -z : z);
+	if (warm < 50) { warm++; base = m; return; }   /* ~2 s: settle baseline, no counting */
+	base += (m - base) >> 6;              /* slow baseline (gravity)          */
+	int32_t hp = m - base;                /* dynamic component                */
+	int64_t now = k_uptime_get();
+	if (armed && hp > 3000 && (now - last_ms) > 300) {   /* step: peak + 300ms refractory */
+		step_count++; armed = false; last_ms = now;
+	} else if (hp < 1500) {
+		armed = true;
+	}
+}
+
 int main(void)
 {
 	uint8_t raw_buf[2 + RAW_BATCH * 2];
@@ -285,6 +333,22 @@ int main(void)
 				bt_gatt_notify(NULL, &cap_svc.attrs[2], raw_buf, sizeof(raw_buf));
 			}
 			rn = 0;
+		}
+
+		/* accelerometer: raw X/Y/Z + pedometer, streamed at ~25 Hz */
+		if ((sample_idx % 10) == 0) {
+			int16_t xyz[3];
+			if (acc_read6(xyz)) {
+				step_update(xyz[0], xyz[1], xyz[2]);
+				if (accs_ccc) {
+					uint8_t ab[8];
+					sys_put_le16(xyz[0], &ab[0]);
+					sys_put_le16(xyz[1], &ab[2]);
+					sys_put_le16(xyz[2], &ab[4]);
+					sys_put_le16(step_count, &ab[6]);
+					bt_gatt_notify(NULL, &accs_svc.attrs[2], ab, sizeof(ab));
+				}
+			}
 		}
 
 		/* power management: deep sleep (System OFF) if off-body or session > 3 h;
