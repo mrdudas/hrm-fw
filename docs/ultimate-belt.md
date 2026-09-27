@@ -98,6 +98,41 @@ MCU (that's why we pay for the FPU), so a cheap analog AFE is the right call.
   → v1 stays SWD-only, v2 is field-updatable.
 - Optional: LSM6DSOX **MLC** for onboard activity/gesture classification.
 
+## Standalone / offline extensions (GPS logger + wireless charge)
+Turns the belt into a self-contained tracker that records **even with no phone
+nearby**, timestamps everything, and charges wirelessly.
+
+### Added parts
+| Ref | Part | Role | Notes |
+|---|---|---|---|
+| U5 | **Macronix MX25R6435F** — 8 MB NOR (SPI/QSPI) | Log flash | Ultra-low-power (Nordic reference part). Offline HR/RR/accel/GPS logging; can also host the MCUboot 2nd slot / OTA staging. 8 MB ≈ 1000+ h of RR. |
+| U6 | **u-blox MAX-M10S** GNSS | GPS | One of the lowest-power multi-GNSS (~25 mW tracking); UART/I²C to the MCU + chip/patch antenna. |
+| U7 | **AB1805** (or PCF85063A) RTC | Real-time clock | Nanopower (~14 nA) RTC with battery backup → correct timestamps through a full power-off. *Alt:* discipline the nRF internal RTC from GPS/phone time (simpler, but loses time in System OFF). |
+| U8 | **BQ51013B** (or P9025AC) + Qi coil | Wireless charging | Qi receiver → 5 V → nPM1100 VBUS. Keep USB-C as fallback/data. |
+| BT1' | LiPo **300–500 mAh** | Battery (upsized) | GPS + logging need far more than a CR2032. |
+
+### Data flow
+```
+sensors (ECG / IMU / GPS) --timestamp(RTC)--> log to MX25R flash
+                                          \--> live BLE when a phone is near
+phone later: pull the flash log over BLE (SMP file-mgmt or a custom sync service)
+Qi coil -> BQ51013B -> 5V -> nPM1100 -> charge LiPo
+```
+
+### Honest caveats
+- **GPS on the chest is a poor spot** — the torso shadows ~half the sky and
+  clothing attenuates it, so fix/accuracy degrade vs a wrist/watch. It works, just
+  not great; if GPS quality matters, reconsider placement.
+- **Power**: GPS dominates the budget (tens of mA tracking) → needs the upsized
+  LiPo + **duty-cycling** (fix every N s, sleep between).
+- **Size**: LiPo + Qi coil + GPS antenna grow the pod — fine for a chest pod, but
+  no longer coin-cell-thin.
+- **MCU**: with GPS parsing + logging + DSP + BLE all at once, the **nRF5340**
+  (dual-core, 512 KB) is the comfortable pick over the nRF52840.
+- **Time**: GPS gives accurate UTC → discipline the RTC from it; the external
+  nanopower RTC only matters for correct time *before* the first fix after a full
+  power-off.
+
 ## Open decisions
 1. **Module vs bare nRF5340** — module (Raytac/Fanstel) is far easier for a first
    spin (no antenna/matching, certified); bare chip is smaller/cheaper at volume.
