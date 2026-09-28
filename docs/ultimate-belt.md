@@ -1,6 +1,6 @@
 # Ultimate Belt — v2 hardware design
 
-A ground-up successor to the reflashed Decathlon strap: a wearable **ECG + HRV +
+A ground-up successor to the reflashed HRM strap: a wearable **ECG + HRV +
 motion** platform strong enough for real signal processing (wavelet / accel-
 referenced adaptive filtering, on-device activity ML), while staying low power
 and BLE/ANT+ native. The current Zephyr firmware (HR/RR, raw ECG, accel, steps,

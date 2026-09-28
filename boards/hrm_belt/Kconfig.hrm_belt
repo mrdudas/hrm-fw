@@ -1,0 +1,2 @@
+config BOARD_HRM_BELT
+	select SOC_NRF52805_CAAA

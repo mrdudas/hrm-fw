@@ -4,8 +4,8 @@
 #include <zephyr/dt-bindings/adc/nrf-saadc.h>
 
 / {
-	model = "Decathlon HRM Belt (nRF52805)";
-	compatible = "decathlon,hrm";
+	model = "HRM Belt (nRF52805)";
+	compatible = "custom,hrm-belt";
 
 	chosen {
 		zephyr,sram = &sram0;

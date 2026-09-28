@@ -11,7 +11,7 @@ WEST=/home/zsolt/zephyr-venv/bin/west
 PROJ=/home/zsolt/hrm-fw
 
 cd "$PROJ"
-"$WEST" build -p auto -b decathlon_hrm --build-dir "$PROJ/build" "$PROJ" \
+"$WEST" build -p auto -b hrm_belt --build-dir "$PROJ/build" "$PROJ" \
 	-- -DBOARD_ROOT="$PROJ"
 
 echo

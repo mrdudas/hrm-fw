@@ -1,6 +1,6 @@
-# hrm-fw — custom firmware for a Decathlon HRM Belt (nRF52805)
+# hrm-fw — custom firmware for a HRM Belt (nRF52805)
 
-Open replacement firmware for the **Decathlon "HRM Belt" chest strap** (a Magene
+Open replacement firmware for the **"HRM Belt" chest strap** (a Magene
 OEM design built around a Nordic **nRF52805**). The stock firmware reports a
 **fake RR interval** (`RR = floor(60000 / HR)`), which is useless for HRV. This
 firmware measures and broadcasts the **true beat-to-beat RR interval** over the
@@ -36,7 +36,7 @@ dual-host connections.
 ## Repository layout
 ```
 src/               main firmware (HR/RR + raw ECG + accel/steps + power mgmt)
-boards/decathlon_hrm/   custom Zephyr board for the SoC nrf52805
+boards/hrm_belt/   custom Zephyr board for the SoC nrf52805
 capture/           raw-ECG-only streaming variant
 accel/  i2cscan/  intfind/  ledfind/   hardware bring-up / discovery apps
 tools/             pyOCD unlock + flash scripts, build helper
@@ -57,7 +57,7 @@ no target-VCC sense).
 ## Build
 ```bash
 # in a Zephyr environment (ZEPHYR_BASE set, SDK/toolchain available)
-west build -p auto -b decathlon_hrm --build-dir build . -- -DBOARD_ROOT=$PWD
+west build -p auto -b hrm_belt --build-dir build . -- -DBOARD_ROOT=$PWD
 # or: tools/BUILD.sh   (adjust the ZEPHYR_BASE / CROSS_COMPILE paths inside)
 ```
 

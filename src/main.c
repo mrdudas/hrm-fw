@@ -1,5 +1,5 @@
 /*
- * Decathlon HRM Belt (Magene OEM, nRF52805) — custom firmware
+ * HRM Belt (Magene OEM, nRF52805) — custom firmware
  *
  * Two capabilities in one image:
  *   1. Standard Heart Rate Service (0x180D) with the TRUE beat-to-beat RR

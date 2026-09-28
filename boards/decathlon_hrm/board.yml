@@ -1,6 +1,0 @@
-board:
-  name: decathlon_hrm
-  full_name: Decathlon HRM Belt (Magene nRF52805)
-  vendor: decathlon
-  socs:
-    - name: nrf52805

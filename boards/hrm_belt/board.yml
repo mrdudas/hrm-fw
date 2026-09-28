@@ -1,0 +1,6 @@
+board:
+  name: hrm_belt
+  full_name: HRM Belt (Magene nRF52805)
+  vendor: diy
+  socs:
+    - name: nrf52805
