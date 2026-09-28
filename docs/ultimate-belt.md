@@ -172,9 +172,22 @@ Qi coil -> BQ51013B -> 5V -> nPM1100 -> charge LiPo
    impedance-respiration.
 3. **LiPo + nPM1100 vs CR2032 + LDO** — rechargeable vs simplest.
 4. **Debug**: Tag-Connect footprint vs test pads.
-5. Keep **ANT+** (net core supports it) for the bike/rowing computers that speak it
-   — note: the old Mr. Rudolf rower needs **5 kHz analog**, which none of this
-   emits; that receiver is legacy-analog-only.
+5. **Legacy gym-equipment compatibility** — old rowers/treadmills/bikes read
+   **ANT+ or 5 kHz analog (Polar "GymLink")**, *not* BLE. (The stock strap firmware
+   spoke **ANT+**, which is why an old rower read it fine; our Zephyr firmware is
+   **BLE-only**, so those machines no longer see it. A Polar H9 works everywhere
+   because it emits BLE **+** ANT+ **+** 5 kHz.) Two ways to add it:
+   - **5 kHz analog**: a small coil + driver, pulsed once per detected R-wave —
+     **SoftDevice-free, stays on Zephyr**, and reads on the widest range of legacy
+     analog gym gear. *(simplest)*
+   - **ANT+**: needs Nordic/Garmin's proprietary ANT stack. Two possible routes —
+     the legacy **nRF5 SDK + ANT SoftDevice (S212/S312)**, or (modern, keeps the
+     Zephyr app/kernel) **nRF Connect SDK** with the closed **SoftDevice Controller
+     + MPSL** time-slotting ANT alongside BLE. **⚠️ Whether NCS actually ships an
+     ANT stack — and on which parts — is unverified; confirm against current Nordic
+     docs before committing to it.** Either route needs an ANT licence, won't fit
+     the nRF52805 (RAM), and ANT is being sunset by Garmin → only worth it for
+     ANT+-only targets. The **5 kHz analog** coil above is the licence-free path.
 
 ## Next steps
 - Pick module vs bare + AFE choice → freeze the core BOM.
