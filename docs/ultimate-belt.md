@@ -14,6 +14,37 @@ motion-wake, dual connection) ports over almost unchanged.
 - Rechargeable (LiPo + USB-C), or a coin-cell variant.
 - Reuse the fabric chest-strap electrodes.
 
+## Product tiers
+Two products on the **same firmware base + toolchain**; they differ in AFE,
+storage, isolation and power.
+
+### Tier C — Civilian / fitness (cheap: accurate HR + logging)
+Wellness HR/HRV + offline activity logging. Floating battery = inherently safe →
+**no galvanic isolation**; Qi charge.
+- MCU **nRF52840** · AFE **AD8232** (analog → MCU SAADC) · IMU **LSM6DSO**
+- Log flash **MX25R 8 MB** — *event/summary* logging (RR, HR, steps, GPS track)
+- **RTC** (nRF internal, GPS/phone-disciplined) · **Qi** + optional USB-C
+- The DSP (notch/bandpass/wavelet) lives in firmware, so the cheap analog AFE is fine.
+
+### Tier PRO — Clinical Holter (isolated, real ECG, 24-48 h)
+Medical-grade **raw ECG** recorded continuously for a fixed 24-48 h session, USB
+readout, **galvanic isolation**.
+- MCU **nRF5340** · AFE **ADS1292R** (2-ch, 24-bit) *or* **MAX30003** (1-ch)
+- **Galvanic isolation of the AFE island**: an isoPower digital isolator
+  (**ADuM6401** / **TI ISOW7841**) crosses the SPI **and** the isolated supply;
+  AFE + electrodes sit on the isolated side (favors the *digital* AFE — an analog
+  AFE would need an ADC on the isolated side or an isolation amplifier). Designed
+  to the intent of **IEC 60601-1** patient isolation if certified. PCB: barrier
+  cut-out + creepage/clearance under the isolator.
+- **Full-ECG (Holter) logging** — raw waveform for the whole session:
+  - Sizing: 1 ch @ 250 Hz × 16-bit ≈ **0.5 MB/min → ~86 MB / 48 h** (×2 for 2-ch or
+    512 Hz); ~30-40 MB losslessly compressed.
+  - Storage: **large NAND (512 Mb-1 Gb)** for a sealed unit, or a **microSD**
+    (removable — clinician pulls the card). *8 MB NOR is not enough for raw Holter.*
+- **USB-C** for offload + (isolated) charging · **RTC** timestamps the session ·
+  **24-48 h session timer**: start → record continuously → auto-stop, with event
+  markers.
+
 ## Block diagram
 ```mermaid
 flowchart LR
