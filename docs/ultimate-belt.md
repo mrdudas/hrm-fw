@@ -180,14 +180,13 @@ Qi coil -> BQ51013B -> 5V -> nPM1100 -> charge LiPo
    - **5 kHz analog**: a small coil + driver, pulsed once per detected R-wave —
      **SoftDevice-free, stays on Zephyr**, and reads on the widest range of legacy
      analog gym gear. *(simplest)*
-   - **ANT+**: needs Nordic/Garmin's proprietary ANT stack. Two possible routes —
-     the legacy **nRF5 SDK + ANT SoftDevice (S212/S312)**, or (modern, keeps the
-     Zephyr app/kernel) **nRF Connect SDK** with the closed **SoftDevice Controller
-     + MPSL** time-slotting ANT alongside BLE. **⚠️ Whether NCS actually ships an
-     ANT stack — and on which parts — is unverified; confirm against current Nordic
-     docs before committing to it.** Either route needs an ANT licence, won't fit
-     the nRF52805 (RAM), and ANT is being sunset by Garmin → only worth it for
-     ANT+-only targets. The **5 kHz analog** coil above is the licence-free path.
+   - **ANT+**: **available in nRF Connect SDK** (verified — ANT landed in `sdk-nrf`
+     **v2.6, ~Mar 2024**, for the **nRF52840**), running via the closed **SoftDevice
+     Controller + MPSL** concurrently with BLE, so it **keeps the Zephyr app/kernel**
+     — no nRF5 SDK needed. Check the current per-part support matrix (the nRF52805
+     isn't a target and wouldn't fit anyway). Caveats: needs an **ANT licence** and
+     Garmin is **sunsetting ANT**, so weigh it. The **5 kHz analog** coil above is
+     the licence-free alternative for legacy gym gear.
 
 ## Next steps
 - Pick module vs bare + AFE choice → freeze the core BOM.
