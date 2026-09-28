@@ -13,9 +13,9 @@
 		zephyr,code-partition = &slot0_partition;
 	};
 
-	/* Heartbeat analog input: RS8034 op-amp output -> P0.05 / AIN3 (ball F6) */
+	/* [0] heartbeat analog input (AIN3/F6); [1] VDD for battery level */
 	zephyr_user: zephyr,user {
-		io-channels = <&adc 3>;
+		io-channels = <&adc 3>, <&adc 1>;
 	};
 };
 
@@ -32,6 +32,16 @@
 		zephyr,input-positive = <NRF_SAADC_AIN3>;   /* AIN3 = P0.05 = ball F6 */
 		zephyr,resolution = <12>;
 		zephyr,oversampling = <2>;
+	};
+
+	/* VDD (battery) measurement: gain 1/6, internal 0.6 V ref -> 0..3.6 V range */
+	channel@1 {
+		reg = <1>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 20)>;
+		zephyr,input-positive = <NRF_SAADC_VDD>;
+		zephyr,resolution = <12>;
 	};
 };
 

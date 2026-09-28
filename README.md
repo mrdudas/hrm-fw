@@ -19,6 +19,7 @@ dual-host connections.
 - ✅ **Motion-wake deep sleep** — off-body → System OFF (~µA); movement wakes it.
 - ✅ **Two simultaneous BLE hosts** (e.g. a phone and a bike/rowing computer).
 - ✅ **Status LED** (wake blink + heartbeat pulse).
+- ✅ **Battery Service (0x180F)** — battery % from the measured VDD.
 - ✅ Clean QRS detector: **50 Hz notch + 8–22 Hz band-pass + adaptive threshold**.
 
 ## The device (reverse-engineered hardware map)
@@ -81,6 +82,7 @@ Advertises as **`HRM Raw RR`** (up to 2 simultaneous connections).
 |---|---|---|
 | Heart Rate Measurement | `0x2A37` | flags + HR (u8) + **RR (u16, 1/1024 s)** |
 | Body Sensor Location | `0x2A38` | `0x01` (chest) |
+| Battery Level | `0x2A19` (Battery Service `0x180F`) | battery % from VDD (CR2032, coarse) |
 | Raw ECG (custom) | `a1b20002-…` | seq (u16) + 20× ECG samples (i16, 250 Hz) |
 | Accel + steps (custom) | `a1b30002-…` | X,Y,Z (i16) + steps (u16), ~25 Hz |
 

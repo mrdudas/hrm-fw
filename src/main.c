@@ -25,6 +25,7 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
+#include <zephyr/bluetooth/services/bas.h>
 #include <hal/nrf_gpio.h>
 
 LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
@@ -53,11 +54,35 @@ static const float BP_b[] = {0.02463061f, 0.0f, -0.04926122f, 0.0f, 0.02463061f}
 static const float BP_a[] = {1.0f, -3.31428620f, 4.28994755f, -2.57411291f, 0.60810569f};
 
 /* ---- ADC (AIN3 = P0.05 = ball F6) ------------------------------------ */
-static const struct adc_dt_spec adc_ch = ADC_DT_SPEC_GET(DT_PATH(zephyr_user));
+static const struct adc_dt_spec adc_ch =
+	ADC_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user), 0);
 static int16_t adc_raw;
 static struct adc_sequence adc_seq = {
 	.buffer = &adc_raw, .buffer_size = sizeof(adc_raw),
 };
+
+/* VDD channel for the Battery Service */
+static const struct adc_dt_spec adc_vdd =
+	ADC_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user), 1);
+static int16_t vdd_raw;
+static struct adc_sequence vdd_seq = {
+	.buffer = &vdd_raw, .buffer_size = sizeof(vdd_raw),
+};
+
+/* Read VDD, map a CR2032 (~2.4 V empty .. 3.0 V full) to % and publish via BAS. */
+static void battery_update(void)
+{
+	if (adc_read_dt(&adc_vdd, &vdd_seq) != 0) {
+		return;
+	}
+	int32_t mv = vdd_raw;
+	if (adc_raw_to_millivolts_dt(&adc_vdd, &mv) != 0) {
+		return;
+	}
+	int32_t pct = (mv - 2400) * 100 / 600;
+	pct = CLAMP(pct, 0, 100);
+	bt_bas_set_battery_level((uint8_t)pct);
+}
 
 /* ---- Heart Rate Service (real RR) ------------------------------------ */
 static uint8_t hrm_ccc;
@@ -307,6 +332,9 @@ int main(void)
 		return -1;
 	}
 	adc_sequence_init_dt(&adc_ch, &adc_seq);
+	if (adc_is_ready_dt(&adc_vdd) && adc_channel_setup_dt(&adc_vdd) == 0) {
+		adc_sequence_init_dt(&adc_vdd, &vdd_seq);   /* battery (VDD) channel */
+	}
 	if (bt_enable(bt_ready)) {
 		LOG_ERR("bt_enable failed");
 		return -1;
@@ -349,6 +377,11 @@ int main(void)
 					bt_gatt_notify(NULL, &accs_svc.attrs[2], ab, sizeof(ab));
 				}
 			}
+		}
+
+		/* battery level (VDD) -> Battery Service, first at ~1 s then every ~10 s */
+		if (sample_idx % 2500 == 250) {
+			battery_update();
 		}
 
 		/* power management: deep sleep (System OFF) if off-body or session > 3 h;
