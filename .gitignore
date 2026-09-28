@@ -10,3 +10,4 @@ __pycache__/
 host/venv/
 # runtime dumps
 dump/
+assets/
