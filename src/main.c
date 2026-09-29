@@ -37,7 +37,9 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 #define RR_MAX_MS      2000
 #define ENV_DECAY      0.9960f        /* energy envelope decay per sample     */
 #define THRESH_FRAC    0.35f          /* threshold = fraction of envelope     */
-#define WARMUP_SAMPLES (SAMPLE_HZ * 2)/* let IIR filters settle (~2 s)        */
+#define WARMUP_SAMPLES (SAMPLE_HZ * 8)/* let the AC-coupled ECG front-end settle
+                                        * after power-on/wake (~7 s transient) +
+                                        * IIR filter settle, before detecting     */
 #define RAW_BATCH      20             /* raw samples per BLE notification      */
 #define TWAVE_MS       360            /* T-wave window after a QRS (Pan-Tompkins) */
 #define TWAVE_FRAC     0.5f           /* peak in that window below this*QRS energy = T-wave */
