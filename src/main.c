@@ -187,46 +187,66 @@ static uint8_t hr_from_rr(uint16_t rr_ms)
 	return (avg >= RR_MIN_MS) ? (uint8_t)(60000U / avg) : 0;
 }
 
+/* Pan-Tompkins-style adaptive QRS detector on the band-passed energy signal.
+ * Instead of a single decaying peak-envelope (which one motion spike could pin
+ * high for ~1 s, hiding the next real beats -> HR reads ~half at high rates),
+ * we keep separate running estimates of the SIGNAL peak (SPKI) and NOISE peak
+ * (NPKI). A spike moves each by only 12.5 %, so it can't poison the threshold.
+ * Search-back lowers the bar if we've waited longer than 1.66x the average RR. */
 static void detector_feed(int16_t sample)
 {
 	static float notch_z[2], bp_z[4];
-	static float env = 1.0f;
-	static bool  armed = true;
-	static uint32_t last_cyc, warm;
+	static float spki, npki;            /* running signal / noise peak estimates */
+	static float prev_energy, cand_peak;/* local-maximum tracking                */
+	static bool  rising;
+	static uint32_t last_cyc, rr_avg_cyc, warm;
 	static bool  have_last;
 
 	float yn = iir(NOTCH_b, NOTCH_a, notch_z, 3, (float)sample);
 	float yb = iir(BP_b, BP_a, bp_z, 5, yn);
 	float energy = yb * yb;
 
-	/* envelope of the QRS energy: fast attack, slow decay */
-	if (energy > env) env = energy; else env *= ENV_DECAY;
+	if (warm < WARMUP_SAMPLES) { warm++; prev_energy = energy; return; }
 
-	if (warm < WARMUP_SAMPLES) { warm++; return; }
-
-	float thresh = env * THRESH_FRAC;
-	uint32_t now = k_cycle_get_32();
+	uint32_t now  = k_cycle_get_32();
 	uint32_t refr = (uint64_t)cyc_per_sec * REFRACTORY_MS / 1000;
-	bool in_refr = have_last && (now - last_cyc) < refr;
 
-	if (armed && !in_refr && energy > thresh && env > 50.0f /* noise floor */) {
-		armed = false;
-		last_beat_ms = k_uptime_get();          /* on-body indicator */
-		led_on(); led_off_idx = sample_idx + LED_PULSE_N;  /* heartbeat blink */
-		if (have_last) {
-			uint32_t d = now - last_cyc;
-			uint32_t rr_ms = (uint64_t)d * 1000 / cyc_per_sec;
-			if (rr_ms >= RR_MIN_MS && rr_ms <= RR_MAX_MS) {
-				uint16_t rr_1024 = (uint16_t)((uint64_t)d * 1024 / cyc_per_sec);
-				uint8_t hr = hr_from_rr(rr_ms);
-				LOG_INF("beat RR=%u HR=%u", rr_ms, hr);
-				hrm_notify(hr, rr_1024);
-			}
-		}
-		last_cyc = now; have_last = true;
-	} else if (energy < thresh * 0.5f) {
-		armed = true;
+	/* adaptive threshold; relax toward NPKI (search-back) if a beat is overdue */
+	float k = 0.25f;
+	if (have_last && rr_avg_cyc && (now - last_cyc) > (uint64_t)rr_avg_cyc * 166 / 100) {
+		k = 0.125f;
 	}
+	float thresh = npki + k * (spki - npki);
+
+	/* detect the local maximum of the energy signal (rise then fall) */
+	if (energy > prev_energy) {
+		rising = true;
+		if (energy > cand_peak) cand_peak = energy;
+	} else if (rising && energy < prev_energy) {
+		rising = false;
+		bool in_refr = have_last && (now - last_cyc) < refr;
+		if (!in_refr && cand_peak > thresh && cand_peak > 50.0f /* noise floor */) {
+			last_beat_ms = k_uptime_get();          /* on-body indicator */
+			led_on(); led_off_idx = sample_idx + LED_PULSE_N;  /* heartbeat blink */
+			if (have_last) {
+				uint32_t d = now - last_cyc;
+				uint32_t rr_ms = (uint64_t)d * 1000 / cyc_per_sec;
+				if (rr_ms >= RR_MIN_MS && rr_ms <= RR_MAX_MS) {
+					uint16_t rr_1024 = (uint16_t)((uint64_t)d * 1024 / cyc_per_sec);
+					uint8_t hr = hr_from_rr(rr_ms);
+					LOG_INF("beat RR=%u HR=%u", rr_ms, hr);
+					hrm_notify(hr, rr_1024);
+					rr_avg_cyc = rr_avg_cyc ? (rr_avg_cyc * 7 + d) / 8 : d;
+				}
+			}
+			last_cyc = now; have_last = true;
+			spki = 0.125f * cand_peak + 0.875f * spki;  /* signal peak update */
+		} else if (!in_refr) {
+			npki = 0.125f * cand_peak + 0.875f * npki;  /* noise peak update  */
+		}
+		cand_peak = 0.0f;
+	}
+	prev_energy = energy;
 }
 
 /* ---- Sampling loop --------------------------------------------------- */
