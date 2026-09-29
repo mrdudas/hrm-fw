@@ -39,6 +39,8 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 #define THRESH_FRAC    0.35f          /* threshold = fraction of envelope     */
 #define WARMUP_SAMPLES (SAMPLE_HZ * 2)/* let IIR filters settle (~2 s)        */
 #define RAW_BATCH      20             /* raw samples per BLE notification      */
+#define TWAVE_MS       360            /* T-wave window after a QRS (Pan-Tompkins) */
+#define TWAVE_FRAC     0.5f           /* peak in that window below this*QRS energy = T-wave */
 
 /* Power / status LED */
 #define LED_PIN        4                  /* P0.04, active-high status LED     */
@@ -198,6 +200,7 @@ static void detector_feed(int16_t sample)
 	static float notch_z[2], bp_z[4];
 	static float spki, npki;            /* running signal / noise peak estimates */
 	static float prev_energy, cand_peak;/* local-maximum tracking                */
+	static float last_qrs_peak;         /* energy of the last accepted QRS       */
 	static bool  rising;
 	static uint32_t last_cyc, rr_avg_cyc, warm;
 	static bool  have_last;
@@ -225,7 +228,14 @@ static void detector_feed(int16_t sample)
 	} else if (rising && energy < prev_energy) {
 		rising = false;
 		bool in_refr = have_last && (now - last_cyc) < refr;
-		if (!in_refr && cand_peak > thresh && cand_peak > 50.0f /* noise floor */) {
+		/* T-wave rejection: a peak soon after a QRS whose energy is well below the
+		 * last QRS is the T-wave, not a beat. The band-pass already suppresses the
+		 * T-wave, so its energy is a small fraction of a real QRS. Rejecting it also
+		 * stops it from arming the refractory and masking the true next QRS. */
+		uint32_t twin = (uint64_t)cyc_per_sec * TWAVE_MS / 1000;
+		bool twave = have_last && (now - last_cyc) < twin &&
+			     cand_peak < TWAVE_FRAC * last_qrs_peak;
+		if (!in_refr && !twave && cand_peak > thresh && cand_peak > 50.0f /* noise floor */) {
 			last_beat_ms = k_uptime_get();          /* on-body indicator */
 			led_on(); led_off_idx = sample_idx + LED_PULSE_N;  /* heartbeat blink */
 			if (have_last) {
@@ -240,6 +250,7 @@ static void detector_feed(int16_t sample)
 				}
 			}
 			last_cyc = now; have_last = true;
+			last_qrs_peak = cand_peak;                  /* remember QRS energy for T-wave test */
 			spki = 0.125f * cand_peak + 0.875f * spki;  /* signal peak update */
 		} else if (!in_refr) {
 			npki = 0.125f * cand_peak + 0.875f * npki;  /* noise peak update  */
