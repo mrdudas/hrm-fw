@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HRM Raw RR — Live Dashboard</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo">&#9829;</span>
+    <span>HRM Raw RR — Live Dashboard</span>
+  </div>
+  <div class="header-right">
+    <div id="battery" class="battery">
+      <span class="batt-label">Battery</span>
+      <div class="batt-bar"><div id="batt-fill" class="batt-fill"></div></div>
+      <span id="batt-pct" class="batt-pct">--%</span>
+    </div>
+    <div id="status" class="status status-off">
+      <span class="dot"></span><span id="status-text">connecting…</span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <!-- top row: vitals -->
+  <section class="row vitals">
+    <div class="card kpi">
+      <div class="kpi-label">Heart Rate</div>
+      <div class="kpi-value"><span id="hr">--</span><span class="unit">bpm</span></div>
+      <div class="kpi-sub">contact: <span id="contact">n/a</span></div>
+    </div>
+    <div class="card kpi">
+      <div class="kpi-label">RR interval</div>
+      <div class="kpi-value"><span id="rr">--</span><span class="unit">ms</span></div>
+      <div class="kpi-sub">latest beat-to-beat</div>
+    </div>
+    <div class="card kpi">
+      <div class="kpi-label">Steps</div>
+      <div class="kpi-value"><span id="steps">0</span></div>
+      <div class="kpi-sub">accelerometer</div>
+    </div>
+    <div class="card kpi">
+      <div class="kpi-label">Ectopy burden</div>
+      <div class="kpi-value"><span id="burden">0.0</span><span class="unit">%</span></div>
+      <div class="kpi-sub"><span id="total-beats">0</span> beats analysed</div>
+    </div>
+  </section>
+
+  <!-- unified strip: ECG + accel X/Y/Z + RR on one shared time axis (EEG-style) -->
+  <section class="card wide">
+    <div class="card-head">
+      <h2>Live strip</h2>
+      <span class="hint">ECG · Accel X/Y/Z · RR — last 6 s, one time axis</span>
+    </div>
+    <div id="strip-chart" class="chart-strip"></div>
+  </section>
+
+  <!-- signal-averaged beat (ensemble average, R-aligned) -->
+  <section class="card wide">
+    <div class="card-head">
+      <h2>Signal-averaged beat</h2>
+      <span class="hint">
+        R-aligned average of last
+        <input id="avg-n" type="number" min="5" max="300" step="5" value="50" class="avg-n">
+        beats · <span id="avg-count">0</span> collected
+      </span>
+    </div>
+    <div id="avg-chart" class="chart-avg"></div>
+  </section>
+
+  <!-- ectopy -->
+  <section class="card wide">
+    <div class="card-head"><h2>Ectopy / extrasystoles</h2><span class="hint">PVC / PAC / artifact</span></div>
+    <div class="ectopy-body">
+      <div class="ecto-counts">
+        <div class="ecto-count pvc"><div class="ec-n" id="pvc">0</div><div class="ec-l">PVC</div></div>
+        <div class="ecto-count pac"><div class="ec-n" id="pac">0</div><div class="ec-l">PAC</div></div>
+        <div class="ecto-count art"><div class="ec-n" id="artifact">0</div><div class="ec-l">Artifact</div></div>
+      </div>
+      <div class="ecto-log-wrap">
+        <div class="ecto-log-head">Recent events</div>
+        <div id="ecto-log" class="ecto-log"><div class="ecto-empty">no ectopic beats yet</div></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  Data is being written to <code>recordings/*.csv</code>. Reloading this page reconnects automatically.
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

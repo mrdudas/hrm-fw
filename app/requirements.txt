@@ -1,0 +1,6 @@
+# HRM Raw RR dashboard + recorder
+bleak>=0.22.0     # cross-platform BLE (CoreBluetooth / BlueZ / WinRT)
+aiohttp>=3.9.0    # local web server + WebSocket, runs in the same asyncio loop
+
+# Note: numpy/scipy/matplotlib are NOT required by the app itself
+# (the browser does the plotting via uPlot + Plotly from a CDN).

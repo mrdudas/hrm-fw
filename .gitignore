@@ -11,3 +11,14 @@ host/venv/
 # runtime dumps
 dump/
 assets/
+
+# desktop app runtime + local venvs
+app/recordings/
+app/**/__pycache__/
+.venv/
+# host diagnostic captures (test data, not source)
+host/*.csv
+host/*.png
+host/hrlog.json
+# local firmware restore points
+restore-*.hex
