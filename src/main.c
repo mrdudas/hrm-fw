@@ -52,8 +52,9 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 
 /* Power / status LED */
 #define LED_PIN        4                  /* P0.04, active-high status LED     */
-#define AFE_EN_PIN     12                 /* P0.12: AFE (RS8034) enable, active-high,
-                                           * no external pull-up -> must be driven.  */
+#define CONTACT_PIN    12                 /* P0.12: AFE lead-off/CONTACT status output
+                                           * (high = on-body, low = off-body). It self-
+                                           * gates the AFE -> READ ONLY, never drive it. */
 #define OFFBODY_MS     60000              /* no beat this long -> deep sleep    */
 #define MAX_ACTIVE_MS  (3LL*60*60*1000)   /* 3 h max session -> deep sleep      */
 #define LED_PULSE_N    3                  /* ~12 ms LED pulse per beat (energy-saving) */
@@ -411,7 +412,8 @@ static void enter_deep_sleep(void)
 {
 	bt_le_adv_stop();
 	led_off();
-	nrf_gpio_pin_clear(AFE_EN_PIN); nrf_gpio_cfg_output(AFE_EN_PIN);   /* AFE OFF -> save supply current in System OFF (level retained) */
+	/* no need to touch P0.12: off-body its contact line is already low, so the AFE
+	 * self-gates off (the front end powers down without us forcing anything). */
 	(void)acc_rd(0x31);   /* clear pending motion INT so P0.14 is low */
 	nrf_gpio_cfg_sense_input(ACC_INT_PIN, NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_SENSE_HIGH);
 	k_msleep(2);
@@ -460,9 +462,10 @@ int main(void)
 	LOG_INF("HRM raw-RR+ECG firmware boot");
 
 	nrf_gpio_cfg_output(LED_PIN);
-	/* AFE enable: no external pull-up, so drive P0.12 HIGH to keep the AFE on.
-	 * Deep sleep drives it LOW to disable the AFE and save its supply current. */
-	nrf_gpio_pin_set(AFE_EN_PIN); nrf_gpio_cfg_output(AFE_EN_PIN);
+	/* P0.12 is the AFE's lead-off/contact status (high=on-body); it self-gates the
+	 * AFE. READ it, never drive it — driving it high forced the AFE on off-body and
+	 * made the front end oscillate. Off-body it goes low -> AFE off -> no oscillation. */
+	nrf_gpio_cfg_input(CONTACT_PIN, NRF_GPIO_PIN_NOPULL);
 	for (int i = 0; i < 2; i++) { led_on(); k_msleep(60); led_off(); k_msleep(120); } /* wake blink */
 
 	accel_init_motion_int();   /* arm SC7A20 motion INT -> P0.14 for deep-sleep wake */
