@@ -12,14 +12,14 @@ from bleak import BleakClient, BleakScanner
 ADDR = "D7:CD:02:7A:05:33"
 NAME = "HRM Raw RR"
 ECT  = "a1b40002-0000-1000-8000-00805f9b34fb"
-TYPES = {0: "-", 1: "PVC", 2: "PAC"}
+TYPES = {0: "-", 1: "PVC", 2: "PAC", 3: "ART"}
 
 def show(data, tag):
-    t, fl, coup, pause, pvc, pac, tot = struct.unpack("<BBHHHHH", bytes(data))
+    t, fl, coup, pause, pvc, pac, art, tot = struct.unpack("<BBHHHHHH", bytes(data))
     burden = (100.0 * (pvc + pac) / tot) if tot else 0.0
     print(f"{time.strftime('%H:%M:%S')} {tag} type={TYPES.get(t,t):3} "
           f"coupling={coup:4}ms pause={pause:4}ms | PVC={pvc} PAC={pac} "
-          f"total={tot} burden={burden:.1f}%", flush=True)
+          f"ART={art} total={tot} burden={burden:.1f}%", flush=True)
 
 async def main(dur):
     d = None

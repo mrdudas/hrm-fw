@@ -41,6 +41,7 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 #define RAW_BATCH      20             /* raw samples per BLE notification      */
 #define TWAVE_MS       360            /* T-wave window after a QRS (Pan-Tompkins) */
 #define TWAVE_FRAC     0.5f           /* peak in that window below this*QRS energy = T-wave */
+#define SNR_GATE       8.0f           /* classify ectopy only when spki > this*npki (clean signal) */
 
 /* Power / status LED */
 #define LED_PIN        4                  /* P0.04, active-high status LED     */
@@ -143,6 +144,50 @@ BT_GATT_SERVICE_DEFINE(accs_svc,
 	BT_GATT_CCC(accs_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
 
+/* ---- Ectopy (extrasystole) service (custom) --------------------------
+ * Classifies each premature beat using timing + QRS energy (morphology).
+ * Does NOT touch the Heart Rate Service or the detection flow: the standard
+ * HR/RR stream stays exactly as the validated step1 build; only this extra
+ * characteristic carries the classification, so a bug here can't corrupt HR.
+ *   type 1 = PVC-like   (premature, normal/high QRS energy, ~full compensatory pause)
+ *   type 2 = PAC-like   (premature, normal/high QRS energy, reset/short pause)
+ *   type 3 = ARTIFACT   (premature but LOW QRS energy -> HRV should drop it)
+ * Value (LE, 14 B): u8 type, u8 flags, u16 coupling_ms, u16 pause_ms,
+ *   u16 pvc_count, u16 pac_count, u16 artifact_count, u16 total_beats. read+notify. */
+#define ECT_SVC BT_UUID_128_ENCODE(0xa1b40001,0x0000,0x1000,0x8000,0x00805f9b34fb)
+#define ECT_CHR BT_UUID_128_ENCODE(0xa1b40002,0x0000,0x1000,0x8000,0x00805f9b34fb)
+static struct bt_uuid_128 ect_svc_uuid = BT_UUID_INIT_128(ECT_SVC);
+static struct bt_uuid_128 ect_chr_uuid = BT_UUID_INIT_128(ECT_CHR);
+static uint8_t  ect_ccc;
+static uint8_t  ect_buf[14];
+static uint16_t pvc_count, pac_count, artifact_count, beat_total;
+static void ect_ccc_changed(const struct bt_gatt_attr *a, uint16_t v) { ect_ccc = (v == BT_GATT_CCC_NOTIFY); }
+static ssize_t read_ect(struct bt_conn *c, const struct bt_gatt_attr *a, void *buf, uint16_t len, uint16_t off)
+{
+	return bt_gatt_attr_read(c, a, buf, len, off, ect_buf, sizeof(ect_buf));
+}
+BT_GATT_SERVICE_DEFINE(ect_svc,
+	BT_GATT_PRIMARY_SERVICE(&ect_svc_uuid),
+	BT_GATT_CHARACTERISTIC(&ect_chr_uuid.uuid, BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_READ,
+			       BT_GATT_PERM_READ, read_ect, NULL, NULL),
+	BT_GATT_CCC(ect_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+);
+static void ect_stats_to_buf(void)
+{
+	sys_put_le16(pvc_count,      &ect_buf[6]);
+	sys_put_le16(pac_count,      &ect_buf[8]);
+	sys_put_le16(artifact_count, &ect_buf[10]);
+	sys_put_le16(beat_total,     &ect_buf[12]);
+}
+static void ect_notify(uint8_t type, uint16_t coupling_ms, uint16_t pause_ms)
+{
+	ect_buf[0] = type; ect_buf[1] = 0;
+	sys_put_le16(coupling_ms, &ect_buf[2]);
+	sys_put_le16(pause_ms,    &ect_buf[4]);
+	ect_stats_to_buf();
+	if (ect_ccc) bt_gatt_notify(NULL, &ect_svc.attrs[2], ect_buf, sizeof(ect_buf));
+}
+
 /* ---- Advertising ----------------------------------------------------- */
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -204,6 +249,11 @@ static void detector_feed(int16_t sample)
 	static bool  rising;
 	static uint32_t last_cyc, rr_avg_cyc, warm;
 	static bool  have_last;
+	/* extrasystole classification (1-beat look-ahead; only feeds the ectopy
+	 * characteristic, never the HR/RR stream) */
+	static uint32_t sinus_rr_ms, pend_coupling;
+	static float    pend_energy;
+	static bool     pend_prem;
 
 	float yn = iir(NOTCH_b, NOTCH_a, notch_z, 3, (float)sample);
 	float yb = iir(BP_b, BP_a, bp_z, 5, yn);
@@ -247,6 +297,40 @@ static void detector_feed(int16_t sample)
 					LOG_INF("beat RR=%u HR=%u", rr_ms, hr);
 					hrm_notify(hr, rr_1024);
 					rr_avg_cyc = rr_avg_cyc ? (rr_avg_cyc * 7 + d) / 8 : d;
+
+					/* --- extrasystole classification (ectopy char only) ---
+					 * 1-beat look-ahead: hold a premature beat until the next
+					 * beat reveals its pause. Timing = premature + compensatory;
+					 * QRS ENERGY separates a real ectopic (normal/high energy)
+					 * from an artifact (low energy). Gated on a clean signal. */
+					beat_total++;
+					uint32_t mean = sinus_rr_ms ? sinus_rr_ms : rr_ms;
+					bool cur_prem = sinus_rr_ms && rr_ms < (mean * 4) / 5;
+					bool clean = spki > SNR_GATE * npki;
+					bool used_pause = false;
+					if (clean && pend_prem) {
+						uint32_t sum = pend_coupling + rr_ms;
+						uint8_t type;
+						if (pend_energy < 0.5f * spki) {
+							type = 3; artifact_count++;
+						} else if (sum >= (mean * 9) / 5) {
+							type = 1; pvc_count++;
+						} else {
+							type = 2; pac_count++;
+						}
+						ect_notify(type, (uint16_t)pend_coupling, rr_ms);
+						used_pause = true;
+					}
+					pend_prem = false;
+					if (clean && cur_prem) {
+						pend_prem = true;
+						pend_coupling = rr_ms;
+						pend_energy = cand_peak;
+					} else if (!cur_prem && !used_pause) {
+						sinus_rr_ms = sinus_rr_ms ?
+							(sinus_rr_ms * 7 + rr_ms) / 8 : rr_ms;
+					}
+					ect_stats_to_buf();
 				}
 			}
 			last_cyc = now; have_last = true;
