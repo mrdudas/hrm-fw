@@ -41,31 +41,30 @@
     rrTs.push(t); rrVals.push(Math.round(ms));
     while (rrTs.length && rrTs[0] < t - WIN - 1) { rrTs.shift(); rrVals.shift(); }
     pendingBeats.push(t);   // queue this beat for the signal-average
+    setTimeout(() => snapBeatDot(t), 150); // snap the red dot once (ECG data settled)
   }
 
-  // red dots on the ECG lane at each detected beat, snapped to the real R peak
-  // in the ECG buffer (auto-corrects the detector/filter latency).
-  function beatMarkers() {
+  // red dots on the ECG lane at each firmware-detected beat. The R peak is snapped
+  // ONCE (shortly after the beat, when the ECG data is present), then stored with a
+  // fixed absolute time + value and only SLID with the ECG — never recomputed per
+  // frame, so the dot no longer jitters.
+  const beatDots = [];   // { t: absolute peak time (s), y: peak value }
+  function snapBeatDot(tb) {
     const t0 = nowS();
-    let sum = 0, c = 0;
-    for (const v of ecgY) if (v != null) { sum += v; c++; }
-    const base = c ? sum / c : 2000;
+    const xb = tb - t0;
+    if (xb < -WIN) return;                 // beat already scrolled off
+    const base = ecgBaseline();
+    const ib = Math.round(xb * FS + (ECG_WIN - 1));
     const BACK = Math.round(0.30 * FS), FWD = Math.round(0.05 * FS);
-    const xs = [], ys = [];
-    for (const tb of rrTs) {
-      const xb = tb - t0;
-      if (xb < -WIN || xb > 0) continue;
-      const ib = Math.round(xb * FS + (ECG_WIN - 1));
-      let best = -1, bestv = -1;
-      for (let j = Math.max(0, ib - BACK); j <= Math.min(ECG_WIN - 1, ib + FWD); j++) {
-        const v = ecgY[j];
-        if (v == null) continue;
-        const d = v - base;            // R peak = max POSITIVE deviation (not |.|)
-        if (d > bestv) { bestv = d; best = j; }
-      }
-      if (best >= 0) { xs.push(ecgX[best]); ys.push(ecgY[best]); }
+    let best = -1, bestv = -1e18;
+    for (let j = Math.max(0, ib - BACK); j <= Math.min(ECG_WIN - 1, ib + FWD); j++) {
+      const v = ecgY[j]; if (v == null) continue;
+      const d = v - base;                  // R peak = max positive deviation
+      if (d > bestv) { bestv = d; best = j; }
     }
-    return { x: xs, y: ys };
+    if (best < 0) return;
+    beatDots.push({ t: t0 + ecgX[best], y: ecgY[best] });   // fix absolute time + value
+    while (beatDots.length && beatDots[0].t < t0 - WIN - 1) beatDots.shift();
   }
 
   // one Plotly chart, stacked lanes (ECG / X / Y / Z / RR), shared time x-axis
@@ -73,10 +72,11 @@
     const t0 = nowS();
     const ax = accTs.map((t) => t - t0);
     const rx = rrTs.map((t) => t - t0);
-    const bm = beatMarkers();
+    const bx = [], by = [];                // stored dots, just slid (not recomputed)
+    for (const d of beatDots) { const x = d.t - t0; if (x >= -WIN && x <= 0.1) { bx.push(x); by.push(d.y); } }
     return [
       { x: ecgX, y: ecgY.slice(), name: "ECG", mode: "lines", line: { color: COL.ecg, width: 1 }, yaxis: "y" },
-      { x: bm.x, y: bm.y, name: "beat", mode: "markers",
+      { x: bx, y: by, name: "beat", mode: "markers",
         marker: { size: 7, color: "#ff2d2d", line: { width: 0 } }, yaxis: "y", hoverinfo: "skip" },
       { x: ax, y: accX.slice(), name: "X", mode: "lines", line: { color: COL.x, width: 1 }, yaxis: "y2" },
       { x: ax, y: accY.slice(), name: "Y", mode: "lines", line: { color: COL.y, width: 1 }, yaxis: "y3" },
