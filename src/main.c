@@ -55,8 +55,11 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 #define CONTACT_PIN    12                 /* P0.12: AFE lead-off/CONTACT status output
                                            * (high = on-body, low = off-body). It self-
                                            * gates the AFE -> READ ONLY, never drive it. */
-#define OFFBODY_MS     60000              /* no beat this long -> deep sleep    */
-#define MAX_ACTIVE_MS  (3LL*60*60*1000)   /* 3 h max session -> deep sleep      */
+#define OFFBODY_MS     60000              /* off-body + no motion this long -> sleep */
+#define MAX_ACTIVE_MS  (3LL*60*60*1000)   /* 3 h max session -> sleep           */
+#define PROBATION_MS   60000              /* advertise this long after wake; no contact/conn -> sleep */
+#define CONTACT_DEB    125                /* P0.12 contact debounce samples (~0.5 s @250 Hz) */
+#define MOTION_THR     1200               /* accel high-pass magnitude that counts as "moving" */
 #define LED_PULSE_N    3                  /* ~12 ms LED pulse per beat (energy-saving) */
 
 /* 50 Hz notch (biquad) @250 Hz */
@@ -210,14 +213,16 @@ static void adv_work_fn(struct k_work *w)
 	LOG_INF("advertising %s", e ? "FAILED" : "started");
 }
 static K_WORK_DEFINE(adv_work, adv_work_fn);
-static void connected(struct bt_conn *c, uint8_t err) { if (!err) k_work_submit(&adv_work); }  /* keep advertising for a 2nd host */
-static void disconnected(struct bt_conn *c, uint8_t r) { k_work_submit(&adv_work); }
+static volatile int conn_count;   /* live BLE connections (for the power state machine) */
+static void connected(struct bt_conn *c, uint8_t err) { if (!err) { conn_count++; k_work_submit(&adv_work); } }  /* keep advertising for a 2nd host */
+static void disconnected(struct bt_conn *c, uint8_t r) { if (conn_count > 0) conn_count--; k_work_submit(&adv_work); }
 BT_CONN_CB_DEFINE(conn_cb) = { .connected = connected, .disconnected = disconnected };
 static void bt_ready(int e) { if (!e) k_work_submit(&adv_work); }
 
 /* ---- Power / status LED --------------------------------------------- */
 static uint32_t cyc_per_sec;
 static volatile int64_t  last_beat_ms;
+static volatile int64_t  last_motion_ms;   /* updated by the accelerometer when moving */
 static volatile uint32_t sample_idx, led_off_idx;
 
 static inline void led_on(void)  { nrf_gpio_pin_set(LED_PIN); }
@@ -446,6 +451,7 @@ static void step_update(int16_t x, int16_t y, int16_t z)
 	base += (m - base) >> 6;              /* slow baseline (gravity)          */
 	int32_t hp = m - base;                /* dynamic component                */
 	int64_t now = k_uptime_get();
+	if (hp > MOTION_THR || -hp > MOTION_THR) last_motion_ms = now;   /* "moving" for power mgmt */
 	if (armed && hp > 3000 && (now - last_ms) > 300) {   /* step: peak + 300ms refractory */
 		step_count++; armed = false; last_ms = now;
 	} else if (hp < 1500) {
@@ -485,7 +491,11 @@ int main(void)
 	k_timer_start(&sample_timer, K_NO_WAIT, K_USEC(1000000 / SAMPLE_HZ));
 
 	int64_t active_start = k_uptime_get();
-	last_beat_ms = active_start;   /* 60 s grace to find the first beat (also a reflash window) */
+	last_beat_ms = active_start;
+	last_motion_ms = active_start;
+	int64_t session_start = 0;     /* set when contact or a connection first appears */
+	bool was_on_body = false;      /* did P0.12 ever report on-body this session */
+	int  contact_lp = 0;           /* P0.12 debounce integrator */
 
 	while (1) {
 		k_sem_take(&tick_sem, K_FOREVER);
@@ -527,11 +537,28 @@ int main(void)
 			battery_update();
 		}
 
-		/* power management: deep sleep (System OFF) if off-body or session > 3 h;
-		 * SC7A20 motion INT on P0.14 wakes the chip -> reboot -> re-check for beats */
+		/* ---- power state machine (P0.12 contact + BLE conn + accel motion) ----
+		 * wake(shake) -> advertise; PROBATION: sleep if no contact/conn in 1 min.
+		 * contact OR connection -> engaged, start the 3 h session.
+		 * engaged: sleep if 3 h elapsed (drops conns), OR off-body + no motion for
+		 * 1 min AND (it was worn OR nobody is connected). Motion INT on P0.14 wakes. */
 		int64_t now = k_uptime_get();
-		if ((now - last_beat_ms > OFFBODY_MS) || (now - active_start > MAX_ACTIVE_MS)) {
-			enter_deep_sleep();   /* does not return */
+		if (nrf_gpio_pin_read(CONTACT_PIN)) { if (contact_lp < CONTACT_DEB) contact_lp++; }
+		else                                { if (contact_lp > 0) contact_lp--; }
+		bool contact = contact_lp > (CONTACT_DEB / 2);
+		if (contact) was_on_body = true;
+		bool is_connected = conn_count > 0;
+		if (session_start == 0 && (contact || is_connected)) session_start = now;
+
+		bool go_sleep;
+		if (session_start == 0) {
+			go_sleep = (now - active_start > PROBATION_MS);        /* nobody engaged in 1 min */
+		} else if (now - session_start > MAX_ACTIVE_MS) {
+			go_sleep = true;                                       /* 3 h cap */
+		} else {
+			go_sleep = !contact && (now - last_motion_ms > OFFBODY_MS) &&
+				   (was_on_body || !is_connected);             /* off-body + still */
 		}
+		if (go_sleep) enter_deep_sleep();   /* drops connections, System OFF; does not return */
 	}
 }
