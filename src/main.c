@@ -42,6 +42,11 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 #define TWAVE_MS       360            /* T-wave window after a QRS (Pan-Tompkins) */
 #define TWAVE_FRAC     0.5f           /* peak in that window below this*QRS energy = T-wave */
 #define SNR_GATE       8.0f           /* classify ectopy only when spki > this*npki (clean signal) */
+#define RAIL_LO        100            /* raw ADC near the bottom rail = contact artifact */
+#define RAIL_HI        3995           /* raw ADC near the top rail (12-bit, 0..4095)      */
+#define RAIL_WIN       25             /* samples (~100 ms) a rail flag persists           */
+#define MOTION_FRAC    5.0f           /* energy > this*normal QRS = contact spike (real PVC is ~2-3x) */
+#define TWAVE_LO_FRAC  0.4f           /* energy < this*normal QRS = T-wave/low (drop)      */
 
 /* Power / status LED */
 #define LED_PIN        4                  /* P0.04, active-high status LED     */
@@ -226,11 +231,12 @@ static float iir(const float *b, const float *a, float *z, int n, float x)
 
 static uint8_t hr_from_rr(uint16_t rr_ms)
 {
-	static uint16_t h[4]; static uint8_t n;
-	h[n & 3] = rr_ms; if (n < 250) n++;
-	uint8_t c = MIN(n, 4); uint32_t s = 0;
-	for (int i = 0; i < c; i++) s += h[i];
-	uint16_t avg = s / c;
+	static uint16_t h[4]; static uint8_t idx, cnt;
+	h[idx] = rr_ms; idx = (idx + 1) & 3;   /* ring index always cycles 0..3 */
+	if (cnt < 4) cnt++;                     /* separate count, saturates at 4 */
+	uint32_t s = 0;
+	for (int i = 0; i < cnt; i++) s += h[i];
+	uint16_t avg = s / cnt;
 	return (avg >= RR_MIN_MS) ? (uint8_t)(60000U / avg) : 0;
 }
 
@@ -252,14 +258,20 @@ static void detector_feed(int16_t sample)
 	/* extrasystole classification (1-beat look-ahead; only feeds the ectopy
 	 * characteristic, never the HR/RR stream) */
 	static uint32_t sinus_rr_ms, pend_coupling;
-	static float    pend_energy;
-	static bool     pend_prem;
+	static float    pend_energy, sinus_qrs;
+	static uint32_t rail_recent;        /* >0 = raw ADC railed within the last RAIL_WIN samples */
+	static bool     pend_prem, pend_railed;
 
 	float yn = iir(NOTCH_b, NOTCH_a, notch_z, 3, (float)sample);
 	float yb = iir(BP_b, BP_a, bp_z, 5, yn);
 	float energy = yb * yb;
 
 	if (warm < WARMUP_SAMPLES) { warm++; prev_energy = energy; return; }
+
+	/* rail/saturation tracking: a contact (electrode-skin) artifact drives the raw
+	 * ADC to the rails; a real QRS never does. Flag persists for RAIL_WIN samples. */
+	if (sample < RAIL_LO || sample > RAIL_HI) rail_recent = RAIL_WIN;
+	else if (rail_recent) rail_recent--;
 
 	uint32_t now  = k_cycle_get_32();
 	uint32_t refr = (uint64_t)cyc_per_sec * REFRACTORY_MS / 1000;
@@ -305,13 +317,15 @@ static void detector_feed(int16_t sample)
 					 * from an artifact (low energy). Gated on a clean signal. */
 					beat_total++;
 					uint32_t mean = sinus_rr_ms ? sinus_rr_ms : rr_ms;
+						float qref = sinus_qrs ? sinus_qrs : spki;
 					bool cur_prem = sinus_rr_ms && rr_ms < (mean * 4) / 5;
 					bool clean = spki > SNR_GATE * npki;
 					bool used_pause = false;
 					if (clean && pend_prem) {
 						uint32_t sum = pend_coupling + rr_ms;
 						uint8_t type;
-						if (pend_energy < 0.5f * spki) {
+						if (pend_railed || pend_energy > MOTION_FRAC * qref ||
+							    pend_energy < TWAVE_LO_FRAC * qref) {
 							type = 3; artifact_count++;
 						} else if (sum >= (mean * 9) / 5) {
 							type = 1; pvc_count++;
@@ -326,9 +340,12 @@ static void detector_feed(int16_t sample)
 						pend_prem = true;
 						pend_coupling = rr_ms;
 						pend_energy = cand_peak;
+							pend_railed = (rail_recent > 0);
 					} else if (!cur_prem && !used_pause) {
 						sinus_rr_ms = sinus_rr_ms ?
 							(sinus_rr_ms * 7 + rr_ms) / 8 : rr_ms;
+						sinus_qrs = sinus_qrs ?
+							(sinus_qrs * 7.0f + cand_peak) / 8.0f : cand_peak;
 					}
 					ect_stats_to_buf();
 				}
