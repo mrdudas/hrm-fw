@@ -80,6 +80,7 @@ async def run_dashboard(args):
         from ble_source import BLESource
         source = BLESource(hub, name=args.name, address=args.address, log=log)
 
+    hub.source = source
     source_task = asyncio.create_task(source.run())
 
     if not args.no_open:

@@ -13,8 +13,13 @@ time, so the bursty BLE packets scroll smoothly instead of jumping.
 ## What it does
 
 - Scans for the strap **by name** (`HRM Raw RR`) — cross-platform and macOS-safe
-  (macOS exposes opaque UUIDs, not MAC addresses). Falls back to a terminal
-  device picker, or you can pass `--address`.
+  (macOS exposes opaque UUIDs, not MAC addresses). If it isn't found, it scans
+  again **every minute** (the dashboard shows a countdown).
+- **Device picker in the dashboard header**: every scan fills a dropdown with
+  nearby devices (the strap is starred). Pick one and press **Connect**, or keep
+  *Auto* to find the strap by name; **⟳ Scan** refreshes the list. The choice is
+  remembered in `device.json` (`--address` overrides it). **Disconnect** drops
+  the link and stops scanning until you press Connect again.
 - Subscribes to all streams, tolerating any that are missing on older firmware:
   | Stream   | Characteristic UUID | Payload |
   |----------|---------------------|---------|
@@ -23,7 +28,7 @@ time, so the bursty BLE packets scroll smoothly instead of jumping.
   | Accel    | `a1b30002-…`        | int16 x/y/z + uint16 steps @ ~25 Hz |
   | Ectopy   | `a1b40002-…`        | PVC/PAC/artifact classifier + burden |
   | Battery  | `0x2A19`            | 1 byte percent (read + notify) |
-- **Auto-reconnects** if the BLE link drops.
+- **Auto-reconnects** if the BLE link drops (quick retry, then once a minute).
 - Records each stream to a timestamped CSV in `recordings/`, flushed after every
   packet so a crash loses at most the last one:
   - `ecg_<session>.csv` — `unix_time, sample_index, adc`

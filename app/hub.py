@@ -18,6 +18,7 @@ class Hub:
         self._queue = asyncio.Queue()
         self._snapshot = {}           # type -> last event dict (json-ready)
         self._status = {"type": "status", "state": "starting"}
+        self.source = None            # data source; receives UI commands
         # ECG time anchor for reconstructing a continuous sample index/time axis
         self._ecg_seq0 = None
         self._ecg_t0 = None
@@ -56,16 +57,25 @@ class Hub:
     def snapshot_messages(self):
         """JSON strings to send a newly connected client (status + last of each)."""
         out = [json.dumps(self._status)]
-        for key in ("battery", "rr", "accel", "ectopy"):
+        for key in ("devices", "battery", "rr", "accel", "ectopy"):
             if key in self._snapshot:
                 out.append(self._snapshot[key])
         return out
 
+    def command(self, msg: dict):
+        """Client -> server control message (connect / disconnect / scan)."""
+        if self.source is not None and hasattr(self.source, "command"):
+            self.source.command(msg)
+
     # ---- typed publishers (called by the data source) --------------------
-    def publish_status(self, state: str, detail: str = ""):
+    def publish_status(self, state: str, detail: str = "", **extra):
         self._status = {"type": "status", "state": state, "detail": detail,
-                        "t": time.time()}
+                        "t": time.time(), **extra}
         self._emit(self._status)
+
+    def publish_devices(self, devices: list, scanning: bool):
+        self._emit({"type": "devices", "devices": devices, "scanning": scanning,
+                    "t": time.time()}, snapshot_key="devices")
 
     def publish_ecg(self, seq: int, samples: list):
         t = time.time()

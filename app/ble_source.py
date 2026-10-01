@@ -1,15 +1,31 @@
-"""BLE data source: scan, connect, subscribe to every stream, auto-reconnect.
+"""BLE data source: a small state machine driven by the web UI.
+
+States (published to the dashboard as status messages):
+  idle        user pressed Disconnect: no scanning, no connection
+  scanning    looking for the target (name match, or the address picked in the UI)
+  waiting     target not found; the next scan starts after RETRY_S
+  connecting  / connected / disconnected
+
+The UI sends commands over the WebSocket (see `command()`): pick a device from
+the scan list or go back to name-based auto discovery, disconnect, or scan now.
+Every scan publishes the list of nearby devices so the UI can offer them in a
+dropdown. The chosen device is remembered in device.json across restarts.
 
 `bleak` is imported lazily so demo mode and the web UI work without it installed.
-Discovery is name-based (cross-platform, macOS-safe); a terminal picker is the
-fallback when the named device is not found.
 """
 import asyncio
-import sys
+import json
+import os
+import time
 
 from config import (DEVICE_NAME, KNOWN_ADDRESS, HR_UUID, ECG_UUID, ACCEL_UUID,
                     ECTOPY_UUID, BATTERY_UUID)
 import parsers
+
+SCAN_S = 8          # length of one scan
+RETRY_S = 60        # pause between scans while the strap is not found
+RECONNECT_S = 2     # quick retry right after a dropped link
+SETTINGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "device.json")
 
 
 async def scan_devices(timeout=6):
@@ -23,80 +39,174 @@ async def scan_devices(timeout=6):
     return out
 
 
-async def find_device(name=DEVICE_NAME, address=None, attempts=6, timeout=5,
-                      log=print):
-    """Locate the strap. Prefer explicit address, then name match, then a picker."""
-    from bleak import BleakScanner
-    want_addr = (address or "").upper()
-    for attempt in range(attempts):
-        log(f"scanning ({(attempt + 1) * timeout}s) for '{name}' ...")
-        found = await BleakScanner.discover(timeout=timeout, return_adv=True)
-        candidates = []
-        for addr, (dev, adv) in found.items():
-            nm = adv.local_name or dev.name or ""
-            if want_addr and addr.upper() == want_addr:
-                return dev
-            if not address and (nm == name or addr.upper() == KNOWN_ADDRESS.upper()):
-                return dev
-            candidates.append((addr, nm, adv.rssi, dev))
-        # named device not seen; if user is at a TTY, let them pick
-        if candidates and sys.stdin and sys.stdin.isatty():
-            dev = _terminal_picker(candidates, log)
-            if dev is not None:
-                return dev
-    return None
-
-
-def _terminal_picker(candidates, log):
-    candidates = sorted(candidates, key=lambda x: -(x[2] or -999))
-    print("\nDevice not found by name. Nearby BLE devices:")
-    for i, (addr, nm, rssi, _dev) in enumerate(candidates):
-        print(f"  [{i}] {addr}  rssi={rssi}  {nm}")
+def load_target():
     try:
-        sel = input("Pick a number (or Enter to keep scanning): ").strip()
-    except EOFError:
-        return None
-    if sel.isdigit() and int(sel) < len(candidates):
-        return candidates[int(sel)][3]
-    return None
+        with open(SETTINGS) as f:
+            d = json.load(f)
+        return d.get("address") or None, d.get("name") or ""
+    except (OSError, ValueError):
+        return None, ""
+
+
+def save_target(address, name):
+    try:
+        if address:
+            with open(SETTINGS, "w") as f:
+                json.dump({"address": address, "name": name}, f)
+        elif os.path.exists(SETTINGS):
+            os.remove(SETTINGS)
+    except OSError:
+        pass
 
 
 class BLESource:
     def __init__(self, hub, name=DEVICE_NAME, address=None, log=print):
         self.hub = hub
-        self.name = name
-        self.address = address
+        self.name = name                 # auto mode: match this advertised name
+        if address:                      # CLI wins over the remembered choice
+            self.address, self.address_name = address, ""
+        else:
+            self.address, self.address_name = load_target()
         self.log = log
+        self.enabled = True              # False = user pressed Disconnect
         self._stop = asyncio.Event()
+        self._wake = asyncio.Event()     # a command arrived: re-evaluate now
+        self._scan_requested = False
+        self._seen = {}                  # address -> (name, rssi) from the last scan
 
     def stop(self):
         self._stop.set()
+        self._wake.set()
 
+    # ---- commands from the web UI ------------------------------------------
+    def command(self, msg: dict):
+        cmd = msg.get("cmd")
+        if cmd == "connect":
+            addr = (msg.get("address") or "").strip() or None
+            self.address = addr
+            self.address_name = (msg.get("name") or "") if addr else ""
+            save_target(self.address, self.address_name)
+            self.enabled = True
+            self.log(f"UI: connect to {addr or repr(self.name) + ' (auto)'}")
+        elif cmd == "disconnect":
+            self.enabled = False
+            self.log("UI: disconnect")
+        elif cmd == "scan":
+            self._scan_requested = True
+        else:
+            return
+        self._wake.set()
+
+    def _target(self):
+        return {"address": self.address, "name": self.address_name if self.address else self.name,
+                "auto": self.address is None}
+
+    def _status(self, state, detail="", **extra):
+        self.hub.publish_status(state, detail=detail, target=self._target(),
+                                enabled=self.enabled, **extra)
+
+    async def _sleep(self, seconds):
+        """Sleep, but return early (True) when a command arrives."""
+        self._wake.clear()
+        try:
+            await asyncio.wait_for(self._wake.wait(), seconds)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    # ---- scanning -------------------------------------------------------------
+    def _matches(self, addr, name):
+        if self.address:
+            return addr.upper() == self.address.upper()
+        return name == self.name or addr.upper() == KNOWN_ADDRESS.upper()
+
+    async def _scan(self, want_target):
+        """Scan up to SCAN_S, publishing the device list as it fills in.
+
+        Returns the target BLEDevice as soon as it is seen (if want_target), else
+        None. Also returns early when a command changes what we should do.
+        """
+        from bleak import BleakScanner
+        seen, hit = {}, {}
+        found = asyncio.Event()
+
+        def on_adv(dev, adv):
+            nm = adv.local_name or dev.name or ""
+            seen[dev.address] = (nm or seen.get(dev.address, ("",))[0], adv.rssi)
+            if want_target and self._matches(dev.address, nm):
+                hit["dev"] = dev
+                found.set()
+
+        self._wake.clear()
+        t_end = time.monotonic() + SCAN_S
+        async with BleakScanner(detection_callback=on_adv):
+            while time.monotonic() < t_end and not found.is_set() and not self._wake.is_set():
+                try:
+                    await asyncio.wait_for(found.wait(), min(1.0, t_end - time.monotonic()))
+                except asyncio.TimeoutError:
+                    pass
+                self._publish_devices(seen, scanning=True)
+        self._seen = seen
+        self._publish_devices(seen, scanning=False)
+        return hit.get("dev")
+
+    def _publish_devices(self, seen, scanning):
+        devs = [{"address": a, "name": n, "rssi": r,
+                 "strap": n == self.name or a.upper() == KNOWN_ADDRESS.upper()}
+                for a, (n, r) in seen.items()]
+        devs.sort(key=lambda d: (not d["strap"], not d["name"], -(d["rssi"] or -999)))
+        self.hub.publish_devices(devs, scanning)
+
+    # ---- main loop --------------------------------------------------------------
     async def run(self):
-        """Outer loop: (re)discover, connect, stream, reconnect with backoff."""
         from bleak import BleakClient
-        backoff = 2
         while not self._stop.is_set():
-            self.hub.publish_status("scanning")
-            dev = await find_device(self.name, self.address, log=self.log)
-            if dev is None:
-                self.log("device not found; retrying ...")
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30)
+            if not self.enabled:
+                self._status("idle")
+                if self._scan_requested:          # list nearby devices, don't connect
+                    self._scan_requested = False
+                    await self._safe_scan(want_target=False)
+                    continue
+                await self._sleep(None)
                 continue
-            backoff = 2
-            self.log(f"connecting to {getattr(dev, 'address', dev)} "
-                     f"({getattr(dev, 'name', '')}) ...")
+
+            self._scan_requested = False
+            self._status("scanning")
+            dev = await self._safe_scan(want_target=True)
+            if not self.enabled or self._stop.is_set():
+                continue
+            if dev is None:
+                if self._wake.is_set():           # command arrived mid-scan
+                    continue
+                nxt = time.time() + RETRY_S
+                self.log(f"strap not found; next scan in {RETRY_S}s")
+                self._status("waiting", next_scan=nxt)
+                await self._sleep(RETRY_S)
+                continue
+
+            self.log(f"connecting to {dev.address} ({dev.name or ''}) ...")
+            self._status("connecting", detail=dev.name or dev.address)
             try:
                 await self._session(BleakClient, dev)
             except Exception as e:
                 self.log(f"BLE session error: {e!r}")
-            if not self._stop.is_set():
-                self.hub.publish_status("disconnected")
-                await asyncio.sleep(2)
+            if self.enabled and not self._stop.is_set():
+                self._status("disconnected")
+                await self._sleep(RECONNECT_S)
+        self._status("idle")
+
+    async def _safe_scan(self, want_target):
+        try:
+            return await self._scan(want_target)
+        except Exception as e:
+            self.log(f"scan failed: {e!r}")
+            self._status("error", detail=f"scan failed: {e}")
+            await self._sleep(5)
+            return None
 
     async def _session(self, BleakClient, dev):
         disconnected = asyncio.Event()
+        target = self._target()
 
         def on_disconnect(_c):
             disconnected.set()
@@ -107,13 +217,17 @@ class BLESource:
             await self._subscribe_all(c)
             # battery: read once up front (notify may not fire otherwise)
             await self._read_battery(c)
-            self.hub.publish_status("connected",
-                                    detail=getattr(dev, "name", "") or "")
-            # hold the connection until it drops or we're told to stop
-            while not disconnected.is_set() and not self._stop.is_set():
-                if not c.is_connected:
-                    break
-                await asyncio.sleep(0.5)
+            label = dev.name or dev.address
+            self._status("connected", detail=label, address=dev.address)
+            # hold the link until it drops, the user disconnects or picks another device
+            while (not disconnected.is_set() and not self._stop.is_set()
+                   and self.enabled and self._target() == target and c.is_connected):
+                if self._scan_requested:          # refresh the list while connected
+                    self._scan_requested = False
+                    await self._safe_scan(want_target=False)
+                    self._status("connected", detail=label, address=dev.address)
+                    continue
+                await self._sleep(0.5)
             self.log("link closed")
 
     async def _subscribe_all(self, c):

@@ -14,6 +14,12 @@
     <span>HRM Raw RR — Live Dashboard</span>
   </div>
   <div class="header-right">
+    <div class="device">
+      <select id="dev-select" title="Device to connect to"></select>
+      <button id="scan-btn" class="tool-btn" title="Scan for nearby BLE devices">⟳ Scan</button>
+      <button id="conn-btn" class="tool-btn" title="Connect to the selected device">Connect</button>
+      <button id="disc-btn" class="tool-btn" title="Disconnect and stop scanning">Disconnect</button>
+    </div>
     <div id="battery" class="battery">
       <span class="batt-label">Battery</span>
       <div class="batt-bar"><div id="batt-fill" class="batt-fill"></div></div>

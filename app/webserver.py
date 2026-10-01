@@ -3,6 +3,7 @@
 Runs in the same asyncio loop as the data source. Each connected page registers
 with the hub, receives an immediate snapshot, then streams live events.
 """
+import json
 import os
 
 from aiohttp import web, WSMsgType
@@ -35,7 +36,13 @@ async def _ws_handler(request):
         async for m in ws:
             if m.type == WSMsgType.ERROR:
                 break
-            # client -> server messages are ignored (dashboard is read-only)
+            if m.type == WSMsgType.TEXT:     # control: connect / disconnect / scan
+                try:
+                    msg = json.loads(m.data)
+                except ValueError:
+                    continue
+                if isinstance(msg, dict):
+                    hub.command(msg)
     finally:
         hub.remove_client(ws)
     return ws

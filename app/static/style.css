@@ -20,7 +20,12 @@ header{
 }
 .brand{display:flex; align-items:center; gap:10px; font-weight:600; font-size:16px}
 .logo{color:var(--accent); font-size:20px}
-.header-right{display:flex; align-items:center; gap:20px}
+.header-right{display:flex; align-items:center; gap:20px; flex-wrap:wrap; justify-content:flex-end}
+header{flex-wrap:wrap; gap:10px}
+.device{display:flex; align-items:center; gap:6px}
+.device select{height:26px; max-width:300px; background:var(--panel-2); color:var(--text);
+               border:1px solid var(--border); border-radius:6px; font:inherit; font-size:12px; padding:0 6px}
+.tool-btn:disabled{opacity:.4; cursor:default}
 
 .status{display:flex; align-items:center; gap:8px; font-size:13px; color:var(--muted)}
 .status .dot{width:9px; height:9px; border-radius:50%; background:var(--off)}
@@ -98,3 +103,5 @@ footer code{background:var(--panel-2); padding:2px 6px; border-radius:4px}
 #strip-chart{user-select:none}
 .strip-help{color:var(--muted); font-size:11px; margin-top:6px; text-align:right}
 .strip-help kbd{background:var(--panel-2); border:1px solid var(--border); border-radius:4px; padding:0 4px; font:inherit}
+.status-wait .dot{background:var(--warn)}
+.status-idle .dot{background:var(--muted)}

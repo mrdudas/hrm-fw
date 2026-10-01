@@ -15,14 +15,38 @@ class DemoSource:
         self.hub = hub
         self.base_hr = hr
         self.log = log
+        self.enabled = True           # UI Disconnect pauses the synthetic stream
         self._stop = asyncio.Event()
 
     def stop(self):
         self._stop.set()
 
+    def command(self, msg: dict):
+        """Same UI commands as BLESource, simulated."""
+        cmd = msg.get("cmd")
+        if cmd == "disconnect":
+            self.enabled = False
+            self.hub.publish_status("idle", enabled=False, target=self._target())
+        elif cmd == "connect":
+            self.enabled = True
+            self.hub.publish_status("demo", detail="synthetic stream", enabled=True,
+                                    target=self._target())
+        elif cmd == "scan":
+            self.hub.publish_devices([
+                {"address": "D7:CD:02:7A:05:33", "name": "HRM Raw RR", "rssi": -48, "strap": True},
+                {"address": "D8:0F:B5:10:EA:56", "name": "Stratos 4 Pro", "rssi": -68, "strap": False},
+                {"address": "56:9A:33:44:07:69", "name": "", "rssi": -56, "strap": False},
+            ], scanning=False)
+
+    @staticmethod
+    def _target():
+        return {"address": None, "name": "HRM Raw RR", "auto": True}
+
     async def run(self):
         self.log("DEMO mode: streaming synthetic data (no BLE)")
-        self.hub.publish_status("demo", detail="synthetic stream")
+        self.hub.publish_status("demo", detail="synthetic stream", enabled=True,
+                                target=self._target())
+        self.command({"cmd": "scan"})
         loop = asyncio.get_event_loop()
         await asyncio.gather(
             self._ecg_and_beats(loop),
@@ -54,7 +78,7 @@ class DemoSource:
                 if not reported and phase >= 0.32 * rr_s + 0.06:
                     reported = True
                     r_t = t_samp - 0.06
-                    if last_r is not None:
+                    if last_r is not None and self.enabled:
                         rr_ms = (r_t - last_r) * 1000.0
                         self.hub.publish_rr(round(60000.0 / rr_ms), [rr_ms], "yes")
                     last_r = r_t
@@ -75,7 +99,8 @@ class DemoSource:
                         pac += 1
                         rr_s = 0.40
                         self._emit_ecto(2, 380, 500, pvc, pac, art, total)
-            self.hub.publish_ecg(seq & 0xFFFF, list(packet))
+            if self.enabled:
+                self.hub.publish_ecg(seq & 0xFFFF, list(packet))
             seq += 1
             await asyncio.sleep(20 / fs)   # 80 ms per packet
 
@@ -92,6 +117,8 @@ class DemoSource:
         return v
 
     def _emit_ecto(self, etype, coupling, pause, pvc, pac, art, total):
+        if not self.enabled:
+            return
         from config import ECTOPY_TYPES
         self.hub.publish_ectopy({
             "etype": etype, "type_name": ECTOPY_TYPES.get(etype, str(etype)),
@@ -111,7 +138,8 @@ class DemoSource:
             z = int(16000 + 800 * math.sin(t * 2 * math.pi * 0.25) + random.gauss(0, 200))
             if random.random() < 0.15:
                 steps += 1
-            self.hub.publish_accel(x, y, z, steps)
+            if self.enabled:
+                self.hub.publish_accel(x, y, z, steps)
             t += 0.04
             await asyncio.sleep(0.04)   # ~25 Hz
 

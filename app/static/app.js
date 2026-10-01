@@ -639,15 +639,99 @@
     fill.style.background = msg.pct <= 15 ? "#f85149" : msg.pct <= 35 ? "#d29922" : "#3fb950";
   }
 
+  // ---------- connection: status, device picker, connect / disconnect / scan ----------
+  let status = { state: "starting" };
+  let devices = [], devScanning = false, userPicked = false;
+  const AUTO = "";   // select value for "auto: find by name"
+
+  function send(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  }
+
+  function statusLabel() {
+    const s = status;
+    switch (s.state) {
+      case "connected": return "connected" + (s.detail ? " · " + s.detail : "");
+      case "connecting": return "connecting" + (s.detail ? " · " + s.detail : "") + "…";
+      case "scanning": return "scanning for " + targetName() + "…";
+      case "waiting": {
+        const left = Math.max(0, Math.round((s.next_scan || 0) - Date.now() / 1000));
+        return `not found · next scan in ${left} s`;
+      }
+      case "idle": return "disconnected";
+      case "disconnected": return "link lost · reconnecting…";
+      case "demo": return "demo mode";
+      case "error": return s.detail || "error";
+      default: return s.state;
+    }
+  }
+  function targetName() {
+    const t = status.target;
+    if (!t) return "strap";
+    return t.auto ? `“${t.name}”` : (t.name || t.address);
+  }
+
   function onStatus(msg) {
+    status = msg;
     const el = $("status");
-    el.classList.remove("status-on", "status-off", "status-demo");
-    let label = msg.state;
-    if (msg.state === "connected") { el.classList.add("status-on"); label = "connected" + (msg.detail ? " · " + msg.detail : ""); }
-    else if (msg.state === "demo") { el.classList.add("status-demo"); label = "demo mode"; }
-    else if (msg.state === "scanning") { el.classList.add("status-off"); label = "scanning…"; }
-    else { el.classList.add("status-off"); label = msg.state; }
-    setText("status-text", label);
+    el.classList.remove("status-on", "status-off", "status-demo", "status-wait", "status-idle");
+    el.classList.add({ connected: "status-on", demo: "status-demo", scanning: "status-wait",
+                       connecting: "status-wait", waiting: "status-wait", idle: "status-idle" }[msg.state]
+                     || "status-off");
+    setText("status-text", statusLabel());
+    renderDevices();
+  }
+  setInterval(() => { if (status.state === "waiting") setText("status-text", statusLabel()); }, 1000);
+
+  function onDevices(msg) {
+    devices = msg.devices || [];
+    devScanning = !!msg.scanning;
+    renderDevices();
+  }
+
+  function renderDevices() {
+    const sel = $("dev-select");
+    const t = status.target || {};
+    const current = t.auto === false ? t.address : AUTO;
+    const keep = userPicked ? sel.value : current;
+    const opts = [[AUTO, `Auto · find “${(t.auto !== false && t.name) || "HRM Raw RR"}” by name`, ""]];
+    const listed = new Set();
+    for (const d of devices) {
+      listed.add(d.address);
+      const nm = d.name || "(unnamed)";
+      opts.push([d.address, `${d.strap ? "★ " : ""}${nm} · ${d.address} · ${d.rssi} dBm`, d.name || ""]);
+    }
+    if (t.auto === false && t.address && !listed.has(t.address))
+      opts.push([t.address, `${t.name || "(saved)"} · ${t.address} · not seen`, t.name || ""]);
+    if (keep && keep !== AUTO && !opts.some((o) => o[0] === keep))
+      opts.push([keep, `${keep} · not seen`, ""]);
+    sel.replaceChildren(...opts.map(([v, label, name]) => {
+      const o = document.createElement("option");
+      o.value = v; o.textContent = label; o.dataset.name = name;
+      return o;
+    }));
+    sel.value = keep;
+
+    const enabled = status.enabled !== false;
+    const scanning = devScanning || status.state === "scanning";
+    $("scan-btn").textContent = scanning ? "Scanning…" : "⟳ Scan";
+    $("scan-btn").disabled = scanning;
+    $("disc-btn").disabled = !enabled;
+    // Connect is useful when idle, or to switch to a different target
+    $("conn-btn").disabled = enabled && sel.value === current;
+  }
+
+  function initDevicePicker() {
+    const sel = $("dev-select");
+    sel.addEventListener("change", () => { userPicked = true; renderDevices(); });
+    $("conn-btn").addEventListener("click", () => {
+      const opt = sel.selectedOptions[0];
+      send({ cmd: "connect", address: sel.value || null, name: opt ? opt.dataset.name : "" });
+      userPicked = false;
+    });
+    $("disc-btn").addEventListener("click", () => send({ cmd: "disconnect" }));
+    $("scan-btn").addEventListener("click", () => { devScanning = true; renderDevices(); send({ cmd: "scan" }); });
+    renderDevices();
   }
 
   function handle(msg) {
@@ -658,6 +742,7 @@
       case "ectopy": onEctopy(msg); break;
       case "battery": onBattery(msg); break;
       case "status": onStatus(msg); break;
+      case "devices": onDevices(msg); break;
     }
   }
 
@@ -685,6 +770,7 @@
     makeAvg();
     initZoom();
     initPauseMeasure();
+    initDevicePicker();
     connect();
     new ResizeObserver(resize).observe($("strip-chart"));
     requestAnimationFrame(frame);
