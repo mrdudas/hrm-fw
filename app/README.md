@@ -6,9 +6,11 @@ on disk, and serves a live browser dashboard with charts.
 
 It is a single Python process (asyncio): `bleak` for BLE and `aiohttp` for a
 local web server + WebSocket. The frontend is plain HTML/JS using **uPlot** (canvas charts, loaded from a CDN) — no build
-step. The live strip is redrawn every animation frame with a 0.35 s playout
-delay, and each stream's timestamps come from a fit of sample index vs arrival
-time, so the bursty BLE packets scroll smoothly instead of jumping.
+step. The live strip is redrawn every animation frame. Each stream's timestamps
+come from a clock fitted to sample index vs arrival time (`static/clock.js`)
+that never jumps, and the playout delay adapts to the host's real BLE jitter
+(~0.3 s normally, more on hosts that stall, e.g. MacBooks where Wi-Fi and
+Bluetooth share a radio), so the bursty packets scroll smoothly.
 
 ## What it does
 

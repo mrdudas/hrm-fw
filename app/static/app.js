@@ -4,12 +4,11 @@
  *   - the signal-averaged (R-aligned) beat
  *   - plain DOM for HR, steps, ectopy counts/log and battery.
  *
- * Smooth scrolling: data arrives in bursts (20 ECG samples per BLE packet, and
- * BLE groups packets per connection event). Instead of plotting "newest sample
- * = now", each stream gets a ClockFit — a least-squares fit of sample index vs
- * arrival time — so every sample has a steady timestamp. The view is rendered
- * every animation frame at (now - DELAY), so the trace glides continuously
- * and the jitter is hidden behind the playout delay.
+ * Smooth scrolling: data arrives in bursts (20 ECG samples per BLE packet, BLE
+ * batches packets per connection event, and some hosts stall for 1–2 s). Each
+ * stream gets a StreamClock (clock.js) that maps sample index -> display time
+ * without ever jumping, and the view is rendered every animation frame at
+ * (now - playout delay), with the delay adapted to the host's real jitter.
  *
  * Auto-reconnects the WebSocket if the link or the page connection drops.
  */
@@ -25,46 +24,15 @@
   const ACC_FS = 25;         // accelerometer rate (Hz, nominal)
   const WIN_DEFAULT = 6;     // visible window (s), zoomable WIN_MIN..WIN_MAX
   const WIN_MIN = 2, WIN_MAX = 60;
-  const DELAY = 0.35;        // playout delay (s): hides BLE burst jitter
   const RING = FS * (WIN_MAX + 4);   // ECG ring buffer: longest window + margin
 
   const now = () => (performance.timeOrigin + performance.now()) / 1000;
   const $ = (id) => document.getElementById(id);
   function setText(id, v) { const e = $(id); if (e) e.textContent = v; }
 
-  // ---------- ClockFit: sample index -> smooth timestamp ----------
-  // Linear least squares t = a + b*i over the last `maxPts` packets. The slope is
-  // clamped around the nominal period so a short history can't go wild; a big
-  // residual (reconnect, stall) resets the fit.
-  class ClockFit {
-    constructor(period, maxPts, tol) { this.nom = period; this.max = maxPts; this.tol = tol; this.reset(); }
-    reset() { this.pi = []; this.pt = []; this.i0 = null; this.t0 = null; this.a = 0; this.b = this.nom; }
-    get ready() { return this.i0 != null; }
-    add(i, t) {
-      if (this.ready && Math.abs(t - this.t(i)) > 1.0) this.reset();
-      if (!this.ready) { this.i0 = i; this.t0 = t; }
-      const pi = this.pi, pt = this.pt;
-      pi.push(i - this.i0); pt.push(t - this.t0);
-      if (pi.length > this.max) { pi.shift(); pt.shift(); }
-      const n = pi.length;
-      let mi = 0, mt = 0;
-      for (let k = 0; k < n; k++) { mi += pi[k]; mt += pt[k]; }
-      mi /= n; mt /= n;
-      let b = this.nom;
-      if ((pi[n - 1] - pi[0]) * this.nom > 3) {        // need >3 s of history for a slope
-        let sxy = 0, sxx = 0;
-        for (let k = 0; k < n; k++) { const dx = pi[k] - mi; sxy += dx * (pt[k] - mt); sxx += dx * dx; }
-        b = Math.min(this.nom * (1 + this.tol), Math.max(this.nom * (1 - this.tol), sxy / sxx));
-      }
-      this.b = b; this.a = mt - b * mi;
-    }
-    t(i) { return this.t0 + this.a + this.b * (i - this.i0); }
-    idx(t) { return (t - this.t0 - this.a) / this.b + this.i0; }
-  }
-
   // ---------- ECG ring buffer (continuous client-side sample index) ----------
   const ecgRing = new Float32Array(RING).fill(NaN);
-  const ecgFit = new ClockFit(1 / FS, 150, 0.03);
+  const ecgFit = new StreamClock(1 / FS, 0.05);
   let ecgLast = -1;           // index of newest sample
   let ecgLastBase = null;     // last server `base` (wraps at 65536 packets)
   let ecgLastArrival = 0;
@@ -78,37 +46,42 @@
       const d = (((msg.base - ecgLastBase) % wrap) + wrap) % wrap;
       if (d !== len) {
         if (d > len && d <= 2 * FS) skip = d - len;          // dropped packets: leave a gap
-        else {                                                // restart / reconnect
-          skip = Math.min(RING, Math.max(0, Math.round((ta - ecgLastArrival - len / FS) * FS)));
-          ecgFit.reset();
-        }
+        else                                                  // restart / reconnect: keep the
+          skip = Math.max(0, Math.round((ta - ecgLastArrival - len / FS) * FS));   // index ~ time
       }
     }
-    for (let k = 0; k < skip; k++) ecgRing[(ecgLast + 1 + k) % RING] = NaN;
+    for (let k = 0; k < Math.min(skip, RING); k++) ecgRing[(ecgLast + 1 + k) % RING] = NaN;
     ecgLast += skip;
     for (const s of msg.samples) { ecgLast++; ecgRing[ecgLast % RING] = s; }
     ecgLastBase = msg.base;
     ecgLastArrival = ta;
     ecgFit.add(ecgLast, ta);
   }
-  const ecgLive = () => ecgFit.ready && now() - ecgLastArrival < 1.5;
+  const ecgLive = () => ecgFit.ready && now() - ecgLastArrival < 5;
 
   // ---------- accelerometer ring (timestamps from a packet-counter fit) ----------
   const ACC_RING = ACC_FS * (WIN_MAX + 6);
-  const accT = new Float64Array(ACC_RING), accX = new Float32Array(ACC_RING),
+  const accI = new Float64Array(ACC_RING), accX = new Float32Array(ACC_RING),
         accY = new Float32Array(ACC_RING), accZ = new Float32Array(ACC_RING);
-  const accFit = new ClockFit(1 / ACC_FS, 100, 0.25);
+  const accFit = new StreamClock(1 / ACC_FS, 0.25);
   const ACC_CH = [["x", accX], ["y", accY], ["z", accZ]];
-  let accN = 0, accK = 0;     // stored count, packet counter
+  let accN = 0, accK = 0;     // stored count, packet counter (no seq in the packet)
+  let accLastArrival = 0, accLinkBroken = false;
   function pushAccel(m, ta) {
+    if (accLinkBroken && accN > 0) {   // after a real link break, skip the counter by the gap
+      accK += Math.max(0, Math.round((ta - accLastArrival) * ACC_FS) - 1);
+    }
+    accLinkBroken = false;
     accFit.add(accK, ta);
     const j = accN % ACC_RING;
-    accT[j] = accFit.t(accK); accX[j] = m.x; accY[j] = m.y; accZ[j] = m.z;
-    accN++; accK++;
+    accI[j] = accK; accX[j] = m.x; accY[j] = m.y; accZ[j] = m.z;
+    accN++; accK++; accLastArrival = ta;
   }
 
   // ---------- beats: R-peak snapping, RR points, ensemble average ----------
-  const SNAP_BACK = Math.round(0.30 * FS), SNAP_FWD = Math.round(0.05 * FS);
+  // search window around the newest ECG sample at the time the RR event arrived
+  // (both share the BLE link, so a stall delays them together)
+  const SNAP_BACK = Math.round(0.35 * FS), SNAP_FWD = Math.round(0.12 * FS);
   const AVG_PRE = Math.round(0.20 * FS);    // -200 ms
   const AVG_POST = Math.round(0.50 * FS);   // +500 ms
   const AVG_LEN = AVG_PRE + AVG_POST + 1;
@@ -149,8 +122,8 @@
     const tnow = now();
     for (let k = 0; k < pendingBeats.length; ) {
       const b = pendingBeats[k];
-      const nb = ecgFit.ready ? Math.round(ecgFit.idx(b.ta)) : 0;
-      if (!ecgLive() || nb - ecgLast > 2.5 * FS) {    // no ECG: plot RR at arrival time
+      const nb = b.nb;
+      if (!ecgLive() || nb < 0) {                     // no ECG: plot RR at arrival time
         placeRr(b.rr, b.ta, false); pendingBeats.splice(k, 1); continue;
       }
       if (ecgLast < nb + SNAP_FWD) { k++; continue; } // wait for the samples after the beat
@@ -175,7 +148,7 @@
       if (ok) segs.push(seg);
     }
     while (beatDots.length && beatDots[0] <= ecgLast - RING) beatDots.shift();
-    const tOld = tnow - DELAY - WIN_MAX - 2;
+    const tOld = tnow - delayNow - WIN_MAX - 2;
     while (rrPts.length && xOfPt(rrPts[0]) < tOld) rrPts.shift();
   }
 
@@ -331,7 +304,7 @@
 
   function drawStrip() {
     stepZoom();
-    const tEnd = paused ? viewEnd : now() - DELAY, tStart = tEnd - win;
+    const tEnd = paused ? viewEnd : now() - delayNow, tStart = tEnd - win;
     const xr = { min: tStart, max: tEnd };
 
     // ECG: visible index range from the clock fit (+1 sample margin each side)
@@ -374,13 +347,14 @@
     // accelerometer: walk back from the newest sample
     accXs.length = 0; accVs.x.length = 0; accVs.y.length = 0; accVs.z.length = 0;
     const mm = { x: [Infinity, -Infinity], y: [Infinity, -Infinity], z: [Infinity, -Infinity] };
+    const accT = (k) => accFit.t(accI[k % ACC_RING]);
     let first = accN;
-    while (first > 0 && accN - first < ACC_RING && accT[(first - 1) % ACC_RING] >= tStart - 0.1) first--;
+    while (first > 0 && accN - first < ACC_RING && accT(first - 1) >= tStart - 0.1) first--;
     if (first > 0 && accN - first < ACC_RING) first--;   // one sample left of the edge
     for (let k = first; k < accN; k++) {
-      const j = k % ACC_RING;
-      if (accT[j] > tEnd + 0.1) break;
-      accXs.push(accT[j]);
+      const j = k % ACC_RING, x = accT(k);
+      if (x > tEnd + 0.1) break;
+      accXs.push(x);
       for (const [c, arr] of ACC_CH) {
         const v = arr[j]; accVs[c].push(v);
         if (v < mm[c][0]) mm[c][0] = v; if (v > mm[c][1]) mm[c][1] = v;
@@ -434,8 +408,15 @@
   }
 
   // ---------- render loop ----------
+  // playout delay: the larger of the streams' adaptive delays (slewed, never jumps)
+  let delayNow = 0.35, lastFrame = null;
   function frame() {
-    if (!paused) processBeats();   // frozen view: keep beats/RR exactly as they were
+    const t = now(), dt = lastFrame == null ? 0 : Math.min(0.1, t - lastFrame);
+    lastFrame = t;
+    if (!paused) {
+      delayNow = Math.max(ecgFit.displayDelay(t, dt), accFit.ready ? accFit.displayDelay(t, dt) : 0);
+      processBeats();              // frozen view: keep beats/RR exactly as they were
+    }
     drawStrip();
     requestAnimationFrame(frame);
   }
@@ -494,7 +475,8 @@
   function applyStream(kind, msg, ta) {
     if (kind === "ecg") pushEcg(msg, ta);
     else if (kind === "accel") pushAccel(msg, ta);
-    else if (kind === "rr") pendingBeats.push({ ta, rr: msg });
+    else if (kind === "rr") pendingBeats.push({ ta, rr: msg, nb: ecgLast });
+    else if (kind === "link") accLinkBroken = true;
   }
 
   function oldestTime() {
@@ -507,7 +489,7 @@
   function setPaused(p) {
     if (p === paused) return;
     if (p) {
-      pausedAt = now() - DELAY;
+      pausedAt = now() - delayNow;
       viewEnd = viewEndTarget = pausedAt;
       paused = true;
     } else {
@@ -672,6 +654,8 @@
   }
 
   function onStatus(msg) {
+    if (!["connected", "demo"].includes(msg.state) && ["connected", "demo"].includes(status.state))
+      stream("link", null);        // ordered with the data, so a paused replay sees it too
     status = msg;
     const el = $("status");
     el.classList.remove("status-on", "status-off", "status-demo", "status-wait", "status-idle");
@@ -763,6 +747,9 @@
     };
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
   }
+
+  // handle for poking at the clocks from the devtools console
+  window.hrmDebug = { ecgFit, accFit, delay: () => delayNow, paused: () => paused };
 
   // ---------- init ----------
   window.addEventListener("load", () => {
