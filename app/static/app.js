@@ -98,7 +98,58 @@
     if (msg.rr && msg.rr.length) {
       setText("rr", Math.round(msg.rr[msg.rr.length - 1]));
       stream("rr", msg.rr.slice());
+      hrvAdd(msg.rr);
     }
+  }
+
+  // ---------- HRV (time domain) over a rolling window of firmware RR intervals ----------
+  // Standard short-term metrics: RMSSD (successive differences), SDNN, pNN50.
+  // Artifact/ectopy rejection: RR outside 300–2000 ms or changing > 20 % from the
+  // previous RR is excluded, and successive differences only use two consecutive
+  // accepted beats (so an ectopic beat drops both of its intervals). A pause of
+  // more than 3 s (lost link) breaks the chain.
+  const HRV_WIN = 300, HRV_MIN_S = 30;   // 5 min window, first value after 30 s
+  const hrvBeats = [];                   // { t, rr, ok, chain }  chain: diff to previous is valid
+  let hrvPrev = null;
+  function hrvAdd(rrs) {
+    const tArr = now();
+    // several RRs in one notification: the last beat is "now", earlier ones step back
+    const times = rrs.map(() => tArr);
+    for (let k = rrs.length - 2; k >= 0; k--) times[k] = times[k + 1] - rrs[k + 1] / 1000;
+    rrs.forEach((rr, k) => {
+      const t = times[k], prev = hrvPrev;
+      const linked = prev && t - prev.t < rr / 1000 + 3;
+      const ok = rr >= 300 && rr <= 2000 && (!linked || Math.abs(rr - prev.rr) <= 0.2 * prev.rr);
+      const beat = { t, rr, ok, chain: ok && linked && prev.ok };
+      hrvBeats.push(beat);
+      hrvPrev = beat;
+    });
+    while (hrvBeats.length && hrvBeats[0].t < tArr - HRV_WIN) hrvBeats.shift();
+    hrvUpdate();
+  }
+  function hrvUpdate() {
+    const good = hrvBeats.filter((b) => b.ok);
+    const span = hrvBeats.length ? hrvBeats[hrvBeats.length - 1].t - hrvBeats[0].t : 0;
+    if (good.length < 10 || span < HRV_MIN_S) {
+      setText("hrv", "--");
+      setText("hrv-sub", `collecting… ${Math.round(span)} / ${HRV_MIN_S} s`);
+      return;
+    }
+    let sumSq = 0, nDiff = 0, nn50 = 0;
+    for (let i = 1; i < hrvBeats.length; i++) {
+      if (!hrvBeats[i].chain) continue;
+      const d = hrvBeats[i].rr - hrvBeats[i - 1].rr;
+      sumSq += d * d; nDiff++;
+      if (Math.abs(d) > 50) nn50++;
+    }
+    const mean = good.reduce((a, b) => a + b.rr, 0) / good.length;
+    const sdnn = Math.sqrt(good.reduce((a, b) => a + (b.rr - mean) ** 2, 0) / (good.length - 1));
+    const rmssd = nDiff ? Math.sqrt(sumSq / nDiff) : NaN;
+    setText("hrv", Number.isFinite(rmssd) ? Math.round(rmssd) : "--");
+    const win = span < HRV_WIN - 5 ? `${Math.round(span)} s` : "5 min";
+    setText("hrv-sub", `SDNN ${Math.round(sdnn)} ms · pNN50 ${nDiff ? Math.round(100 * nn50 / nDiff) : 0} % · ` +
+                       `${good.length} beats / ${win}` +
+                       (good.length < hrvBeats.length ? ` · ${hrvBeats.length - good.length} excluded` : ""));
   }
 
   // place RR values ending at beat position `end` (sample index or time)

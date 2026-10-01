@@ -39,7 +39,8 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
   - `ectopy_<session>.csv` — `unix_time, type, coupling_ms, pause_ms, pvc, pac, artifact, total, burden_pct`
   - `battery_<session>.csv` — `unix_time, pct`
 - Live dashboard at **http://localhost:8770** (opened automatically): rolling
-  ECG waveform, big HR number + RR, RR/HRV tachogram, accelerometer + step count,
+  ECG waveform, big HR number + RR, live HRV (RMSSD, SDNN, pNN50 over a rolling
+  5 min window, ectopic/artifact beats excluded), RR/HRV tachogram, accelerometer + step count,
   ectopy counts / burden / event log, and battery. Dark theme. The page
   reconnects its WebSocket by itself if you reload it.
 
