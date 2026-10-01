@@ -106,22 +106,32 @@ static uint8_t hrm_ccc;
 static uint8_t body_loc = 0x01;   /* chest */
 
 /* ---- BLE TX decouple ------------------------------------------------
- * The sampling thread must NEVER call bt_gatt_notify (it blocks when the few
- * ACL TX buffers fill on a slow host, which stalls sampling and loses samples).
- * It enqueues packets here; a lower-priority TX thread drains them with notify.
- * Queue full -> drop the newest; the ECG seq lets the app see the gap. */
+ * The sampling thread must NEVER call bt_gatt_notify (it blocks there when the
+ * few ACL TX buffers fill on a slow host, which stalls sampling and loses
+ * samples). It enqueues packets here; a delayable work item drains them with
+ * bt_gatt_notify. Note: on the system workqueue, bt_gatt_notify is forced to
+ * K_NO_WAIT by the host, so a full pool returns -ENOMEM instead of blocking --
+ * we then hold the packet and retry, rather than discarding the queue.
+ * Queue full on enqueue -> drop newest; ECG seq lets the app see the gap. */
 enum { TX_ECG, TX_ACCEL, TX_HR, TX_ECTOPY };
 struct tx_pkt { uint8_t type; uint8_t len; uint8_t data[42]; };
-K_MSGQ_DEFINE(txq, sizeof(struct tx_pkt), 8, 4);
+#define TXQ_DEPTH 8
+K_MSGQ_DEFINE(txq, sizeof(struct tx_pkt), TXQ_DEPTH, 4);
 static uint32_t tx_dropped;
-static struct k_work tx_work;   /* drains txq on the system workqueue */
+static struct k_work_delayable tx_dwork;   /* drains txq on the system workqueue */
 static void tx_enqueue(uint8_t type, const void *data, uint8_t len)
 {
+	/* ECG priority: once the queue is half full, drop accel first (high rate,
+	 * least critical) so ECG/HR/ectopy keep their slots during a host stall. */
+	if (type == TX_ACCEL && k_msgq_num_used_get(&txq) >= TXQ_DEPTH / 2) {
+		tx_dropped++;
+		return;
+	}
 	struct tx_pkt p;
 	p.type = type; p.len = len;
 	memcpy(p.data, data, len);
 	if (k_msgq_put(&txq, &p, K_NO_WAIT) != 0) tx_dropped++;
-	k_work_submit(&tx_work);
+	k_work_reschedule(&tx_dwork, K_NO_WAIT);
 }
 
 static void hrm_ccc_changed(const struct bt_gatt_attr *a, uint16_t v) { hrm_ccc = (v == BT_GATT_CCC_NOTIFY); }
@@ -227,18 +237,28 @@ static void ect_notify(uint8_t type, uint16_t coupling_ms, uint16_t pause_ms)
  * items (re-advertise), never sampling. */
 static void tx_work_fn(struct k_work *w)
 {
-	struct tx_pkt p;
+	static struct tx_pkt pend;
+	static bool have_pend;
 	ARG_UNUSED(w);
-	while (k_msgq_get(&txq, &p, K_NO_WAIT) == 0) {
+	while (1) {
+		if (!have_pend) {
+			if (k_msgq_get(&txq, &pend, K_NO_WAIT) != 0) return;   /* queue empty */
+			have_pend = true;
+		}
 		const struct bt_gatt_attr *attr;
-		switch (p.type) {
+		switch (pend.type) {
 		case TX_ECG:    attr = &cap_svc.attrs[2];  break;
 		case TX_ACCEL:  attr = &accs_svc.attrs[2]; break;
 		case TX_HR:     attr = &hrm_svc.attrs[2];  break;
 		case TX_ECTOPY: attr = &ect_svc.attrs[2];  break;
-		default: continue;
+		default: have_pend = false; continue;
 		}
-		(void)bt_gatt_notify(NULL, attr, p.data, p.len);
+		int err = bt_gatt_notify(NULL, attr, pend.data, pend.len);
+		if (err == -ENOMEM || err == -EAGAIN) {
+			k_work_reschedule(&tx_dwork, K_MSEC(4));   /* TX buffers full: hold + retry */
+			return;
+		}
+		have_pend = false;   /* sent, or dropped on -ENOTCONN etc. */
 	}
 }
 
@@ -526,7 +546,7 @@ int main(void)
 		LOG_ERR("bt_enable failed");
 		return -1;
 	}
-	k_work_init(&tx_work, tx_work_fn);
+	k_work_init_delayable(&tx_dwork, tx_work_fn);
 	k_timer_start(&sample_timer, K_NO_WAIT, K_USEC(1000000 / SAMPLE_HZ));
 
 	int64_t active_start = k_uptime_get();
