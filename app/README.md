@@ -43,7 +43,19 @@ time, so the bursty BLE packets scroll smoothly instead of jumping.
 
 ## Install
 
-Use a virtual environment:
+Needs **Python 3.10+**. The install scripts create a local `.venv`, install the
+requirements and check that Bluetooth is usable:
+
+| OS            | Install                                   | Start                    |
+|---------------|-------------------------------------------|--------------------------|
+| Linux / macOS | `./install.sh`                            | `./run.sh`               |
+| Windows       | double-click `install.bat` (or `.\install.ps1`) | `run.bat`         |
+
+Options of `app.py` pass straight through the start scripts, e.g.
+`./run.sh --demo` or `run.bat --port 9000`. Re-running the installer reuses the
+existing `.venv`; `--force` (Windows: `-Force`) rebuilds it.
+
+Manual install, if you prefer:
 
 ```bash
 cd ~/hrm-fw/app
@@ -108,5 +120,7 @@ app/
 ├── webserver.py      # aiohttp: serves the dashboard + /ws
 ├── static/           # index.html + app.js + style.css (uPlot via CDN)
 ├── recordings/       # CSV output (created on first run)
-└── requirements.txt
+├── requirements.txt
+├── install.sh / run.sh                 # Linux + macOS installer / launcher
+└── install.ps1 / install.bat / run.bat # Windows installer / launcher
 ```
