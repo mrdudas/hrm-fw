@@ -42,6 +42,7 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
                                         * after power-on/wake (~7 s transient) +
                                         * IIR filter settle, before detecting     */
 #define RAW_BATCH      20             /* raw samples per BLE notification      */
+#define ACC_BATCH      5              /* accel samples batched per BLE notify (25 Hz -> 5/s) */
 #define TWAVE_MS       360            /* T-wave window after a QRS (Pan-Tompkins) */
 #define TWAVE_FRAC     0.5f           /* peak in that window below this*QRS energy = T-wave */
 #define SNR_GATE       8.0f           /* classify ectopy only when spki > this*npki (clean signal) */
@@ -583,13 +584,24 @@ int main(void)
 			int16_t xyz[3];
 			if (acc_read6(xyz)) {
 				step_update(xyz[0], xyz[1], xyz[2]);
+				/* batch ACC_BATCH samples into one notify (25 Hz -> 5/s): fewer
+				 * packets + less TX-queue pressure. Layout (LE): u8 n, then
+				 * n x (int16 x,y,z) oldest first, then u16 steps of the last. */
+				static uint8_t acc_batch[1 + ACC_BATCH * 6 + 2];
+				static uint8_t acc_n;
 				if (accs_ccc) {
-					uint8_t ab[8];
-					sys_put_le16(xyz[0], &ab[0]);
-					sys_put_le16(xyz[1], &ab[2]);
-					sys_put_le16(xyz[2], &ab[4]);
-					sys_put_le16(step_count, &ab[6]);
-					tx_enqueue(TX_ACCEL, ab, sizeof(ab));
+					uint8_t *s = &acc_batch[1 + acc_n * 6];
+					sys_put_le16(xyz[0], &s[0]);
+					sys_put_le16(xyz[1], &s[2]);
+					sys_put_le16(xyz[2], &s[4]);
+					if (++acc_n >= ACC_BATCH) {
+						acc_batch[0] = acc_n;
+						sys_put_le16(step_count, &acc_batch[1 + acc_n * 6]);
+						tx_enqueue(TX_ACCEL, acc_batch, 1 + acc_n * 6 + 2);
+						acc_n = 0;
+					}
+				} else {
+					acc_n = 0;
 				}
 			}
 		}
