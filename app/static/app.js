@@ -32,7 +32,7 @@
 
   // ---------- ECG ring buffer (continuous client-side sample index) ----------
   const ecgRing = new Float32Array(RING).fill(NaN);
-  const ecgFit = new StreamClock(1 / FS, 0.05);
+  const ecgFit = new StreamClock(1 / FS, 0.10);   // ±10 %: follows firmware sample loss
   let ecgLast = -1;           // index of newest sample
   let ecgLastBase = null;     // last server `base` (wraps at 65536 packets)
   let ecgLastArrival = 0;
