@@ -27,6 +27,7 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/services/bas.h>
 #include <hal/nrf_gpio.h>
+#include <string.h>
 
 LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 
@@ -104,6 +105,25 @@ static void battery_update(void)
 static uint8_t hrm_ccc;
 static uint8_t body_loc = 0x01;   /* chest */
 
+/* ---- BLE TX decouple ------------------------------------------------
+ * The sampling thread must NEVER call bt_gatt_notify (it blocks when the few
+ * ACL TX buffers fill on a slow host, which stalls sampling and loses samples).
+ * It enqueues packets here; a lower-priority TX thread drains them with notify.
+ * Queue full -> drop the newest; the ECG seq lets the app see the gap. */
+enum { TX_ECG, TX_ACCEL, TX_HR, TX_ECTOPY };
+struct tx_pkt { uint8_t type; uint8_t len; uint8_t data[42]; };
+K_MSGQ_DEFINE(txq, sizeof(struct tx_pkt), 8, 4);
+static uint32_t tx_dropped;
+static struct k_work tx_work;   /* drains txq on the system workqueue */
+static void tx_enqueue(uint8_t type, const void *data, uint8_t len)
+{
+	struct tx_pkt p;
+	p.type = type; p.len = len;
+	memcpy(p.data, data, len);
+	if (k_msgq_put(&txq, &p, K_NO_WAIT) != 0) tx_dropped++;
+	k_work_submit(&tx_work);
+}
+
 static void hrm_ccc_changed(const struct bt_gatt_attr *a, uint16_t v) { hrm_ccc = (v == BT_GATT_CCC_NOTIFY); }
 static ssize_t read_bsl(struct bt_conn *c, const struct bt_gatt_attr *a, void *buf, uint16_t len, uint16_t off)
 {
@@ -124,7 +144,7 @@ static void hrm_notify(uint8_t hr, uint16_t rr_1024)
 	uint8_t buf[4] = { BIT(1) | BIT(2) | BIT(4), hr, 0, 0 };  /* contact + RR present */
 	sys_put_le16(rr_1024, &buf[2]);
 	if (hrm_ccc) {
-		bt_gatt_notify(NULL, &hrm_svc.attrs[2], buf, sizeof(buf));
+		tx_enqueue(TX_HR, buf, sizeof(buf));
 	}
 }
 
@@ -198,7 +218,28 @@ static void ect_notify(uint8_t type, uint16_t coupling_ms, uint16_t pause_ms)
 	sys_put_le16(coupling_ms, &ect_buf[2]);
 	sys_put_le16(pause_ms,    &ect_buf[4]);
 	ect_stats_to_buf();
-	if (ect_ccc) bt_gatt_notify(NULL, &ect_svc.attrs[2], ect_buf, sizeof(ect_buf));
+	if (ect_ccc) tx_enqueue(TX_ECTOPY, ect_buf, sizeof(ect_buf));
+}
+
+/* TX work: drains the queue with bt_gatt_notify on the system workqueue (no
+ * dedicated thread stack). The sampling thread only enqueues, so it never blocks
+ * on BLE. A notify here may block on TX buffers; that only delays other sysworkq
+ * items (re-advertise), never sampling. */
+static void tx_work_fn(struct k_work *w)
+{
+	struct tx_pkt p;
+	ARG_UNUSED(w);
+	while (k_msgq_get(&txq, &p, K_NO_WAIT) == 0) {
+		const struct bt_gatt_attr *attr;
+		switch (p.type) {
+		case TX_ECG:    attr = &cap_svc.attrs[2];  break;
+		case TX_ACCEL:  attr = &accs_svc.attrs[2]; break;
+		case TX_HR:     attr = &hrm_svc.attrs[2];  break;
+		case TX_ECTOPY: attr = &ect_svc.attrs[2];  break;
+		default: continue;
+		}
+		(void)bt_gatt_notify(NULL, attr, p.data, p.len);
+	}
 }
 
 /* ---- Advertising ----------------------------------------------------- */
@@ -220,7 +261,6 @@ BT_CONN_CB_DEFINE(conn_cb) = { .connected = connected, .disconnected = disconnec
 static void bt_ready(int e) { if (!e) k_work_submit(&adv_work); }
 
 /* ---- Power / status LED --------------------------------------------- */
-static uint32_t cyc_per_sec;
 static volatile int64_t  last_beat_ms;
 static volatile int64_t  last_motion_ms;   /* updated by the accelerometer when moving */
 static volatile uint32_t sample_idx, led_off_idx;
@@ -283,8 +323,8 @@ static void detector_feed(int16_t sample)
 	if (sample < RAIL_LO || sample > RAIL_HI) rail_recent = RAIL_WIN;
 	else if (rail_recent) rail_recent--;
 
-	uint32_t now  = k_cycle_get_32();
-	uint32_t refr = (uint64_t)cyc_per_sec * REFRACTORY_MS / 1000;
+	uint32_t now  = sample_idx;   /* sample index = real time, jitter-immune */
+	uint32_t refr = REFRACTORY_MS * SAMPLE_HZ / 1000;   /* samples */
 
 	/* adaptive threshold; relax toward NPKI (search-back) if a beat is overdue */
 	float k = 0.25f;
@@ -304,7 +344,7 @@ static void detector_feed(int16_t sample)
 		 * last QRS is the T-wave, not a beat. The band-pass already suppresses the
 		 * T-wave, so its energy is a small fraction of a real QRS. Rejecting it also
 		 * stops it from arming the refractory and masking the true next QRS. */
-		uint32_t twin = (uint64_t)cyc_per_sec * TWAVE_MS / 1000;
+		uint32_t twin = TWAVE_MS * SAMPLE_HZ / 1000;   /* samples */
 		bool twave = have_last && (now - last_cyc) < twin &&
 			     cand_peak < TWAVE_FRAC * last_qrs_peak;
 		if (!in_refr && !twave && cand_peak > thresh && cand_peak > 50.0f /* noise floor */) {
@@ -312,9 +352,9 @@ static void detector_feed(int16_t sample)
 			led_on(); led_off_idx = sample_idx + LED_PULSE_N;  /* heartbeat blink */
 			if (have_last) {
 				uint32_t d = now - last_cyc;
-				uint32_t rr_ms = (uint64_t)d * 1000 / cyc_per_sec;
+				uint32_t rr_ms = (uint32_t)d * 1000 / SAMPLE_HZ;
 				if (rr_ms >= RR_MIN_MS && rr_ms <= RR_MAX_MS) {
-					uint16_t rr_1024 = (uint16_t)((uint64_t)d * 1024 / cyc_per_sec);
+					uint16_t rr_1024 = (uint16_t)((uint32_t)d * 1024 / SAMPLE_HZ);
 					uint8_t hr = hr_from_rr(rr_ms);
 					LOG_INF("beat RR=%u HR=%u", rr_ms, hr);
 					hrm_notify(hr, rr_1024);
@@ -372,9 +412,8 @@ static void detector_feed(int16_t sample)
 }
 
 /* ---- Sampling loop --------------------------------------------------- */
-static K_SEM_DEFINE(tick_sem, 0, 1);
-static void tick(struct k_timer *t) { k_sem_give(&tick_sem); }
-static K_TIMER_DEFINE(sample_timer, tick, NULL);
+static K_TIMER_DEFINE(sample_timer, NULL, NULL);   /* no callback; polled with k_timer_status_sync */
+static uint32_t lost_ticks;   /* ticks whose sample we couldn't read (sampler no longer blocks -> ~0) */
 
 /* ---- SC7A20 accelerometer: motion-wake (I2C bit-bang, SCL=P0.16, SDA=P0.18,
  * addr 0x19). Its INT1 pin is wired to nRF P0.14 (active-high). We arm a motion
@@ -464,7 +503,6 @@ int main(void)
 	uint8_t raw_buf[2 + RAW_BATCH * 2];
 	uint16_t seq = 0; int rn = 0;
 
-	cyc_per_sec = sys_clock_hw_cycles_per_sec();
 	LOG_INF("HRM raw-RR+ECG firmware boot");
 
 	nrf_gpio_cfg_output(LED_PIN);
@@ -488,6 +526,7 @@ int main(void)
 		LOG_ERR("bt_enable failed");
 		return -1;
 	}
+	k_work_init(&tx_work, tx_work_fn);
 	k_timer_start(&sample_timer, K_NO_WAIT, K_USEC(1000000 / SAMPLE_HZ));
 
 	int64_t active_start = k_uptime_get();
@@ -498,10 +537,13 @@ int main(void)
 	int  contact_lp = 0;           /* P0.12 debounce integrator */
 
 	while (1) {
-		k_sem_take(&tick_sem, K_FOREVER);
+		/* block until the next 250 Hz tick; ticks returns how many expired since
+		 * the last call, so sample_idx tracks real time even if one is ever missed */
+		uint32_t ticks = k_timer_status_sync(&sample_timer);
+		if (ticks > 1) lost_ticks += ticks - 1;
 		if (adc_read_dt(&adc_ch, &adc_seq) != 0) continue;
 
-		sample_idx++;
+		sample_idx += ticks;
 		if (led_off_idx && sample_idx >= led_off_idx) { led_off(); led_off_idx = 0; }
 
 		detector_feed(adc_raw);
@@ -511,7 +553,7 @@ int main(void)
 		if (++rn >= RAW_BATCH) {
 			sys_put_le16(seq++, &raw_buf[0]);
 			if (cap_ccc) {
-				bt_gatt_notify(NULL, &cap_svc.attrs[2], raw_buf, sizeof(raw_buf));
+				tx_enqueue(TX_ECG, raw_buf, sizeof(raw_buf));
 			}
 			rn = 0;
 		}
@@ -527,7 +569,7 @@ int main(void)
 					sys_put_le16(xyz[1], &ab[2]);
 					sys_put_le16(xyz[2], &ab[4]);
 					sys_put_le16(step_count, &ab[6]);
-					bt_gatt_notify(NULL, &accs_svc.attrs[2], ab, sizeof(ab));
+					tx_enqueue(TX_ACCEL, ab, sizeof(ab));
 				}
 			}
 		}
