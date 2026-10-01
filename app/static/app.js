@@ -1,162 +1,427 @@
 /* HRM Raw RR dashboard client.
- * Connects to /ws, keeps rolling buffers, and drives:
- *   - uPlot   for the raw ECG waveform (250 Hz, 6 s window)
- *   - Plotly  for the RR/HRV tachogram and the accelerometer
+ * Connects to /ws, keeps rolling ring buffers, and drives (all uPlot / canvas):
+ *   - the live strip: ECG + Accel X/Y/Z + RR as stacked lanes on one time axis
+ *   - the signal-averaged (R-aligned) beat
  *   - plain DOM for HR, steps, ectopy counts/log and battery.
+ *
+ * Smooth scrolling: data arrives in bursts (20 ECG samples per BLE packet, and
+ * BLE groups packets per connection event). Instead of plotting "newest sample
+ * = now", each stream gets a ClockFit — a least-squares fit of sample index vs
+ * arrival time — so every sample has a steady timestamp. The view is rendered
+ * every animation frame at (now - DELAY), so the trace glides continuously
+ * and the jitter is hidden behind the playout delay.
+ *
  * Auto-reconnects the WebSocket if the link or the page connection drops.
  */
 (() => {
   "use strict";
 
-  const COL = { ecg:"#4bd1a0", rr:"#ff5470", x:"#5aa2ff", y:"#ffb454", z:"#c792ea",
-                grid:"#232936", text:"#8b96a5" };
+  const COL = { ecg:"#4bd1a0", beat:"#ff2d2d", rr:"#ff5470", x:"#5aa2ff", y:"#ffb454", z:"#c792ea",
+                grid:"#232936", gridMinor:"#1b2029", text:"#8b96a5",
+                meas:"#f2f5f8", measFill:"rgba(242,245,248,0.07)", measBox:"rgba(14,17,22,0.85)" };
+  const FONT = "11px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif";
 
-  // ---------- unified strip chart: ECG + Accel X/Y/Z + RR on one time axis ----------
-  const FS = 250, WIN = 6, ECG_WIN = FS * WIN;   // 1500 ECG samples = 6 s
-  const nowS = () => performance.now() / 1000;
-  const PLOTLY_CFG = { displayModeBar: false, responsive: true };
-  const AX = { gridcolor: COL.grid, zeroline: false };
+  const FS = 250;            // ECG sample rate (Hz)
+  const ACC_FS = 25;         // accelerometer rate (Hz, nominal)
+  const WIN_DEFAULT = 6;     // visible window (s), zoomable WIN_MIN..WIN_MAX
+  const WIN_MIN = 2, WIN_MAX = 60;
+  const DELAY = 0.35;        // playout delay (s): hides BLE burst jitter
+  const RING = FS * (WIN_MAX + 4);   // ECG ring buffer: longest window + margin
 
-  // ECG rolling buffer; fixed x = -6..0 s (newest sample at 0)
-  const ecgX = new Float64Array(ECG_WIN);
-  for (let i = 0; i < ECG_WIN; i++) ecgX[i] = (i - (ECG_WIN - 1)) / FS;
-  const ecgY = new Array(ECG_WIN).fill(null);
-  function pushEcg(samples) {
-    for (const s of samples) ecgY.push(s);
-    while (ecgY.length > ECG_WIN) ecgY.shift();
-    while (ecgY.length < ECG_WIN) ecgY.unshift(null);
-  }
+  const now = () => (performance.timeOrigin + performance.now()) / 1000;
+  const $ = (id) => document.getElementById(id);
+  function setText(id, v) { const e = $(id); if (e) e.textContent = v; }
 
-  // accel + RR: time-stamped rolling buffers (x = seconds relative to now)
-  const accTs = [], accX = [], accY = [], accZ = [];
-  const rrTs = [], rrVals = [];
-  function pushAccel(m) {
-    const t = nowS();
-    accTs.push(t); accX.push(m.x); accY.push(m.y); accZ.push(m.z);
-    while (accTs.length && accTs[0] < t - WIN - 1) { accTs.shift(); accX.shift(); accY.shift(); accZ.shift(); }
-    setText("steps", m.steps);
-  }
-  function pushRr(ms) {
-    const t = nowS();
-    rrTs.push(t); rrVals.push(Math.round(ms));
-    while (rrTs.length && rrTs[0] < t - WIN - 1) { rrTs.shift(); rrVals.shift(); }
-    pendingBeats.push(t);   // queue this beat for the signal-average
-    setTimeout(() => snapBeatDot(t), 150); // snap the red dot once (ECG data settled)
-  }
-
-  // red dots on the ECG lane at each firmware-detected beat. The R peak is snapped
-  // ONCE (shortly after the beat, when the ECG data is present), then stored with a
-  // fixed absolute time + value and only SLID with the ECG — never recomputed per
-  // frame, so the dot no longer jitters.
-  const beatDots = [];   // { t: absolute peak time (s), y: peak value }
-  function snapBeatDot(tb) {
-    const t0 = nowS();
-    const xb = tb - t0;
-    if (xb < -WIN) return;                 // beat already scrolled off
-    const base = ecgBaseline();
-    const ib = Math.round(xb * FS + (ECG_WIN - 1));
-    const BACK = Math.round(0.30 * FS), FWD = Math.round(0.05 * FS);
-    let best = -1, bestv = -1e18;
-    for (let j = Math.max(0, ib - BACK); j <= Math.min(ECG_WIN - 1, ib + FWD); j++) {
-      const v = ecgY[j]; if (v == null) continue;
-      const d = v - base;                  // R peak = max positive deviation
-      if (d > bestv) { bestv = d; best = j; }
+  // ---------- ClockFit: sample index -> smooth timestamp ----------
+  // Linear least squares t = a + b*i over the last `maxPts` packets. The slope is
+  // clamped around the nominal period so a short history can't go wild; a big
+  // residual (reconnect, stall) resets the fit.
+  class ClockFit {
+    constructor(period, maxPts, tol) { this.nom = period; this.max = maxPts; this.tol = tol; this.reset(); }
+    reset() { this.pi = []; this.pt = []; this.i0 = null; this.t0 = null; this.a = 0; this.b = this.nom; }
+    get ready() { return this.i0 != null; }
+    add(i, t) {
+      if (this.ready && Math.abs(t - this.t(i)) > 1.0) this.reset();
+      if (!this.ready) { this.i0 = i; this.t0 = t; }
+      const pi = this.pi, pt = this.pt;
+      pi.push(i - this.i0); pt.push(t - this.t0);
+      if (pi.length > this.max) { pi.shift(); pt.shift(); }
+      const n = pi.length;
+      let mi = 0, mt = 0;
+      for (let k = 0; k < n; k++) { mi += pi[k]; mt += pt[k]; }
+      mi /= n; mt /= n;
+      let b = this.nom;
+      if ((pi[n - 1] - pi[0]) * this.nom > 3) {        // need >3 s of history for a slope
+        let sxy = 0, sxx = 0;
+        for (let k = 0; k < n; k++) { const dx = pi[k] - mi; sxy += dx * (pt[k] - mt); sxx += dx * dx; }
+        b = Math.min(this.nom * (1 + this.tol), Math.max(this.nom * (1 - this.tol), sxy / sxx));
+      }
+      this.b = b; this.a = mt - b * mi;
     }
-    if (best < 0) return;
-    beatDots.push({ t: t0 + ecgX[best], y: ecgY[best] });   // fix absolute time + value
-    while (beatDots.length && beatDots[0].t < t0 - WIN - 1) beatDots.shift();
+    t(i) { return this.t0 + this.a + this.b * (i - this.i0); }
+    idx(t) { return (t - this.t0 - this.a) / this.b + this.i0; }
   }
 
-  // one Plotly chart, stacked lanes (ECG / X / Y / Z / RR), shared time x-axis
-  function stripTraces() {
-    const t0 = nowS();
-    const ax = accTs.map((t) => t - t0);
-    const rx = rrTs.map((t) => t - t0);
-    const bx = [], by = [];                // stored dots, just slid (not recomputed)
-    for (const d of beatDots) { const x = d.t - t0; if (x >= -WIN && x <= 0.1) { bx.push(x); by.push(d.y); } }
-    return [
-      { x: ecgX, y: ecgY.slice(), name: "ECG", mode: "lines", line: { color: COL.ecg, width: 1 }, yaxis: "y" },
-      { x: bx, y: by, name: "beat", mode: "markers",
-        marker: { size: 7, color: "#ff2d2d", line: { width: 0 } }, yaxis: "y", hoverinfo: "skip" },
-      { x: ax, y: accX.slice(), name: "X", mode: "lines", line: { color: COL.x, width: 1 }, yaxis: "y2" },
-      { x: ax, y: accY.slice(), name: "Y", mode: "lines", line: { color: COL.y, width: 1 }, yaxis: "y3" },
-      { x: ax, y: accZ.slice(), name: "Z", mode: "lines", line: { color: COL.z, width: 1 }, yaxis: "y4" },
-      { x: rx, y: rrVals.slice(), name: "RR", mode: "lines+markers",
-        line: { color: COL.rr, width: 1.3 }, marker: { size: 4, color: COL.rr }, yaxis: "y5" },
-    ];
+  // ---------- ECG ring buffer (continuous client-side sample index) ----------
+  const ecgRing = new Float32Array(RING).fill(NaN);
+  const ecgFit = new ClockFit(1 / FS, 150, 0.03);
+  let ecgLast = -1;           // index of newest sample
+  let ecgLastBase = null;     // last server `base` (wraps at 65536 packets)
+  let ecgLastArrival = 0;
+  const ecgAt = (n) => (n > ecgLast - RING && n <= ecgLast && n >= 0) ? ecgRing[n % RING] : NaN;
+
+  function pushEcg(msg, ta) {
+    const len = msg.samples.length;
+    let skip = 0;             // samples missing before this packet
+    if (ecgLastBase != null) {
+      const wrap = 65536 * len;
+      const d = (((msg.base - ecgLastBase) % wrap) + wrap) % wrap;
+      if (d !== len) {
+        if (d > len && d <= 2 * FS) skip = d - len;          // dropped packets: leave a gap
+        else {                                                // restart / reconnect
+          skip = Math.min(RING, Math.max(0, Math.round((ta - ecgLastArrival - len / FS) * FS)));
+          ecgFit.reset();
+        }
+      }
+    }
+    for (let k = 0; k < skip; k++) ecgRing[(ecgLast + 1 + k) % RING] = NaN;
+    ecgLast += skip;
+    for (const s of msg.samples) { ecgLast++; ecgRing[ecgLast % RING] = s; }
+    ecgLastBase = msg.base;
+    ecgLastArrival = ta;
+    ecgFit.add(ecgLast, ta);
   }
-  function stripLayout() {
-    const lane = (dom, title) => ({ ...AX, domain: dom, title: { text: title, font: { size: 10, color: COL.text } } });
-    return {
-      paper_bgcolor: "transparent", plot_bgcolor: "transparent",
-      font: { color: COL.text, size: 11 },
-      margin: { l: 54, r: 10, t: 6, b: 26 },
-      showlegend: false,
-      xaxis:  { ...AX, range: [-WIN, 0], title: "s", anchor: "y5" },
-      yaxis:  lane([0.62, 1.00], "ECG"),
-      yaxis2: lane([0.50, 0.605], "X"),
-      yaxis3: lane([0.385, 0.49], "Y"),
-      yaxis4: lane([0.27, 0.375], "Z"),
-      yaxis5: lane([0.00, 0.22], "RR"),
+  const ecgLive = () => ecgFit.ready && now() - ecgLastArrival < 1.5;
+
+  // ---------- accelerometer ring (timestamps from a packet-counter fit) ----------
+  const ACC_RING = ACC_FS * (WIN_MAX + 6);
+  const accT = new Float64Array(ACC_RING), accX = new Float32Array(ACC_RING),
+        accY = new Float32Array(ACC_RING), accZ = new Float32Array(ACC_RING);
+  const accFit = new ClockFit(1 / ACC_FS, 100, 0.25);
+  const ACC_CH = [["x", accX], ["y", accY], ["z", accZ]];
+  let accN = 0, accK = 0;     // stored count, packet counter
+  function pushAccel(m, ta) {
+    accFit.add(accK, ta);
+    const j = accN % ACC_RING;
+    accT[j] = accFit.t(accK); accX[j] = m.x; accY[j] = m.y; accZ[j] = m.z;
+    accN++; accK++;
+  }
+
+  // ---------- beats: R-peak snapping, RR points, ensemble average ----------
+  const SNAP_BACK = Math.round(0.30 * FS), SNAP_FWD = Math.round(0.05 * FS);
+  const AVG_PRE = Math.round(0.20 * FS);    // -200 ms
+  const AVG_POST = Math.round(0.50 * FS);   // +500 ms
+  const AVG_LEN = AVG_PRE + AVG_POST + 1;
+  const pendingBeats = [];  // { ta, rr: [ms...] }  awaiting ECG data around the beat
+  const pendingSegs = [];   // R indices awaiting +AVG_POST samples
+  const beatDots = [];      // R-peak sample indices (value read back from the ring)
+  const rrPts = [];         // { idx } or { t }, plus { v: rr ms }
+  const segs = [];          // Float32Array(AVG_LEN) ring for the ensemble average
+  let lastR = -1e9;
+
+  function onRr(msg) {
+    if (msg.hr != null) setText("hr", msg.hr);
+    if (msg.contact) setText("contact", msg.contact);
+    if (msg.rr && msg.rr.length) {
+      setText("rr", Math.round(msg.rr[msg.rr.length - 1]));
+      stream("rr", msg.rr.slice());
+    }
+  }
+
+  // place RR values ending at beat position `end` (sample index or time)
+  function placeRr(rr, end, byIdx) {
+    let pos = end;
+    for (let k = rr.length - 1; k >= 0; k--) {
+      rrPts.push(byIdx ? { idx: pos, v: rr[k] } : { t: pos, v: rr[k] });
+      pos -= byIdx ? rr[k] / 1000 * FS : rr[k] / 1000;
+    }
+    rrPts.sort((p, q) => xOfPt(p) - xOfPt(q));
+  }
+  const xOfPt = (p) => p.t != null ? p.t : ecgFit.t(p.idx);
+
+  function localBaseline(n) {
+    let s = 0, c = 0;
+    for (let j = n - 2 * FS; j <= n; j++) { const v = ecgAt(j); if (v === v) { s += v; c++; } }
+    return c ? s / c : 0;
+  }
+
+  function processBeats() {
+    const tnow = now();
+    for (let k = 0; k < pendingBeats.length; ) {
+      const b = pendingBeats[k];
+      const nb = ecgFit.ready ? Math.round(ecgFit.idx(b.ta)) : 0;
+      if (!ecgLive() || nb - ecgLast > 2.5 * FS) {    // no ECG: plot RR at arrival time
+        placeRr(b.rr, b.ta, false); pendingBeats.splice(k, 1); continue;
+      }
+      if (ecgLast < nb + SNAP_FWD) { k++; continue; } // wait for the samples after the beat
+      pendingBeats.splice(k, 1);
+      const base = localBaseline(nb);
+      let best = -1, bestv = -Infinity;
+      for (let j = nb - SNAP_BACK; j <= nb + SNAP_FWD; j++) {
+        const v = ecgAt(j);
+        if (v === v && v - base > bestv) { bestv = v - base; best = j; }
+      }
+      if (best < 0) { placeRr(b.rr, b.ta, false); continue; }
+      placeRr(b.rr, best, true);
+      if (best - lastR > 0.2 * FS) { beatDots.push(best); pendingSegs.push(best); lastR = best; }
+    }
+    for (let k = 0; k < pendingSegs.length; ) {
+      const r = pendingSegs[k];
+      if (ecgLast < r + AVG_POST) { k++; continue; }
+      pendingSegs.splice(k, 1);
+      const seg = new Float32Array(AVG_LEN);
+      let ok = true;
+      for (let i = 0; i < AVG_LEN; i++) { const v = ecgAt(r - AVG_PRE + i); if (v !== v) { ok = false; break; } seg[i] = v; }
+      if (ok) segs.push(seg);
+    }
+    while (beatDots.length && beatDots[0] <= ecgLast - RING) beatDots.shift();
+    const tOld = tnow - DELAY - WIN_MAX - 2;
+    while (rrPts.length && xOfPt(rrPts[0]) < tOld) rrPts.shift();
+  }
+
+  // ---------- smoothed y-ranges (expand at once, shrink slowly) ----------
+  function autoRange(minSpan, pad = 0.12) {
+    const r = { lo: null, hi: null };
+    return (dmin, dmax) => {
+      if (!(dmax >= dmin)) return r.lo == null ? { min: 0, max: 1 } : { min: r.lo, max: r.hi };
+      const mid = (dmin + dmax) / 2, half = Math.max(dmax - dmin, minSpan) * (0.5 + pad);
+      const lo = mid - half, hi = mid + half;
+      if (r.lo == null) { r.lo = lo; r.hi = hi; }
+      else {
+        r.lo = lo < r.lo ? lo : r.lo + (lo - r.lo) * 0.04;
+        r.hi = hi > r.hi ? hi : r.hi + (hi - r.hi) * 0.04;
+      }
+      return { min: r.lo, max: r.hi };
     };
   }
-  function drawStrip() { Plotly.react("strip-chart", stripTraces(), stripLayout(), PLOTLY_CFG); }
-  function makeStrip() { Plotly.newPlot("strip-chart", stripTraces(), stripLayout(), PLOTLY_CFG); }
 
-  // redraw the whole strip on a timer (~14 fps); ECG dominates the point count
-  setInterval(drawStrip, 70);
+  // ---------- strip chart: stacked uPlot lanes sharing one x (unix seconds) ----------
+  const clockCache = new Map();
+  function fmtClock(v, tenths) {
+    const s = Math.round(v * 10) / 10;
+    const key = tenths ? "t" + s : Math.round(s);
+    let str = clockCache.get(key);
+    if (str == null) {
+      str = new Date(Math.floor(s) * 1000).toLocaleTimeString([], { hour12: false });
+      if (tenths) str += "." + Math.round((s - Math.floor(s)) * 10) % 10;
+      if (clockCache.size > 400) clockCache.clear();
+      clockCache.set(key, str);
+    }
+    return str;
+  }
+  // tick labels: tenths of a second only when the tick step is below 1 s
+  const clockValues = (u, splits) => {
+    const tenths = splits.length > 1 && splits[1] - splits[0] < 0.99;
+    return splits.map((v) => fmtClock(v, tenths));
+  };
 
-  // ---------- signal-averaged beat (ensemble average of R-aligned segments) ----------
-  const AVG_PRE = Math.round(0.20 * FS);    // 50 samples before R  (-200 ms)
-  const AVG_POST = Math.round(0.50 * FS);   // 125 samples after R  (+500 ms)
-  const AVG_LEN = AVG_PRE + AVG_POST + 1;
-  const avgX = [];
-  for (let i = 0; i < AVG_LEN; i++) avgX.push(Math.round(((i - AVG_PRE) / FS) * 1000)); // ms
-  const segs = [];                 // ring of segments (each length AVG_LEN)
-  const pendingBeats = [];         // beat wall-times awaiting segmentation
+  const LANES = [
+    { key: "ecg", label: "ECG", h: 240, color: COL.ecg, width: 1.2, minSpan: 200, paper: true },
+    { key: "x",   label: "X",   h: 66,  color: COL.x,   width: 1,   minSpan: 400 },
+    { key: "y",   label: "Y",   h: 66,  color: COL.y,   width: 1,   minSpan: 400 },
+    { key: "z",   label: "Z",   h: 66,  color: COL.z,   width: 1,   minSpan: 400 },
+    { key: "rr",  label: "RR ms", h: 140, color: COL.rr, width: 1.4, minSpan: 80, bottom: true },
+  ];
+
+  function laneOpts(L, width) {
+    const axisBase = { stroke: COL.text, font: FONT, ticks: { show: false } };
+    const axes = [
+      { ...axisBase, scale: "x", space: L.bottom ? 70 : 60, incrs: [0.2, 0.5, 1, 2, 5, 10, 15, 30],
+        grid: { stroke: COL.grid, width: 1 },
+        values: L.bottom ? clockValues : (u, splits) => splits.map(() => ""),
+        size: L.bottom ? 26 : 0 },
+      { ...axisBase, scale: "y", label: L.label, labelSize: 14, labelFont: FONT, size: 50, space: L.h < 100 ? 22 : 35,
+        grid: { stroke: COL.grid, width: 1 } },
+    ];
+    if (L.paper) {  // ECG-paper style fine grid: 40 ms / 200 ms as zoom allows (grid only)
+      axes.unshift({ scale: "x", side: 2, size: 0, incrs: [0.04, 0.2, 1, 5], space: 8,
+                     grid: { stroke: COL.gridMinor, width: 1 }, ticks: { show: false }, values: () => [] });
+    }
+    const series = [{}, { stroke: L.color, width: L.width, spanGaps: false, points: { show: false } }];
+    if (L.key === "rr") series[1].points = { show: true, size: 5, fill: COL.rr, stroke: COL.rr };
+    const hooks = { draw: [(u) => drawMeasure(u, L.key === "ecg")] };
+    if (L.key === "ecg") hooks.draw.unshift(drawBeatDots);
+    return {
+      width, height: L.h, legend: { show: false }, pxAlign: 0,
+      padding: [4, 8, L.bottom ? 0 : 4, 0],
+      cursor: { sync: { key: "strip" }, y: false, points: { show: false },
+                drag: { x: false, y: false, setScale: false } },
+      scales: { x: { time: false, auto: false }, y: { auto: false } },
+      axes, series, hooks,
+    };
+  }
+
+  function drawBeatDots(u) {
+    if (!beatDots.length) return;
+    const ctx = u.ctx, { left, top, width, height } = u.bbox;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(left, top, width, height); ctx.clip();
+    ctx.fillStyle = COL.beat;
+    const r = 3.5 * devicePixelRatio;
+    for (const n of beatDots) {
+      const v = ecgAt(n);
+      if (v !== v) continue;
+      const px = u.valToPos(ecgFit.t(n), "x", true), py = u.valToPos(v, "y", true);
+      ctx.beginPath(); ctx.arc(px, py, r, 0, 2 * Math.PI); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // measurement overlay: A/B lines (or A + the cursor while placing B), shaded
+  // span on every lane, Δt label on the ECG lane
+  function drawMeasure(u, withLabel) {
+    const a = meas.a;
+    const b = meas.b != null ? meas.b : (measureMode && hoverT != null ? hoverT : null);
+    if (a == null) return;
+    const ctx = u.ctx, { left, top, width, height } = u.bbox, dpr = devicePixelRatio;
+    const xa = u.valToPos(a, "x", true), xb = b != null ? u.valToPos(b, "x", true) : null;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(left, top, width, height); ctx.clip();
+    if (xb != null) {
+      ctx.fillStyle = COL.measFill;
+      ctx.fillRect(Math.min(xa, xb), top, Math.abs(xb - xa), height);
+    }
+    ctx.strokeStyle = COL.meas; ctx.lineWidth = dpr;
+    ctx.setLineDash(meas.b == null ? [4 * dpr, 3 * dpr] : []);
+    for (const x of xb != null ? [xa, xb] : [xa]) {
+      ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + height); ctx.stroke();
+    }
+    if (withLabel && xb != null && b !== a && Math.max(xa, xb) > left && Math.min(xa, xb) < left + width) {
+      const txt = measText(a, b);
+      ctx.setLineDash([]);
+      ctx.font = `600 ${12 * dpr}px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif`;
+      const tw = ctx.measureText(txt).width, pad = 6 * dpr, bh = 20 * dpr;
+      let x = (xa + xb) / 2 - tw / 2 - pad;
+      x = Math.max(left + 2 * dpr, Math.min(left + width - tw - 2 * pad - 2 * dpr, x));
+      const y = top + 4 * dpr;
+      ctx.fillStyle = COL.measBox; ctx.fillRect(x, y, tw + 2 * pad, bh);
+      ctx.fillStyle = COL.meas; ctx.textBaseline = "middle"; ctx.textAlign = "left";
+      ctx.fillText(txt, x + pad, y + bh / 2);
+    }
+    ctx.restore();
+  }
+  function measText(a, b) {
+    const ms = Math.abs(b - a) * 1000;
+    return `Δt ${ms < 10000 ? ms.toFixed(0) + " ms" : (ms / 1000).toFixed(2) + " s"}` +
+           (ms > 0 ? ` · ${(60000 / ms).toFixed(1)} bpm` : "");
+  }
+
+  const lanes = {};     // key -> { u, range }
+  function makeStrip() {
+    const host = $("strip-chart");
+    const w = host.clientWidth;
+    for (const L of LANES) {
+      const div = document.createElement("div");
+      div.className = "lane";
+      host.appendChild(div);
+      lanes[L.key] = { u: new uPlot(laneOpts(L, w), [[], []], div), range: autoRange(L.minSpan) };
+    }
+  }
+
+  // reusable plain arrays (uPlot needs null for gaps, typed arrays can't hold it)
+  const ecgXs = [], ecgYs = [], accXs = [], accVs = { x: [], y: [], z: [] };
+  function update(key, data, xr, dmin, dmax) {
+    const lane = lanes[key];
+    lane.u.batch(() => {
+      lane.u.setData(data, false);
+      lane.u.setScale("x", xr);
+      lane.u.setScale("y", lane.range(dmin, dmax));
+    });
+  }
+
+  function drawStrip() {
+    stepZoom();
+    const tEnd = paused ? viewEnd : now() - DELAY, tStart = tEnd - win;
+    const xr = { min: tStart, max: tEnd };
+
+    // ECG: visible index range from the clock fit (+1 sample margin each side)
+    ecgXs.length = 0; ecgYs.length = 0;
+    let emin = Infinity, emax = -Infinity;
+    if (ecgFit.ready) {
+      const i0 = Math.max(ecgLast - RING + 1, Math.floor(ecgFit.idx(tStart)) - 1, 0);
+      const i1 = Math.min(ecgLast, Math.ceil(ecgFit.idx(tEnd)) + 1);
+      // zoomed out: min/max per bucket (~1 bucket per pixel) keeps every R peak
+      // but caps the point count. Buckets are aligned to the absolute sample
+      // index so they don't shimmer while the trace scrolls.
+      const bucket = Math.max(1, Math.floor((i1 - i0 + 1) / lanes.ecg.u.bbox.width * devicePixelRatio));
+      if (bucket === 1) {
+        for (let n = i0; n <= i1; n++) {
+          const v = ecgRing[n % RING];
+          ecgXs.push(ecgFit.t(n));
+          if (v === v) { ecgYs.push(v); if (v < emin) emin = v; if (v > emax) emax = v; }
+          else ecgYs.push(null);
+        }
+      } else {
+        for (let b = i0 - (i0 % bucket); b <= i1; b += bucket) {
+          let lo = Infinity, hi = -Infinity, nlo = b, nhi = b, gap = false;
+          for (let n = Math.max(b, i0); n < b + bucket && n <= i1; n++) {
+            const v = ecgRing[n % RING];
+            if (v !== v) { gap = true; continue; }
+            if (v < lo) { lo = v; nlo = n; }
+            if (v > hi) { hi = v; nhi = n; }
+          }
+          if (gap || lo > hi) { ecgXs.push(ecgFit.t(b)); ecgYs.push(null); }
+          if (lo > hi) continue;
+          const [na, va, nb, vb] = nlo <= nhi ? [nlo, lo, nhi, hi] : [nhi, hi, nlo, lo];
+          ecgXs.push(ecgFit.t(na)); ecgYs.push(va);
+          if (nb !== na) { ecgXs.push(ecgFit.t(nb)); ecgYs.push(vb); }
+          if (lo < emin) emin = lo; if (hi > emax) emax = hi;
+        }
+      }
+    }
+    update("ecg", [ecgXs, ecgYs], xr, emin, emax);
+
+    // accelerometer: walk back from the newest sample
+    accXs.length = 0; accVs.x.length = 0; accVs.y.length = 0; accVs.z.length = 0;
+    const mm = { x: [Infinity, -Infinity], y: [Infinity, -Infinity], z: [Infinity, -Infinity] };
+    let first = accN;
+    while (first > 0 && accN - first < ACC_RING && accT[(first - 1) % ACC_RING] >= tStart - 0.1) first--;
+    if (first > 0 && accN - first < ACC_RING) first--;   // one sample left of the edge
+    for (let k = first; k < accN; k++) {
+      const j = k % ACC_RING;
+      if (accT[j] > tEnd + 0.1) break;
+      accXs.push(accT[j]);
+      for (const [c, arr] of ACC_CH) {
+        const v = arr[j]; accVs[c].push(v);
+        if (v < mm[c][0]) mm[c][0] = v; if (v > mm[c][1]) mm[c][1] = v;
+      }
+    }
+    for (const c of ["x", "y", "z"]) update(c, [accXs, accVs[c]], xr, mm[c][0], mm[c][1]);
+
+    // RR points (the line is drawn beat to beat)
+    const rx = [], ry = [];
+    let rmin = Infinity, rmax = -Infinity;
+    for (const p of rrPts) {
+      const x = xOfPt(p);
+      if (x < tStart - 3 || x > tEnd + 1) continue;
+      rx.push(x); ry.push(p.v);
+      if (p.v < rmin) rmin = p.v; if (p.v > rmax) rmax = p.v;
+    }
+    update("rr", [rx, ry], xr, rmin, rmax);
+  }
+
+  // ---------- signal-averaged beat ----------
+  const avgX = Array.from({ length: AVG_LEN }, (_, i) => Math.round((i - AVG_PRE) / FS * 1000));
+  let avgPlot = null;
   function avgN() {
-    const el = document.getElementById("avg-n");
-    const n = el ? parseInt(el.value, 10) : 50;
+    const n = parseInt($("avg-n")?.value, 10);
     return Math.min(300, Math.max(5, n || 50));
   }
-  function ecgBaseline() {
-    let s = 0, c = 0; for (const v of ecgY) if (v != null) { s += v; c++; }
-    return c ? s / c : 2000;
-  }
-  function processBeats() {
-    const t0 = nowS(), base = ecgBaseline();
-    const ripe = AVG_POST / FS + 0.06;      // wait until +POST is in the buffer
-    const BACK = Math.round(0.30 * FS), FWD = Math.round(0.05 * FS);
-    for (let k = pendingBeats.length - 1; k >= 0; k--) {
-      const age = t0 - pendingBeats[k];
-      if (age < ripe) continue;
-      const xb = pendingBeats[k] - t0;
-      pendingBeats.splice(k, 1);
-      if (age > 3.0) continue;              // too old, scrolled out
-      const ib = Math.round(xb * FS + (ECG_WIN - 1));
-      let best = -1, bestv = -1e18;
-      for (let j = Math.max(0, ib - BACK); j <= Math.min(ECG_WIN - 1, ib + FWD); j++) {
-        const v = ecgY[j]; if (v == null) continue;
-        const d = v - base;                 // R peak = max positive deviation
-        if (d > bestv) { bestv = d; best = j; }
-      }
-      if (best < 0) continue;
-      const lo = best - AVG_PRE, hi = best + AVG_POST;
-      if (lo < 0 || hi >= ECG_WIN) continue;
-      const seg = new Array(AVG_LEN); let ok = true;
-      for (let i = 0; i < AVG_LEN; i++) { const v = ecgY[lo + i]; if (v == null) { ok = false; break; } seg[i] = v; }
-      if (ok) { segs.push(seg); while (segs.length > avgN()) segs.shift(); }
-    }
-  }
-  function avgLayout() {
-    return {
-      paper_bgcolor: "transparent", plot_bgcolor: "transparent",
-      font: { color: COL.text, size: 11 },
-      margin: { l: 50, r: 12, t: 6, b: 30 },
-      xaxis: { ...AX, title: "ms  (R = 0)", zeroline: true, zerolinecolor: COL.grid },
-      yaxis: { ...AX, title: "ECG (avg)" },
-      showlegend: false,
-    };
+  function makeAvg() {
+    const host = $("avg-chart");
+    avgPlot = new uPlot({
+      width: host.clientWidth, height: host.clientHeight || 300, legend: { show: false },
+      padding: [6, 12, 0, 0],
+      cursor: { y: false, drag: { x: false, y: false, setScale: false } },
+      scales: { x: { time: false } },
+      axes: [
+        { stroke: COL.text, font: FONT, grid: { stroke: COL.grid }, ticks: { show: false },
+          label: "ms  (R = 0)", labelSize: 18, labelFont: FONT },
+        { stroke: COL.text, font: FONT, grid: { stroke: COL.grid }, ticks: { show: false },
+          label: "ECG (avg)", labelSize: 14, labelFont: FONT, size: 50 },
+      ],
+      series: [{}, { stroke: COL.ecg, width: 2, points: { show: false } }],
+    }, [avgX, avgX.map(() => null)], host);
   }
   function drawAvg() {
     while (segs.length > avgN()) segs.shift();
@@ -165,31 +430,185 @@
     const avg = new Array(AVG_LEN).fill(0);
     for (const seg of segs) for (let i = 0; i < AVG_LEN; i++) avg[i] += seg[i];
     for (let i = 0; i < AVG_LEN; i++) avg[i] /= segs.length;
-    Plotly.react("avg-chart",
-      [{ x: avgX, y: avg, mode: "lines", line: { color: COL.ecg, width: 2 } }],
-      avgLayout(), PLOTLY_CFG);
+    avgPlot.setData([avgX, avg]);
   }
-  function makeAvg() {
-    Plotly.newPlot("avg-chart",
-      [{ x: avgX, y: avgX.map(() => null), mode: "lines", line: { color: COL.ecg, width: 2 } }],
-      avgLayout(), PLOTLY_CFG);
+
+  // ---------- render loop ----------
+  function frame() {
+    if (!paused) processBeats();   // frozen view: keep beats/RR exactly as they were
+    drawStrip();
+    requestAnimationFrame(frame);
   }
-  setInterval(() => { processBeats(); drawAvg(); }, 250);
+  setInterval(drawAvg, 250);
 
-  // ---------- DOM helpers ----------
-  const $ = (id) => document.getElementById(id);
-  function setText(id, v) { const e = $(id); if (e) e.textContent = v; }
-
-  function onRr(msg) {
-    if (msg.hr != null) setText("hr", msg.hr);
-    if (msg.contact) setText("contact", msg.contact);
-    if (msg.rr && msg.rr.length) {
-      const last = msg.rr[msg.rr.length - 1];
-      setText("rr", Math.round(last));
-      for (const v of msg.rr) pushRr(v);
+  // ---------- x zoom: wheel / pinch / buttons change the window length ----------
+  let winTarget = WIN_DEFAULT;
+  try { winTarget = clampWin(parseFloat(localStorage.getItem("hrm.win")) || WIN_DEFAULT); } catch (e) {}
+  let win = winTarget;
+  function clampWin(w) { return Math.min(WIN_MAX, Math.max(WIN_MIN, w)); }
+  function setWin(w) {
+    winTarget = clampWin(w);
+    setText("win-label", (winTarget < 10 ? winTarget.toFixed(1) : Math.round(winTarget)) + " s");
+    try { localStorage.setItem("hrm.win", String(winTarget)); } catch (e) {}
+  }
+  function stepZoom() {   // ease toward the targets so zoom/pan animate
+    // win and viewEnd ease with the same factor, so a cursor-anchored zoom keeps
+    // the time under the cursor fixed throughout the animation
+    win = Math.abs(winTarget - win) < 0.002 ? winTarget : win + (winTarget - win) * 0.25;
+    viewEnd = Math.abs(viewEndTarget - viewEnd) < 0.0005 ? viewEndTarget : viewEnd + (viewEndTarget - viewEnd) * 0.25;
+  }
+  // zoom by factor k; while paused, keep the time under the cursor (tc) in place
+  function zoomBy(k, tc) {
+    const old = winTarget;
+    setWin(winTarget * k);
+    if (paused) {
+      if (tc == null) tc = viewEndTarget - old / 2;
+      viewEndTarget = clampViewEnd(tc + (viewEndTarget - tc) * (winTarget / old));
     }
   }
+  function initZoom() {
+    const host = $("strip-chart");
+    host.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const dy = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1);
+      zoomBy(Math.exp(dy * 0.002), timeAt(e.clientX));  // one mouse notch ≈ ×1.22
+    }, { passive: false });
+    host.addEventListener("dblclick", () => { if (!measureMode) zoomBy(WIN_DEFAULT / winTarget); });
+    $("zoom-in").addEventListener("click", () => zoomBy(1 / 1.5));
+    $("zoom-out").addEventListener("click", () => zoomBy(1.5));
+    setWin(winTarget);
+  }
 
+  // ---------- pause: freeze the view, queue incoming stream data, replay on resume ----------
+  let paused = false, pausedAt = 0, viewEnd = 0, viewEndTarget = 0;
+  let pauseQueue = [];
+  const PAUSE_QUEUE_MAX = 150000;    // ~1 h of ECG+accel+RR messages
+
+  function stream(kind, msg) {
+    const ta = now();
+    if (paused) {
+      pauseQueue.push([kind, msg, ta]);
+      if (pauseQueue.length > PAUSE_QUEUE_MAX) pauseQueue.splice(0, pauseQueue.length - PAUSE_QUEUE_MAX);
+    } else applyStream(kind, msg, ta);
+  }
+  function applyStream(kind, msg, ta) {
+    if (kind === "ecg") pushEcg(msg, ta);
+    else if (kind === "accel") pushAccel(msg, ta);
+    else if (kind === "rr") pendingBeats.push({ ta, rr: msg });
+  }
+
+  function oldestTime() {
+    return ecgFit.ready ? ecgFit.t(Math.max(0, ecgLast - RING + 1)) : pausedAt - WIN_MAX;
+  }
+  function clampViewEnd(t) {
+    return Math.min(pausedAt, Math.max(oldestTime() + winTarget, t));
+  }
+
+  function setPaused(p) {
+    if (p === paused) return;
+    if (p) {
+      pausedAt = now() - DELAY;
+      viewEnd = viewEndTarget = pausedAt;
+      paused = true;
+    } else {
+      paused = false;
+      const q = pauseQueue; pauseQueue = [];
+      for (const [kind, msg, ta] of q) applyStream(kind, msg, ta);
+    }
+    const btn = $("pause-btn");
+    btn.textContent = paused ? "▶ Live" : "⏸ Pause";
+    btn.classList.toggle("active", paused);
+    $("strip-card").classList.toggle("paused", paused);
+    updateCursor();
+  }
+
+  // ---------- measurement tool ----------
+  let measureMode = false, hoverT = null;
+  const meas = { a: null, b: null };
+
+  // client x (px) -> time on the shared strip x axis, or null outside the plot area
+  function timeAt(clientX) {
+    const u = lanes.ecg && lanes.ecg.u;
+    if (!u) return null;
+    const r = u.over.getBoundingClientRect();
+    const x = clientX - r.left;
+    return x >= 0 && x <= r.width ? u.posToVal(x, "x") : null;
+  }
+  function setMeasureMode(on) {
+    measureMode = on;
+    $("measure-btn").classList.toggle("active", on);
+    if (!on) hoverT = null;
+    updateCursor();
+    updateReadout();
+  }
+  function clearMeasure() { meas.a = meas.b = null; updateReadout(); }
+  function updateReadout() {
+    const el = $("meas-readout");
+    if (meas.a != null && meas.b != null) el.textContent = measText(meas.a, meas.b);
+    else if (measureMode) el.textContent = meas.a == null ? "click the start point" : "click the end point";
+    else el.textContent = "";
+  }
+  function updateCursor() {
+    $("strip-chart").style.cursor = measureMode ? "crosshair" : paused ? "grab" : "";
+  }
+
+  // drag = pan (pauses a live view); a click without movement places a marker
+  function initPauseMeasure() {
+    const host = $("strip-chart");
+    let drag = null;
+    host.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      drag = { x0: e.clientX, end0: null, moved: false };
+      e.preventDefault();
+    });
+    window.addEventListener("mousemove", (e) => {
+      const r = host.getBoundingClientRect();
+      hoverT = e.clientY >= r.top && e.clientY <= r.bottom ? timeAt(e.clientX) : null;
+      if (!drag) return;
+      const dx = e.clientX - drag.x0;
+      if (!drag.moved && Math.abs(dx) < 4) return;
+      if (!drag.moved) {
+        drag.moved = true;
+        setPaused(true);
+        drag.end0 = viewEndTarget;
+        host.style.cursor = "grabbing";
+      }
+      const pxW = lanes.ecg.u.bbox.width / devicePixelRatio;
+      viewEnd = viewEndTarget = clampViewEnd(drag.end0 - dx * win / pxW);
+    });
+    window.addEventListener("mouseup", (e) => {
+      if (!drag) return;
+      const wasClick = !drag.moved;
+      drag = null;
+      updateCursor();
+      if (!wasClick || !measureMode) return;
+      const t = timeAt(e.clientX);
+      if (t == null) return;
+      if (meas.a == null || meas.b != null) { meas.a = t; meas.b = null; }
+      else meas.b = t;
+      updateReadout();
+    });
+    host.addEventListener("mouseleave", () => { hoverT = null; });
+
+    $("pause-btn").addEventListener("click", () => setPaused(!paused));
+    $("measure-btn").addEventListener("click", () => setMeasureMode(!measureMode));
+    document.addEventListener("keydown", (e) => {
+      if (e.target.closest && e.target.closest("input, textarea, select, button")) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === " ") { e.preventDefault(); setPaused(!paused); }
+      else if (e.key === "m" || e.key === "M") setMeasureMode(!measureMode);
+      else if (e.key === "Escape") { if (meas.a != null) clearMeasure(); else setMeasureMode(false); }
+    });
+  }
+
+  function resize() {
+    const w = $("strip-chart").clientWidth;
+    for (const L of LANES) lanes[L.key].u.setSize({ width: w, height: L.h });
+    const a = $("avg-chart");
+    if (avgPlot) avgPlot.setSize({ width: a.clientWidth, height: a.clientHeight || 300 });
+  }
+
+  // ---------- DOM panels ----------
   function onEctopy(msg) {
     setText("pvc", msg.pvc);
     setText("pac", msg.pac);
@@ -233,9 +652,9 @@
 
   function handle(msg) {
     switch (msg.type) {
-      case "ecg": pushEcg(msg.samples); break;
+      case "ecg": stream("ecg", msg); break;
       case "rr": onRr(msg); break;
-      case "accel": pushAccel(msg); break;
+      case "accel": setText("steps", msg.steps); stream("accel", msg); break;
       case "ectopy": onEctopy(msg); break;
       case "battery": onBattery(msg); break;
       case "status": onStatus(msg); break;
@@ -264,9 +683,10 @@
   window.addEventListener("load", () => {
     makeStrip();
     makeAvg();
+    initZoom();
+    initPauseMeasure();
     connect();
-    window.addEventListener("resize", () => {
-      if (window.Plotly) Plotly.Plots.resize("strip-chart");
-    });
+    new ResizeObserver(resize).observe($("strip-chart"));
+    requestAnimationFrame(frame);
   });
 })();

@@ -5,9 +5,10 @@ the custom **"HRM Raw RR"** BLE chest strap, records **every** data stream to CS
 on disk, and serves a live browser dashboard with charts.
 
 It is a single Python process (asyncio): `bleak` for BLE and `aiohttp` for a
-local web server + WebSocket. The frontend is plain HTML/JS using **uPlot**
-(high-rate ECG) and **Plotly** (tachogram / accel) loaded from a CDN — no build
-step.
+local web server + WebSocket. The frontend is plain HTML/JS using **uPlot** (canvas charts, loaded from a CDN) — no build
+step. The live strip is redrawn every animation frame with a 0.35 s playout
+delay, and each stream's timestamps come from a fit of sample index vs arrival
+time, so the bursty BLE packets scroll smoothly instead of jumping.
 
 ## What it does
 
@@ -100,7 +101,7 @@ app/
 ├── ble_source.py     # scan / connect / subscribe / auto-reconnect (bleak)
 ├── demo_source.py    # synthetic data generator (--demo)
 ├── webserver.py      # aiohttp: serves the dashboard + /ws
-├── static/           # index.html + app.js + style.css (uPlot + Plotly via CDN)
+├── static/           # index.html + app.js + style.css (uPlot via CDN)
 ├── recordings/       # CSV output (created on first run)
 └── requirements.txt
 ```

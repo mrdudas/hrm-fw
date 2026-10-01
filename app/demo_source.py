@@ -39,20 +39,32 @@ class DemoSource:
         steps_since_beat = 0
         pvc = pac = art = total = 0
         packet = []
+        last_r = None               # sample time of the previous R peak
+        reported = True             # R of the current cycle already published?
+        t_samp = 0.0
         while not self._stop.is_set():
             packet.clear()
             for _ in range(20):
                 # QRS-ish morphology as a function of phase within the beat
                 packet.append(int(self._ecg_sample(phase, rr_s)))
                 phase += 1.0 / fs
+                t_samp += 1.0 / fs
+                # like the firmware: report the beat shortly AFTER its R peak
+                # (R sits at 0.32 of the cycle; ~60 ms detector latency)
+                if not reported and phase >= 0.32 * rr_s + 0.06:
+                    reported = True
+                    r_t = t_samp - 0.06
+                    if last_r is not None:
+                        rr_ms = (r_t - last_r) * 1000.0
+                        self.hub.publish_rr(round(60000.0 / rr_ms), [rr_ms], "yes")
+                    last_r = r_t
                 if phase >= rr_s:
                     phase -= rr_s
                     total += 1
+                    reported = False
                     # decide the NEXT interval (respiratory sinus arrhythmia + noise)
                     hrv = 0.06 * math.sin(time.time() * 0.25) + random.gauss(0, 0.02)
                     rr_s = max(0.3, 60.0 / self.base_hr * (1 + hrv))
-                    hr = round(60.0 / rr_s)
-                    self.hub.publish_rr(hr, [rr_s * 1000.0], "yes")
                     # ~4% chance of an ectopic beat
                     roll = random.random()
                     if roll < 0.025:

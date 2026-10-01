@@ -49,10 +49,8 @@ main{max-width:1200px; margin:0 auto; padding:18px 16px; display:flex; flex-dire
 .kpi-value .unit{font-size:16px; font-weight:500; color:var(--muted); margin-left:6px}
 .kpi-sub{color:var(--muted); font-size:12px; margin-top:2px}
 
-.chart-ecg{width:100%; height:230px}
-.chart-plotly{width:100%; height:240px}
-#accel-chart{height:320px}   /* taller: 3 stacked subplots (X/Y/Z) */
-.chart-strip{width:100%; height:560px}
+.chart-strip{width:100%; display:flex; flex-direction:column}
+.chart-strip .lane{width:100%; line-height:0}
 
 .ectopy-body{display:flex; gap:20px; flex-wrap:wrap}
 .ecto-counts{display:flex; gap:14px}
@@ -78,7 +76,25 @@ footer{text-align:center; color:var(--muted); font-size:12px; padding:16px}
 footer code{background:var(--panel-2); padding:2px 6px; border-radius:4px}
 .u-legend{color:var(--muted)}
 
-.chart-avg{width:100%; height:300px}
+.chart-avg{width:100%; height:300px; line-height:0}
 .avg-n{width:56px; background:var(--panel-2,#1a1f28); color:var(--text,#dfe6ee);
        border:1px solid var(--border,#2a3140); border-radius:6px; padding:2px 6px;
        font:inherit; text-align:center}
+
+.hint.zoom{display:flex; align-items:center; gap:6px}
+.zoom-btn{width:24px; height:22px; padding:0; background:var(--panel-2); color:var(--text);
+          border:1px solid var(--border); border-radius:6px; font:inherit; line-height:1; cursor:pointer}
+.zoom-btn:hover{border-color:var(--muted)}
+.win-label{min-width:40px; text-align:center; color:var(--text); font-variant-numeric:tabular-nums}
+#strip-chart{overscroll-behavior:contain}
+.tool-btn{height:24px; padding:0 10px; background:var(--panel-2); color:var(--text);
+          border:1px solid var(--border); border-radius:6px; font:inherit; font-size:12px; cursor:pointer}
+.tool-btn:hover{border-color:var(--muted)}
+.tool-btn.active{background:#3a2f12; border-color:var(--warn); color:#ffd479}
+.hint .sep{width:1px; height:18px; background:var(--border); margin:0 4px}
+.meas-readout{color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; margin-right:6px}
+#strip-card.paused{border-color:var(--warn)}
+#strip-card.paused .card-head h2::after{content:"  ·  PAUSED"; color:var(--warn); font-size:12px}
+#strip-chart{user-select:none}
+.strip-help{color:var(--muted); font-size:11px; margin-top:6px; text-align:right}
+.strip-help kbd{background:var(--panel-2); border:1px solid var(--border); border-radius:4px; padding:0 4px; font:inherit}
