@@ -17,7 +17,15 @@ def make_app(hub):
     app.router.add_get("/", _index)
     app.router.add_get("/ws", _ws_handler)
     app.router.add_static("/static/", STATIC_DIR, name="static")
+    app.on_response_prepare.append(_no_cache)
     return app
+
+
+async def _no_cache(request, response):
+    """Make the browser revalidate the dashboard files on every load, so a
+    `git pull` takes effect on a normal reload (no stale cached app.js)."""
+    if request.path == "/" or request.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
 
 
 async def _index(request):
