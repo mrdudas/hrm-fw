@@ -19,7 +19,7 @@ import os
 import time
 
 from config import (DEVICE_NAME, KNOWN_ADDRESS, HR_UUID, ECG_UUID, ACCEL_UUID,
-                    ECTOPY_UUID, BATTERY_UUID)
+                    ECTOPY_UUID, BATTERY_UUID, ACCEL_FS)
 import parsers
 
 SCAN_S = 8          # length of one scan
@@ -263,7 +263,9 @@ class BLESource:
 
     def _accel_cb(self, _sender, data):
         d = parsers.parse_accel(data)
-        self.hub.publish_accel(d["x"], d["y"], d["z"], d["steps"])
+        n = len(d["samples"])
+        for k, (x, y, z) in enumerate(d["samples"]):     # batched: oldest first, 40 ms apart
+            self.hub.publish_accel(x, y, z, d["steps"], age=(n - 1 - k) / ACCEL_FS)
 
     def _ecto_cb(self, _sender, data):
         self.hub.publish_ectopy(parsers.parse_ectopy(data))

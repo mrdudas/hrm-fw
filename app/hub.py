@@ -94,8 +94,9 @@ class Hub:
                     "rr": [round(x, 1) for x in rr_list], "contact": contact},
                    snapshot_key="rr")
 
-    def publish_accel(self, x, y, z, steps):
-        t = time.time()
+    def publish_accel(self, x, y, z, steps, age=0.0):
+        """`age`: seconds since the sample was taken (batched packets carry several)."""
+        t = time.time() - age
         self.recorder.write_accel(t, x, y, z, steps)
         self._emit({"type": "accel", "t": t, "x": x, "y": y, "z": z,
                     "steps": steps}, snapshot_key="accel")

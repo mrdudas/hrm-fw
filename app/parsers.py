@@ -43,10 +43,24 @@ def parse_ecg(b: bytes):
 
 
 def parse_accel(b: bytes) -> dict:
-    """Accelerometer, char a1b30002: int16 x,y,z + uint16 step_count (~25 Hz)."""
+    """Accelerometer, char a1b30002, ~25 Hz. Two layouts, told apart by length:
+
+    legacy (8 B):        int16 x, y, z + uint16 step_count      (one sample)
+    batched (3 + 6n B):  uint8 n, n x (int16 x, y, z), uint16 step_count of the
+                         last sample                             (n samples, oldest first)
+
+    Returns {"samples": [(x, y, z), ...], "steps": int}.
+    """
     b = bytes(b)
-    x, y, z, steps = struct.unpack_from("<hhhH", b, 0)
-    return {"x": x, "y": y, "z": z, "steps": steps}
+    if len(b) == 8:
+        x, y, z, steps = struct.unpack_from("<hhhH", b, 0)
+        return {"samples": [(x, y, z)], "steps": steps}
+    n = b[0]
+    if n == 0 or len(b) < 3 + 6 * n:
+        raise ValueError(f"bad accel packet: {len(b)} B, n={n}")
+    samples = [struct.unpack_from("<hhh", b, 1 + 6 * k) for k in range(n)]
+    steps = struct.unpack_from("<H", b, 1 + 6 * n)[0]
+    return {"samples": samples, "steps": steps}
 
 
 def parse_ectopy(b: bytes) -> dict:
