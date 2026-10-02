@@ -59,7 +59,7 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
                                            * gates the AFE -> READ ONLY, never drive it. */
 #define OFFBODY_MS     60000              /* off-body + no motion this long -> sleep */
 #define MAX_ACTIVE_MS  (3LL*60*60*1000)   /* 3 h max session -> sleep           */
-#define PROBATION_MS   60000              /* advertise this long after wake; no contact/conn -> sleep */
+#define PROBATION_MS   60000              /* advertise this long after wake; no connection -> sleep */
 #define CONTACT_DEB    125                /* P0.12 contact debounce samples (~0.5 s @250 Hz) */
 #define MOTION_THR     1200               /* accel high-pass magnitude that counts as "moving" */
 #define LED_PULSE_N    3                  /* ~12 ms LED pulse per beat (energy-saving) */
@@ -553,7 +553,7 @@ int main(void)
 	int64_t active_start = k_uptime_get();
 	last_beat_ms = active_start;
 	last_motion_ms = active_start;
-	int64_t session_start = 0;     /* set when contact or a connection first appears */
+	int64_t session_start = 0;     /* set when a connection first appears (contact alone won't) */
 	bool was_on_body = false;      /* did P0.12 ever report on-body this session */
 	int  contact_lp = 0;           /* P0.12 debounce integrator */
 
@@ -612,8 +612,9 @@ int main(void)
 		}
 
 		/* ---- power state machine (P0.12 contact + BLE conn + accel motion) ----
-		 * wake(shake) -> advertise; PROBATION: sleep if no contact/conn in 1 min.
-		 * contact OR connection -> engaged, start the 3 h session.
+		 * wake(shake) -> advertise; PROBATION: sleep if nobody CONNECTS in 1 min
+		 * (being worn is not enough on its own -- a connection starts the session).
+		 * connection -> engaged, start the 3 h session.
 		 * engaged: sleep if 3 h elapsed (drops conns), OR off-body + no motion for
 		 * 1 min AND (it was worn OR nobody is connected). Motion INT on P0.14 wakes. */
 		int64_t now = k_uptime_get();
@@ -622,11 +623,11 @@ int main(void)
 		bool contact = contact_lp > (CONTACT_DEB / 2);
 		if (contact) was_on_body = true;
 		bool is_connected = conn_count > 0;
-		if (session_start == 0 && (contact || is_connected)) session_start = now;
+		if (session_start == 0 && is_connected) session_start = now;   /* only a connection commits */
 
 		bool go_sleep;
 		if (session_start == 0) {
-			go_sleep = (now - active_start > PROBATION_MS);        /* nobody engaged in 1 min */
+			go_sleep = (now - active_start > PROBATION_MS);        /* nobody connected in 1 min */
 		} else if (now - session_start > MAX_ACTIVE_MS) {
 			go_sleep = true;                                       /* 3 h cap */
 		} else {
