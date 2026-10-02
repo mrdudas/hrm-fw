@@ -349,8 +349,15 @@ static void detector_feed(int16_t sample)
 
 	/* adaptive threshold; relax toward NPKI (search-back) if a beat is overdue */
 	float k = 0.25f;
-	if (have_last && rr_avg_cyc && (now - last_cyc) > (uint64_t)rr_avg_cyc * 166 / 100) {
+	bool overdue = have_last && rr_avg_cyc &&
+		       (now - last_cyc) > (uint64_t)rr_avg_cyc * 166 / 100;
+	if (overdue) {
 		k = 0.125f;
+		/* A transient artifact can spike SPKI; with no further detections SPKI
+		 * stays stuck high and masks the (lower) real beats -> the detector goes
+		 * deaf. Once a beat is overdue, bleed SPKI back toward NPKI so sensitivity
+		 * recovers (~halves per 0.7 s of overdue). Never runs during normal rhythm. */
+		spki += (npki - spki) * (1.0f / 256);
 	}
 	float thresh = npki + k * (spki - npki);
 
