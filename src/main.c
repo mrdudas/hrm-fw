@@ -332,12 +332,27 @@ static void detector_feed(int16_t sample)
 	static float    pend_energy, sinus_qrs;
 	static uint32_t rail_recent;        /* >0 = raw ADC railed within the last RAIL_WIN samples */
 	static bool     pend_prem, pend_railed;
+	static float    warm_max;           /* peak energy seen during warm-up (threshold seed) */
 
 	float yn = iir(NOTCH_b, NOTCH_a, notch_z, 3, (float)sample);
 	float yb = iir(BP_b, BP_a, bp_z, 5, yn);
 	float energy = yb * yb;
 
-	if (warm < WARMUP_SAMPLES) { warm++; prev_energy = energy; return; }
+	if (warm < WARMUP_SAMPLES) {
+		warm++;
+		prev_energy = energy;
+		/* Learn the signal scale while the front-end settles. After the first ~1 s
+		 * of filter transient, track the peak energy; at the end of warm-up seed the
+		 * threshold HIGH from it (a real QRS is ~this big) and let it adapt DOWN.
+		 * Otherwise SPKI starts at 0, the threshold climbs up from the noise floor,
+		 * and the first thing it latches onto is noise rather than a QRS. */
+		if (warm > SAMPLE_HZ && energy > warm_max) warm_max = energy;
+		if (warm == WARMUP_SAMPLES && warm_max > 0.0f) {
+			spki = warm_max;
+			npki = warm_max * 0.25f;
+		}
+		return;
+	}
 
 	/* rail/saturation tracking: a contact (electrode-skin) artifact drives the raw
 	 * ADC to the rails; a real QRS never does. Flag persists for RAIL_WIN samples. */
