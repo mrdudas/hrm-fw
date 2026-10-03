@@ -45,7 +45,8 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
   - `meta_<session>.json` — `{"ecg_fs": …}`, the ECG sample rate used for the
     session (read by `tools/analyze_recording.py`)
 - Live dashboard at **http://localhost:8770** (opened automatically): rolling
-  ECG waveform, big HR number + RR, live HRV (RMSSD, SDNN, pNN50 over a rolling
+  ECG waveform (optional 50/60 Hz mains notch on the display only — recordings
+  stay raw), big HR number + RR, live HRV (RMSSD, SDNN, pNN50 over a rolling
   5 min window, ectopic/artifact beats excluded), RR/HRV tachogram, accelerometer + step count,
   ectopy counts / burden / event log, and battery. Dark theme. The page
   reconnects its WebSocket by itself if you reload it.

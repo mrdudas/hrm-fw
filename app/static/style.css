@@ -97,6 +97,8 @@ footer code{background:var(--panel-2); padding:2px 6px; border-radius:4px}
           border:1px solid var(--border); border-radius:6px; font:inherit; font-size:12px; cursor:pointer}
 .tool-btn:hover{border-color:var(--muted)}
 .tool-btn.active{background:#3a2f12; border-color:var(--warn); color:#ffd479}
+.tool-sel{height:24px; padding:0 6px; background:var(--panel-2); color:var(--text);
+          border:1px solid var(--border); border-radius:6px; font:inherit; font-size:12px; cursor:pointer}
 .hint .sep{width:1px; height:18px; background:var(--border); margin:0 4px}
 .meas-readout{color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; margin-right:6px}
 #strip-card.paused{border-color:var(--warn)}

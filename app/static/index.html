@@ -70,6 +70,9 @@
           <button id="take-raw" class="tool-btn" title="Subscribe to raw ECG here; the other host loses it">Take over</button></span></h2>
       <span class="hint zoom">
         <span id="meas-readout" class="meas-readout"></span>
+        <select id="notch-sel" class="tool-sel" title="Mains-hum notch on the displayed ECG only (recording stays raw)">
+          <option value="0">Notch off</option><option value="50">Notch 50 Hz</option><option value="60">Notch 60 Hz</option>
+        </select>
         <button id="pause-btn" class="tool-btn" title="Pause / resume (Space). Drag the chart to scroll back.">⏸ Pause</button>
         <button id="measure-btn" class="tool-btn" title="Measure time (M): click start, click end. Esc clears.">📏 Measure</button>
         <span class="sep"></span>

@@ -31,6 +31,10 @@
   function setText(id, v) { const e = $(id); if (e) e.textContent = v; }
 
   // ---------- ECG ring buffer (continuous client-side sample index) ----------
+  // ecgRaw: samples as received (the CSV is written server-side, always raw).
+  // ecgRing: what is displayed / used for beat dots and the averaged beat --
+  // ecgRaw through the optional mains notch.
+  let ecgRaw = new Float32Array(RING).fill(NaN);
   let ecgRing = new Float32Array(RING).fill(NaN);
   let ecgFit = new StreamClock(1 / FS, 0.10);     // ±10 %: follows firmware sample loss
   let ecgLast = -1;           // index of newest sample
@@ -53,15 +57,55 @@
           skip = Math.max(0, Math.round((ta - ecgLastArrival - len / FS) * FS));   // index ~ time
       }
     }
-    for (let k = 0; k < Math.min(skip, RING); k++) ecgRing[(ecgLast + 1 + k) % RING] = NaN;
+    for (let k = 0; k < Math.min(skip, RING); k++) {
+      const j = (ecgLast + 1 + k) % RING; ecgRaw[j] = NaN; ecgRing[j] = NaN;
+    }
+    if (skip) notch.reset();              // gap: don't ring across it
     ecgLast += skip;
-    for (const s of msg.samples) { ecgLast++; ecgRing[ecgLast % RING] = s; }
+    for (const s of msg.samples) {
+      ecgLast++;
+      ecgRaw[ecgLast % RING] = s;
+      ecgRing[ecgLast % RING] = notch.step(s);
+    }
     ecgLastBase = msg.base;
     ecgLastLen = len;
     ecgLastArrival = ta;
     ecgFit.add(ecgLast, ta);
   }
   const ecgLive = () => ecgFit.ready && now() - ecgLastArrival < 5;
+
+  // ---------- display-only mains notch (biquad, RBJ cookbook, Q = 30) ----------
+  // The strap streams raw ECG on purpose; this only cleans the plotted trace.
+  const notch = {
+    f0: 50, b: null, a: null, z1: 0, z2: 0,
+    design() {                                        // null when off
+      if (!this.f0 || this.f0 >= FS / 2) { this.b = this.a = null; return; }
+      const w0 = 2 * Math.PI * this.f0 / FS, alpha = Math.sin(w0) / (2 * 30), c = Math.cos(w0);
+      const a0 = 1 + alpha;
+      this.b = [1 / a0, -2 * c / a0, 1 / a0];
+      this.a = [-2 * c / a0, (1 - alpha) / a0];
+      this.reset();
+    },
+    reset() { this.z1 = this.z2 = 0; },
+    step(x) {                                         // direct form II transposed
+      if (!this.b || x !== x) { if (x !== x) this.reset(); return x; }
+      const y = this.b[0] * x + this.z1;
+      this.z1 = this.b[1] * x - this.a[0] * y + this.z2;
+      this.z2 = this.b[2] * x - this.a[1] * y;
+      return y;
+    },
+    // re-filter everything in the buffer (toggle / rate change), so the trace is
+    // never half filtered
+    refilter() {
+      this.design();
+      for (let n = Math.max(0, ecgLast - RING + 1); n <= ecgLast; n++) {
+        const j = n % RING;
+        ecgRing[j] = this.step(ecgRaw[j]);
+      }
+    },
+  };
+  try { const f = localStorage.getItem("hrm.notch"); if (f != null) notch.f0 = +f; } catch (e) {}
+  notch.design();
 
   // hub ECG index (seq * batch + offset, wraps at 65536 packets) -> client ECG
   // index, relative to the newest ECG packet (valid within the current stream run)
@@ -123,7 +167,9 @@
     const oldDelay = ecgFit.delay;
     FS = fs;
     RING = FS * (WIN_MAX + 4);
+    ecgRaw = new Float32Array(RING).fill(NaN);
     ecgRing = new Float32Array(RING).fill(NaN);
+    notch.design();                          // coefficients depend on fs
     ecgFit = new StreamClock(1 / FS, 0.10);
     ecgFit.delay = oldDelay;                 // keep the playout delay: no jump in the view
     ecgLast = -1; ecgLastBase = null; ecgLastLen = 0; ecgLastArrival = 0;
@@ -838,6 +884,13 @@
     });
     $("disc-btn").addEventListener("click", () => send({ cmd: "disconnect" }));
     $("take-raw").addEventListener("click", () => send({ cmd: "take_raw" }));
+    const ns = $("notch-sel");
+    ns.value = String(notch.f0 || 0);
+    ns.addEventListener("change", () => {
+      notch.f0 = +ns.value;
+      try { localStorage.setItem("hrm.notch", ns.value); } catch (e) {}
+      notch.refilter();
+    });
     $("scan-btn").addEventListener("click", () => { devScanning = true; renderDevices(); send({ cmd: "scan" }); });
     renderDevices();
   }
