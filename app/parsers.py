@@ -50,12 +50,16 @@ def parse_link(b: bytes) -> dict:
     """Link diagnostics, char a1b20004 (read), little-endian u16 x4: connection
     interval (1.25 ms units), peripheral latency, supervision timeout (10 ms
     units), ATT MTU -- what the strap actually got from the central
-    [+ u8 conn_count: centrals connected right now -- 9-byte firmware]."""
+    [+ u8 conn_count: centrals connected right now -- 9-byte firmware]
+    [+ u8 raw owner of the raw ECG stream: 0 none, 1 this connection, 2 another
+       connection -- 10-byte firmware; one host gets raw ECG, last subscriber wins]."""
     b = bytes(b)
     iv, lat, tmo, mtu = struct.unpack_from("<HHHH", b, 0)
     d = {"interval_ms": iv * 1.25, "latency": lat, "timeout_ms": tmo * 10, "mtu": mtu}
     if len(b) >= 9:
         d["conn_count"] = b[8]
+    if len(b) >= 10:
+        d["raw_owner"] = {0: "none", 1: "mine", 2: "other"}.get(b[9], "other")
     return d
 
 

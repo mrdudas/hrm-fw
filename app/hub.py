@@ -62,7 +62,7 @@ class Hub:
     def snapshot_messages(self):
         """JSON strings to send a newly connected client (status + last of each)."""
         out = [json.dumps(self._status)]
-        for key in ("devices", "battery", "rr", "accel", "ectopy", "link"):
+        for key in ("devices", "battery", "rr", "accel", "ectopy", "link", "raw"):
             if key in self._snapshot:
                 out.append(self._snapshot[key])
         return out
@@ -81,6 +81,10 @@ class Hub:
     def publish_devices(self, devices: list, scanning: bool):
         self._emit({"type": "devices", "devices": devices, "scanning": scanning,
                     "t": time.time()}, snapshot_key="devices")
+
+    def publish_raw(self, state: str):
+        """Raw-ECG ownership on a multi-host strap: mine / other / legacy."""
+        self._emit({"type": "raw", "state": state, "t": time.time()}, snapshot_key="raw")
 
     def publish_link(self, link: dict):
         """Connection parameters as reported by the strap (a1b20004)."""

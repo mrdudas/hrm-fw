@@ -28,6 +28,7 @@ import time
 import sys
 
 FS = 250
+PAUSE_S = 5          # a gap longer than this with a consistent seq jump is a pause, not loss
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REC = os.path.join(HERE, "recordings")
 
@@ -134,17 +135,24 @@ def main():
 
     # drop repeated packets (same start index as the previous packet): the strap's
     # TX retry can deliver a packet twice when two hosts are connected
+    # packets = runs of rows with the same rx_time (robust to a batch-size change
+    # mid-session); without rx_time, fixed `batch`-row blocks
+    by_rx = len(ecg[0]) > 3 and ecg[0][3] != ""
     dedup, dups, prev_start = [], 0, None
     i = 0
     while i < len(ecg):
+        j = i + batch
+        if by_rx:
+            j = i + 1
+            while j < len(ecg) and ecg[j][3] == ecg[i][3]:
+                j += 1
         start = int(ecg[i][1])
-        pkt = ecg[i:i + batch]
         if start == prev_start:
             dups += 1
         else:
-            dedup += pkt
+            dedup += ecg[i:j]
             prev_start = start
-        i += batch
+        i = j
     ecg = dedup
     idx = [int(r[1]) for r in ecg]
     x = [float(r[2]) for r in ecg]
@@ -156,19 +164,28 @@ def main():
     # strap reboot, wrap misread as a jump, ...) is a restart.
     has_rx = len(ecg[0]) > 3 and ecg[0][3] != ""
     lost_pkts, restarts = 0, []           # restarts: (row, rx gap s or None, index jump)
+    pauses = []                           # (row, seconds): stream paused, seq kept running
     for i in range(1, len(idx)):
         d = idx[i] - idx[i - 1]
         if d == 1:
             continue
         gap = float(ecg[i][3]) - float(ecg[i - 1][3]) if has_rx else None
         missing_s = (d - 1) / FS
-        if 1 < d <= 2 * FS * 60 and (gap is None or abs(gap - missing_s) < max(0.5, 0.5 * missing_s)):
+        consistent = gap is not None and abs(gap - missing_s) < max(0.5, 0.5 * missing_s)
+        if consistent and gap > PAUSE_S:
+            # seq advanced with the arrival gap but no packets for seconds: raw ECG
+            # was streaming to another host (one raw-ECG owner), or nobody subscribed
+            pauses.append((i, gap))
+        elif 1 < d <= 2 * FS * 60 and (gap is None or consistent):
             lost_pkts += (d - 1) // batch
         else:
             restarts.append((i, gap, d))
     total_pkts = len(x) // batch + lost_pkts
     print(f"  BLE packet loss: {lost_pkts} of {total_pkts} ECG packets "
           f"({100 * lost_pkts / max(1, total_pkts):.2f} %), {len(restarts)} stream restarts")
+    if pauses:
+        print(f"  ECG pauses (no raw ECG for > {PAUSE_S:g} s, e.g. another host owned it): "
+              f"{len(pauses)}, {sum(g for _, g in pauses) / 60:.1f} min in total -- not counted as loss")
     if dups:
         print(f"  duplicate ECG packets dropped: {dups} (same packet delivered twice -- "
               f"strap TX retry with two hosts connected)")
@@ -246,6 +263,7 @@ def per_minute_table(ses):
         return
     pk, dup, lost, samp, sizes = ({} for _ in range(5))
     prev_start = prev_end = None
+    prev_rx = 0.0
     i = 0
     while i < len(rows):
         rx = rows[i][3]
@@ -260,9 +278,11 @@ def per_minute_table(ses):
             pk[m] = pk.get(m, 0) + 1
             samp[m] = samp.get(m, 0) + n
             sizes.setdefault(m, set()).add(n)
-            if prev_end is not None and prev_end + 1 < start < prev_end + 1 + 120 * FS:
+            if (prev_end is not None and prev_end + 1 < start < prev_end + 1 + 120 * FS
+                    and float(rx) - prev_rx <= PAUSE_S):
                 lost[m] = lost.get(m, 0) + start - prev_end - 1
             prev_start, prev_end = start, start + n - 1
+        prev_rx = float(rx)
         i = j
     acc = {}
     for r in read_csv(os.path.join(REC, f"accel_{ses}.csv")):

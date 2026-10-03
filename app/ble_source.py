@@ -74,6 +74,12 @@ class BLESource:
         self._wake = asyncio.Event()     # a command arrived: re-evaluate now
         self._scan_requested = False
         self._seen = {}                  # address -> (name, rssi) from the last scan
+        # raw ECG: with several hosts the strap streams raw ECG to one (last
+        # subscriber wins); the others keep HR/RR/ectopy/accel
+        self._ecg_sub = False
+        self._take_raw = False
+        self._raw_kick = asyncio.Event()
+        self._ecg_last = 0.0             # monotonic time of the last ECG packet
 
     def stop(self):
         self._stop.set()
@@ -94,6 +100,11 @@ class BLESource:
             self.log("UI: disconnect")
         elif cmd == "scan":
             self._scan_requested = True
+        elif cmd == "take_raw":          # subscribe to raw ECG even if another host has it
+            self._take_raw = True
+            self._raw_kick.set()
+            self.log("UI: take over raw ECG")
+            return
         else:
             return
         self._wake.set()
@@ -216,7 +227,9 @@ class BLESource:
                                disconnected_callback=on_disconnect) as c:
             self.log("connected; subscribing to streams ...")
             await self._read_ecg_info(c)       # before subscribing: rate needed for the first packet
-            await self._subscribe_all(c)
+            await self._subscribe_all(c)       # everything except raw ECG
+            self._ecg_sub = False
+            await self._raw_decide(c, await self._read_link(c))
             # battery: read once up front (notify may not fire otherwise)
             await self._read_battery(c)
             label = dev.name or dev.address
@@ -225,6 +238,11 @@ class BLESource:
             # hold the link until it drops, the user disconnects or picks another device
             while (not disconnected.is_set() and not self._stop.is_set()
                    and self.enabled and self._target() == target and c.is_connected):
+                # raw ECG went quiet while subscribed: another host may have taken
+                # it over -> check ownership now instead of at the next poll
+                if self._ecg_sub and time.monotonic() - self._ecg_last > 2 and not self._raw_kick.is_set():
+                    self._ecg_last = time.monotonic()
+                    self._raw_kick.set()
                 if self._scan_requested:          # refresh the list while connected
                     self._scan_requested = False
                     await self._safe_scan(want_target=False)
@@ -232,33 +250,80 @@ class BLESource:
                     continue
                 await self._sleep(0.5)
             link_task.cancel()
+            self.hub.publish_raw("none")
             self.log("link closed")
+
+    async def _read_link(self, c, log=False):
+        """One a1b20004 reading (None on firmware without it)."""
+        try:
+            link = parsers.parse_link(await c.read_gatt_char(LINK_UUID))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+        link["host_mtu"] = getattr(c, "mtu_size", None)   # bleak's view, cross-check
+        link["t"] = time.time()
+        if log:
+            self.log(f"  link: interval {link['interval_ms']:g} ms, latency {link['latency']}, "
+                     f"timeout {link['timeout_ms']} ms, ATT MTU {link['mtu']} (host says {link['host_mtu']})"
+                     + (f", {link['conn_count']} host(s) connected" if "conn_count" in link else "")
+                     + (f", raw ECG owner: {link['raw_owner']}" if "raw_owner" in link else ""))
+            self.hub.publish_link(link)
+        return link
 
     async def _link_params(self, c):
         """Read the strap's view of the link (a1b20004): 5 s after connecting (once
-        the peripheral's conn-param update has settled), then every minute.
-        Silently stops on firmware without the characteristic."""
+        the peripheral's conn-param update has settled), then every minute -- every
+        3 s while we don't have the raw ECG stream, so we claim it as soon as it frees
+        up. Silently stops on firmware without the characteristic."""
         await asyncio.sleep(5)
+        last_log = 0.0
         while True:
-            try:
-                link = parsers.parse_link(await c.read_gatt_char(LINK_UUID))
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                self.log(f"  link params not available ({e.__class__.__name__})")
+            link = await self._read_link(c, log=time.time() - last_log >= 55)
+            if link is None:
+                self.log("  link params not available")
                 return
-            link["host_mtu"] = getattr(c, "mtu_size", None)   # bleak's view, cross-check
-            link["t"] = time.time()
-            self.log(f"  link: interval {link['interval_ms']:g} ms, latency {link['latency']}, "
-                     f"timeout {link['timeout_ms']} ms, ATT MTU {link['mtu']} (host says {link['host_mtu']})"
-                     + (f", {link['conn_count']} host(s) connected" if "conn_count" in link else ""))
-            self.hub.publish_link(link)
-            await asyncio.sleep(60)
+            if time.time() - last_log >= 55:
+                last_log = time.time()
+            await self._raw_decide(c, link)
+            self._raw_kick.clear()
+            try:
+                await asyncio.wait_for(self._raw_kick.wait(), 60 if self._ecg_sub else 3)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _raw_decide(self, c, link):
+        """Subscribe to / release raw ECG according to the strap's ownership byte."""
+        owner = (link or {}).get("raw_owner")
+        if owner is None:                      # older firmware: every host gets raw ECG
+            if not self._ecg_sub:
+                await self._ecg_notify(c, True)
+            self.hub.publish_raw("legacy")
+            return
+        if self._take_raw or (owner == "none" and not self._ecg_sub):
+            self._take_raw = False
+            await self._ecg_notify(c, True)    # last subscriber wins -> ours now
+        elif owner == "other" and self._ecg_sub:
+            self.log("  raw ECG taken over by another host")
+            await self._ecg_notify(c, False)   # release, so we can reclaim when it frees
+        self.hub.publish_raw("mine" if self._ecg_sub else "other")
+
+    async def _ecg_notify(self, c, on):
+        try:
+            if on:
+                self._ecg_last = time.monotonic()
+                await c.start_notify(ECG_UUID, self._ecg_cb)
+                self.log("  subscribed: ECG (a1b20002)")
+            else:
+                await c.stop_notify(ECG_UUID)
+                self.log("  unsubscribed: ECG (a1b20002)")
+            self._ecg_sub = on
+        except Exception as e:
+            self.log(f"  ECG {'subscribe' if on else 'unsubscribe'} failed: {e}")
 
     async def _subscribe_all(self, c):
         subs = [
             (HR_UUID, self._hr_cb, "HR/RR (0x2A37)"),
-            (ECG_UUID, self._ecg_cb, "ECG (a1b20002)"),
             (ACCEL_UUID, self._accel_cb, "accel (a1b30002)"),
             (ECTOPY_UUID, self._ecto_cb, "ectopy (a1b40002)"),
             (BATTERY_UUID, self._batt_cb, "battery (0x2A19)"),
@@ -294,6 +359,7 @@ class BLESource:
         self.hub.publish_rr(d["hr"], d["rr"], d["contact"])
 
     def _ecg_cb(self, _sender, data):
+        self._ecg_last = time.monotonic()
         seq, samples = parsers.parse_ecg(data)
         self.hub.publish_ecg(seq, samples)
 

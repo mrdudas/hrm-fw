@@ -101,6 +101,8 @@ footer code{background:var(--panel-2); padding:2px 6px; border-radius:4px}
 #strip-card.paused{border-color:var(--warn)}
 #strip-card.paused .card-head h2::after{content:"  ·  PAUSED"; color:var(--warn); font-size:12px}
 #strip-chart{user-select:none}
+.raw-note{color:var(--warn); font-size:12px; font-weight:500; margin-left:10px}
+.raw-note .tool-btn{margin-left:6px; height:22px}
 .fs-label{color:var(--muted); font-size:11px; font-weight:500; margin-left:6px; font-variant-numeric:tabular-nums}
 .strip-help{color:var(--muted); font-size:11px; margin-top:6px; text-align:right}
 .strip-help kbd{background:var(--panel-2); border:1px solid var(--border); border-radius:4px; padding:0 4px; font:inherit}

@@ -829,6 +829,7 @@
       userPicked = false;
     });
     $("disc-btn").addEventListener("click", () => send({ cmd: "disconnect" }));
+    $("take-raw").addEventListener("click", () => send({ cmd: "take_raw" }));
     $("scan-btn").addEventListener("click", () => { devScanning = true; renderDevices(); send({ cmd: "scan" }); });
     renderDevices();
   }
@@ -843,6 +844,7 @@
       case "status": onStatus(msg); break;
       case "devices": onDevices(msg); break;
       case "link": onLink(msg); break;
+      case "raw": $("raw-note").hidden = msg.state !== "other"; break;
     }
   }
 
