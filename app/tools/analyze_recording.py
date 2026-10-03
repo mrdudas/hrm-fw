@@ -11,12 +11,14 @@ Reports:
     strap but never reached the host).
   * Firmware sample loss — ECG samples that were never put into a packet. R-R
     counted in ECG samples is compared with the firmware's own RR (timer based):
-    effective rate = 250 * RR_samples / RR_firmware. ~250 Hz = no loss.
+    effective rate = fs * RR_samples / RR_firmware. ~fs = no loss. The sample rate
+    comes from meta_<session>.json (written by the app; 250 Hz if absent).
   * RR irregularity and ectopy (PAC/PVC/artifact) rates per hour — timing glitches
     in the firmware show up as spurious "premature" beats, mostly PAC.
 """
 import csv
 import glob
+import json
 import os
 import statistics
 import sys
@@ -34,6 +36,24 @@ def read_csv(path):
 
 
 def detect_r(x):
+    """R peaks at full resolution. Detection runs on a ~250 Hz block-averaged copy
+    (a derivative detector at 1024 Hz is dominated by per-sample white noise);
+    each peak is then refined to the largest deviation in the full-rate signal."""
+    k = max(1, round(FS / 250))
+    if k == 1:
+        return _detect(x, FS)
+    xd = [sum(x[i:i + k]) / k for i in range(0, len(x) - k + 1, k)]
+    out, half = [], int(0.1 * FS)
+    for p in _detect(xd, FS / k):
+        c = p * k + k // 2
+        lo, hi = max(0, c - 2 * k), min(len(x), c + 2 * k + 1)
+        b0, b1 = max(0, c - half), min(len(x), c + half)
+        base = sum(x[b0:b1]) / (b1 - b0)
+        out.append(max(range(lo, hi), key=lambda i: abs(x[i] - base)))
+    return out
+
+
+def _detect(x, FS):
     """Very small QRS detector: high-pass, derivative^2, 80 ms integration, adaptive peak pick."""
     n = len(x)
     # high-pass: subtract a 0.2 s moving average
@@ -58,7 +78,7 @@ def detect_r(x):
             acc -= d2[i - iw]
         e[i] = acc
     # threshold per 10 s block: 30 % of the block's 98th percentile
-    peaks, refr, blk = [], int(0.33 * FS), 10 * FS
+    peaks, refr, blk = [], int(0.33 * FS), int(10 * FS)
     last = -refr
     for b0 in range(0, n, blk):
         seg = e[b0:b0 + blk]
@@ -89,6 +109,14 @@ def main():
         ses = os.path.basename(files[-1])[4:-4]
     print(f"session {ses}")
 
+    global FS
+    try:
+        with open(os.path.join(REC, f"meta_{ses}.json")) as f:
+            FS = int(json.load(f).get("ecg_fs") or FS)
+    except (OSError, ValueError):
+        pass
+    print(f"  ECG sample rate: {FS} Hz")
+
     ecg = read_csv(os.path.join(REC, f"ecg_{ses}.csv"))
     rr = read_csv(os.path.join(REC, f"rr_{ses}.csv"))
     ecto_path = os.path.join(REC, f"ectopy_{ses}.csv")
@@ -100,15 +128,16 @@ def main():
 
     # 1) BLE packet loss: gaps in the reconstructed sample index (seq * 20)
     lost_pkts, resets = 0, 0
+    batch = 20                            # samples per ECG packet
     for a, b in zip(idx, idx[1:]):
         d = b - a
         if d == 1:
             continue
         if 1 < d <= 2 * FS * 60:          # forward gap within 2 min: lost packets
-            lost_pkts += (d - 1) // 20
+            lost_pkts += (d - 1) // batch
         else:                               # wrap / reconnect / restart
             resets += 1
-    total_pkts = len(x) // 20 + lost_pkts
+    total_pkts = len(x) // batch + lost_pkts
     print(f"  BLE packet loss: {lost_pkts} of {total_pkts} ECG packets "
           f"({100 * lost_pkts / max(1, total_pkts):.2f} %), {resets} stream restarts")
 

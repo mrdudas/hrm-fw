@@ -22,6 +22,7 @@ class Hub:
         # ECG time anchor for reconstructing a continuous sample index/time axis
         self._ecg_seq0 = None
         self._ecg_t0 = None
+        self.ecg_fs = 250             # set per connection from the a1b20003 info char
 
     # ---- broadcaster ------------------------------------------------------
     async def broadcaster(self):
@@ -77,6 +78,13 @@ class Hub:
         self._emit({"type": "devices", "devices": devices, "scanning": scanning,
                     "t": time.time()}, snapshot_key="devices")
 
+    def set_ecg_fs(self, fs: int, info: dict | None = None):
+        """ECG sample rate of the connected strap. A change restarts the ECG time base."""
+        if fs != self.ecg_fs:
+            self._ecg_seq0 = None
+        self.ecg_fs = fs
+        self.recorder.set_ecg_fs(fs, info)
+
     def publish_ecg(self, seq: int, samples: list):
         t = time.time()
         if self._ecg_seq0 is None:
@@ -84,7 +92,7 @@ class Hub:
             self._ecg_t0 = t
         base = ((seq - self._ecg_seq0) & 0xFFFF) * len(samples)
         self.recorder.write_ecg(self._ecg_t0, base, samples)
-        self._emit({"type": "ecg", "t": t, "seq": seq,
+        self._emit({"type": "ecg", "t": t, "seq": seq, "fs": self.ecg_fs,
                     "base": base, "samples": samples})
 
     def publish_rr(self, hr, rr_list, contact="n/a"):

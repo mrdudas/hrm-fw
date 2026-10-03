@@ -34,8 +34,17 @@ def parse_hr(b: bytes) -> dict:
     return {"flags": f, "hr": hr, "contact": contact, "rr": rr}
 
 
+def parse_ecg_info(b: bytes) -> dict:
+    """ECG stream info, char a1b20003 (read once on connect), little-endian:
+    u16 sample_hz, u16 raw_batch, u8 sample_bytes, u8 fmt_ver."""
+    hz, batch, nbytes, ver = struct.unpack_from("<HHBB", bytes(b), 0)
+    return {"sample_hz": hz, "raw_batch": batch, "sample_bytes": nbytes, "fmt_ver": ver}
+
+
 def parse_ecg(b: bytes):
-    """Raw ECG, char a1b20002: uint16 seq/tag + N x int16 samples @250 Hz."""
+    """Raw ECG, char a1b20002: uint16 seq/tag + N x 16-bit samples at the rate
+    reported by a1b20003 (250 Hz on older firmware). Parsed as int16 so a slightly
+    negative SAADC reading (sent as its uint16 two's complement) stays negative."""
     b = bytes(b)
     seq = struct.unpack_from("<H", b, 0)[0]
     samples = [struct.unpack_from("<h", b, i)[0] for i in range(2, len(b) - 1, 2)]

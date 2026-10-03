@@ -19,7 +19,7 @@ import os
 import time
 
 from config import (DEVICE_NAME, KNOWN_ADDRESS, HR_UUID, ECG_UUID, ACCEL_UUID,
-                    ECTOPY_UUID, BATTERY_UUID, ACCEL_FS)
+                    ECTOPY_UUID, BATTERY_UUID, ACCEL_FS, ECG_INFO_UUID, ECG_FS)
 import parsers
 
 SCAN_S = 8          # length of one scan
@@ -214,6 +214,7 @@ class BLESource:
         async with BleakClient(dev, timeout=20,
                                disconnected_callback=on_disconnect) as c:
             self.log("connected; subscribing to streams ...")
+            await self._read_ecg_info(c)       # before subscribing: rate needed for the first packet
             await self._subscribe_all(c)
             # battery: read once up front (notify may not fire otherwise)
             await self._read_battery(c)
@@ -244,6 +245,17 @@ class BLESource:
                 self.log(f"  subscribed: {label}")
             except Exception as e:
                 self.log(f"  skip {label}: {e}")
+
+    async def _read_ecg_info(self, c):
+        """ECG sample rate etc. from a1b20003; older firmware lacks it -> 250 Hz."""
+        try:
+            info = parsers.parse_ecg_info(await c.read_gatt_char(ECG_INFO_UUID))
+            fs = info["sample_hz"] or ECG_FS
+            self.log(f"  ECG info: {info}")
+        except Exception as e:
+            info, fs = None, ECG_FS
+            self.log(f"  ECG info char not available ({e.__class__.__name__}); assuming {ECG_FS} Hz")
+        self.hub.set_ecg_fs(fs, info)
 
     async def _read_battery(self, c):
         try:

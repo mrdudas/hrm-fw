@@ -1,6 +1,7 @@
 """Synthetic data source so the dashboard can be exercised without hardware.
 
-Generates a plausible ECG waveform at 250 Hz (20-sample packets ~ every 80 ms),
+Generates a plausible ECG waveform at 250 Hz, or 1024 Hz with --demo-fs 1024
+(20-sample packets, every 80 / 19.5 ms),
 HR/RR beats derived from the same rhythm, accelerometer, occasional ectopic
 beats, and a slowly draining battery. Same publish_* API as BLESource.
 """
@@ -11,8 +12,9 @@ import time
 
 
 class DemoSource:
-    def __init__(self, hub, hr=62.0, log=print):
+    def __init__(self, hub, hr=62.0, log=print, fs=250):
         self.hub = hub
+        self.fs = fs                  # ECG sample rate to simulate (strap: 250 or 1024)
         self.base_hr = hr
         self.log = log
         self.enabled = True           # UI Disconnect pauses the synthetic stream
@@ -46,6 +48,7 @@ class DemoSource:
         self.log("DEMO mode: streaming synthetic data (no BLE)")
         self.hub.publish_status("demo", detail="synthetic stream", enabled=True,
                                 target=self._target())
+        self.hub.set_ecg_fs(self.fs)
         self.command({"cmd": "scan"})
         loop = asyncio.get_event_loop()
         await asyncio.gather(
@@ -56,7 +59,7 @@ class DemoSource:
 
     # ---- ECG + beat detection driving RR/ectopy --------------------------
     async def _ecg_and_beats(self, loop):
-        fs = 250.0
+        fs = float(self.fs)
         seq = 0
         phase = 0.0                 # position within current RR interval (s)
         rr_s = 60.0 / self.base_hr  # current beat-to-beat interval (s)
@@ -66,6 +69,7 @@ class DemoSource:
         last_r = None               # sample time of the previous R peak
         reported = True             # R of the current cycle already published?
         t_samp = 0.0
+        next_t = time.monotonic()
         while not self._stop.is_set():
             packet.clear()
             for _ in range(20):
@@ -102,7 +106,9 @@ class DemoSource:
             if self.enabled:
                 self.hub.publish_ecg(seq & 0xFFFF, list(packet))
             seq += 1
-            await asyncio.sleep(20 / fs)   # 80 ms per packet
+            # pace on an absolute schedule so the simulated rate doesn't drift
+            next_t += 20 / fs
+            await asyncio.sleep(max(0.0, next_t - time.monotonic()))
 
     def _ecg_sample(self, phase, rr_s):
         """A crude but recognizable P-QRS-T over the interval [0, rr_s)."""

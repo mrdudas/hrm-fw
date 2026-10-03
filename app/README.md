@@ -26,7 +26,8 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
   | Stream   | Characteristic UUID | Payload |
   |----------|---------------------|---------|
   | HR / RR  | `0x2A37`            | flags + HR + RR intervals (1/1024 s → ms) |
-  | Raw ECG  | `a1b20002-…`        | uint16 seq + 20× int16 @ 250 Hz |
+  | Raw ECG  | `a1b20002-…`        | uint16 seq + 20× int16 @ 250 or 1024 Hz |
+  | ECG info | `a1b20003-…` (read) | u16 sample_hz, u16 raw_batch, u8 sample_bytes, u8 fmt_ver — read on connect; absent on older firmware → 250 Hz |
   | Accel    | `a1b30002-…`        | int16 x/y/z + uint16 steps @ ~25 Hz |
   | Ectopy   | `a1b40002-…`        | PVC/PAC/artifact classifier + burden |
   | Battery  | `0x2A19`            | 1 byte percent (read + notify) |
@@ -38,6 +39,8 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
   - `accel_<session>.csv` — `unix_time, x, y, z, steps`
   - `ectopy_<session>.csv` — `unix_time, type, coupling_ms, pause_ms, pvc, pac, artifact, total, burden_pct`
   - `battery_<session>.csv` — `unix_time, pct`
+  - `meta_<session>.json` — `{"ecg_fs": …}`, the ECG sample rate used for the
+    session (read by `tools/analyze_recording.py`)
 - Live dashboard at **http://localhost:8770** (opened automatically): rolling
   ECG waveform, big HR number + RR, live HRV (RMSSD, SDNN, pNN50 over a rolling
   5 min window, ectopic/artifact beats excluded), RR/HRV tachogram, accelerometer + step count,
@@ -72,6 +75,7 @@ pip install -r requirements.txt
 ```bash
 python app.py               # scan for the strap, stream live, open the dashboard
 python app.py --demo        # synthetic data — no hardware needed (great for UI testing)
+python app.py --demo --demo-fs 1024   # same, simulating the 1024 Hz firmware
 python app.py --scan        # just list nearby BLE devices and exit
 python app.py --address D7:CD:02:7A:05:33   # connect to a specific address / macOS UUID
 python app.py --no-open --port 9000         # don't open a browser, custom port

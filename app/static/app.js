@@ -20,25 +20,26 @@
                 meas:"#f2f5f8", measFill:"rgba(242,245,248,0.07)", measBox:"rgba(14,17,22,0.85)" };
   const FONT = "11px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif";
 
-  const FS = 250;            // ECG sample rate (Hz)
+  let FS = 250;              // ECG sample rate (Hz); each ECG message carries the strap's real rate
   const ACC_FS = 25;         // accelerometer rate (Hz, nominal)
   const WIN_DEFAULT = 6;     // visible window (s), zoomable WIN_MIN..WIN_MAX
   const WIN_MIN = 2, WIN_MAX = 60;
-  const RING = FS * (WIN_MAX + 4);   // ECG ring buffer: longest window + margin
+  let RING = FS * (WIN_MAX + 4);     // ECG ring buffer: longest window + margin
 
   const now = () => (performance.timeOrigin + performance.now()) / 1000;
   const $ = (id) => document.getElementById(id);
   function setText(id, v) { const e = $(id); if (e) e.textContent = v; }
 
   // ---------- ECG ring buffer (continuous client-side sample index) ----------
-  const ecgRing = new Float32Array(RING).fill(NaN);
-  const ecgFit = new StreamClock(1 / FS, 0.10);   // ±10 %: follows firmware sample loss
+  let ecgRing = new Float32Array(RING).fill(NaN);
+  let ecgFit = new StreamClock(1 / FS, 0.10);     // ±10 %: follows firmware sample loss
   let ecgLast = -1;           // index of newest sample
   let ecgLastBase = null;     // last server `base` (wraps at 65536 packets)
   let ecgLastArrival = 0;
   const ecgAt = (n) => (n > ecgLast - RING && n <= ecgLast && n >= 0) ? ecgRing[n % RING] : NaN;
 
   function pushEcg(msg, ta) {
+    if (msg.fs && msg.fs !== FS) setEcgRate(msg.fs);
     const len = msg.samples.length;
     let skip = 0;             // samples missing before this packet
     if (ecgLastBase != null) {
@@ -81,16 +82,43 @@
   // ---------- beats: R-peak snapping, RR points, ensemble average ----------
   // search window around the newest ECG sample at the time the RR event arrived
   // (both share the BLE link, so a stall delays them together)
-  const SNAP_BACK = Math.round(0.35 * FS), SNAP_FWD = Math.round(0.12 * FS);
-  const AVG_PRE = Math.round(0.20 * FS);    // -200 ms
-  const AVG_POST = Math.round(0.50 * FS);   // +500 ms
-  const AVG_LEN = AVG_PRE + AVG_POST + 1;
+  let SNAP_BACK = Math.round(0.35 * FS), SNAP_FWD = Math.round(0.12 * FS);
+  let AVG_PRE = Math.round(0.20 * FS);      // -200 ms
+  let AVG_POST = Math.round(0.50 * FS);     // +500 ms
+  let AVG_LEN = AVG_PRE + AVG_POST + 1;
   const pendingBeats = [];  // { ta, rr: [ms...] }  awaiting ECG data around the beat
   const pendingSegs = [];   // R indices awaiting +AVG_POST samples
   const beatDots = [];      // R-peak sample indices (value read back from the ring)
   const rrPts = [];         // { idx } or { t }, plus { v: rr ms }
   const segs = [];          // Float32Array(AVG_LEN) ring for the ensemble average
   let lastR = -1e9;
+
+  // The strap reports its ECG rate (250 Hz on older firmware, 1024 Hz newer).
+  // A change re-creates everything indexed by ECG sample; RR points already
+  // placed on the old index are converted to absolute times so they stay put.
+  function setEcgRate(fs) {
+    if (ecgFit.ready) {
+      for (const p of rrPts) if (p.t == null) { p.t = ecgFit.t(p.idx); delete p.idx; }
+    } else {
+      rrPts.length = 0;
+    }
+    const oldDelay = ecgFit.delay;
+    FS = fs;
+    RING = FS * (WIN_MAX + 4);
+    ecgRing = new Float32Array(RING).fill(NaN);
+    ecgFit = new StreamClock(1 / FS, 0.10);
+    ecgFit.delay = oldDelay;                 // keep the playout delay: no jump in the view
+    ecgLast = -1; ecgLastBase = null; ecgLastArrival = 0;
+    SNAP_BACK = Math.round(0.35 * FS); SNAP_FWD = Math.round(0.12 * FS);
+    AVG_PRE = Math.round(0.20 * FS); AVG_POST = Math.round(0.50 * FS);
+    AVG_LEN = AVG_PRE + AVG_POST + 1;
+    avgX = Array.from({ length: AVG_LEN }, (_, i) => Math.round((i - AVG_PRE) / FS * 1000));
+    pendingBeats.length = 0; pendingSegs.length = 0; beatDots.length = 0; segs.length = 0;
+    lastR = -1e9;
+    if (avgPlot) avgPlot.setData([avgX, avgX.map(() => null)]);
+    setText("avg-count", 0);
+    setText("ecg-fs", FS + " Hz");
+  }
 
   function onRr(msg) {
     if (msg.hr != null) setText("hr", msg.hr);
@@ -426,7 +454,7 @@
   }
 
   // ---------- signal-averaged beat ----------
-  const avgX = Array.from({ length: AVG_LEN }, (_, i) => Math.round((i - AVG_PRE) / FS * 1000));
+  let avgX = Array.from({ length: AVG_LEN }, (_, i) => Math.round((i - AVG_PRE) / FS * 1000));
   let avgPlot = null;
   function avgN() {
     const n = parseInt($("avg-n")?.value, 10);
@@ -800,7 +828,8 @@
   }
 
   // handle for poking at the clocks from the devtools console
-  window.hrmDebug = { ecgFit, accFit, delay: () => delayNow, paused: () => paused };
+  window.hrmDebug = { get ecgFit() { return ecgFit; }, accFit, fs: () => FS,
+                      delay: () => delayNow, paused: () => paused };
 
   // ---------- init ----------
   window.addEventListener("load", () => {

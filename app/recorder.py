@@ -4,6 +4,7 @@ Files land in <recordings>/<stream>_<sessionstart>.csv. Writes are flushed after
 every event so a crash loses at most the last packet.
 """
 import csv
+import json
 import os
 import time
 
@@ -33,6 +34,19 @@ class CSVRecorder:
             self._files[stream] = f
             self._writers[stream] = w
 
+        self.ecg_fs = 250
+        self.set_ecg_fs(250)
+
+    def set_ecg_fs(self, fs, info=None):
+        """ECG sample rate for the CSV time column; also saved to meta_<session>.json
+        so offline tools (tools/analyze_recording.py) know the rate."""
+        self.ecg_fs = fs
+        try:
+            with open(os.path.join(self.outdir, f"meta_{self.session}.json"), "w") as f:
+                json.dump({"ecg_fs": fs, "ecg_info": info or {}}, f)
+        except OSError:
+            pass
+
     def paths(self):
         return {s: os.path.join(self.outdir, f"{s}_{self.session}.csv")
                 for s in self.HEADERS}
@@ -42,7 +56,7 @@ class CSVRecorder:
         w = self._writers["ecg"]
         for k, adc in enumerate(samples):
             idx = base_index + k
-            w.writerow([f"{t0_wall + idx / 250.0:.4f}", idx, adc])
+            w.writerow([f"{t0_wall + idx / self.ecg_fs:.5f}", idx, adc])
         self._files["ecg"].flush()
 
     def write_rr(self, t, hr, rr_list):
