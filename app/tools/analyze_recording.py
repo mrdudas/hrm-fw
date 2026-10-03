@@ -3,6 +3,7 @@
 
     python tools/analyze_recording.py                 # newest session in recordings/
     python tools/analyze_recording.py 20261001_110424 # a specific session
+    python tools/analyze_recording.py --per-minute [session]   # + per-minute table
 
 Pure Python (no numpy/scipy), so it runs with the app's own .venv.
 
@@ -100,11 +101,14 @@ def _detect(x, FS):
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+    args = sys.argv[1:]
+    if args and args[0] in ("-h", "--help"):
         print(__doc__.strip())
         return
-    if len(sys.argv) > 1:
-        ses = sys.argv[1]
+    per_minute = "--per-minute" in args
+    args = [a for a in args if a != "--per-minute"]
+    if args:
+        ses = args[0]
     else:
         files = sorted(glob.glob(os.path.join(REC, "ecg_*.csv")), key=os.path.getmtime)
         if not files:
@@ -227,6 +231,49 @@ def main():
         hours = len(x) / FS / 3600
         n = {k: sum(1 for r in ecto if r[1] == k) for k in ("PAC", "PVC", "ARTIFACT")}
         print("  ectopy events: " + ", ".join(f"{k} {v} ({v / hours:.0f}/h)" for k, v in n.items()))
+    if per_minute:
+        per_minute_table(ses)
+
+
+def per_minute_table(ses):
+    """ECG packets / samples per second / lost samples / duplicate packets and
+    accel samples per second, per wall-clock minute (needs rx_time). Packets are
+    grouped by arrival time, so a batch-size change mid-session is fine.
+    Duplicates only happen with two centrals connected -> they mark dual-host time."""
+    rows = read_csv(os.path.join(REC, f"ecg_{ses}.csv"))
+    if not rows or len(rows[0]) < 4 or rows[0][3] == "":
+        print("  (per-minute table needs the rx_time column)")
+        return
+    pk, dup, lost, samp, sizes = ({} for _ in range(5))
+    prev_start = prev_end = None
+    i = 0
+    while i < len(rows):
+        rx = rows[i][3]
+        j = i
+        while j < len(rows) and rows[j][3] == rx:
+            j += 1
+        start, n = int(rows[i][1]), j - i
+        m = time.strftime("%H:%M", time.localtime(float(rx)))
+        if start == prev_start:
+            dup[m] = dup.get(m, 0) + 1
+        else:
+            pk[m] = pk.get(m, 0) + 1
+            samp[m] = samp.get(m, 0) + n
+            sizes.setdefault(m, set()).add(n)
+            if prev_end is not None and prev_end + 1 < start < prev_end + 1 + 120 * FS:
+                lost[m] = lost.get(m, 0) + start - prev_end - 1
+            prev_start, prev_end = start, start + n - 1
+        i = j
+    acc = {}
+    for r in read_csv(os.path.join(REC, f"accel_{ses}.csv")):
+        m = time.strftime("%H:%M", time.localtime(float(r[0])))
+        acc[m] = acc.get(m, 0) + 1
+    print("\n  minute  ECG pkts  pkt size  ECG samp/s  lost samp  dup pkts  accel/s")
+    for m in sorted(set(pk) | set(acc)):
+        sz = ",".join(str(v) for v in sorted(sizes.get(m, ())))
+        print(f"  {m}   {pk.get(m, 0):7d}  {sz:>8s}  {samp.get(m, 0) / 60:10.0f}  {lost.get(m, 0):9d}"
+              f"  {dup.get(m, 0):8d}  {acc.get(m, 0) / 60:7.1f}")
+
 
 if __name__ == "__main__":
     main()
