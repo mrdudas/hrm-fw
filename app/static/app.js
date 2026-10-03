@@ -776,7 +776,15 @@
 
   // connection parameters the strap reports (a1b20004)
   let link = null;
-  function onLink(msg) { link = msg; setText("ecg-fs", fsLabel()); }
+  function onLink(msg) {
+    link = msg;
+    setText("ecg-fs", fsLabel());
+    if (msg.vdd_min_mv != null) {   // strap supply: resting max and TX-burst dip since the last reading
+      $("battery").title = `VDD ${(msg.vdd_max_mv / 1000).toFixed(2)} V resting, ` +
+                           `dips to ${(msg.vdd_min_mv / 1000).toFixed(2)} V under radio load (last minute)`;
+      setText("batt-vdd", `${(msg.vdd_min_mv / 1000).toFixed(2)}–${(msg.vdd_max_mv / 1000).toFixed(2)} V`);
+    }
+  }
   function fsLabel() {
     return FS + " Hz" + (link ? ` · CI ${link.interval_ms} ms · MTU ${link.mtu}` : "") +
       (link && link.conn_count > 1 ? ` · ⚠ ${link.conn_count} hosts connected` : "");

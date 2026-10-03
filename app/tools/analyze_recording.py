@@ -119,6 +119,7 @@ def main():
 
     global FS
     batch = 20                            # samples per ECG packet (a1b20003 raw_batch)
+    meta = {}
     try:
         with open(os.path.join(REC, f"meta_{ses}.json")) as f:
             meta = json.load(f)
@@ -127,6 +128,12 @@ def main():
     except (OSError, ValueError):
         pass
     print(f"  ECG sample rate: {FS} Hz, {batch} samples per packet")
+    vdd = [(l["vdd_min_mv"], l["vdd_max_mv"]) for l in (meta.get("link") or [])
+           if "vdd_min_mv" in l]
+    if vdd:
+        lo, hi = min(v[0] for v in vdd), max(v[1] for v in vdd)
+        print(f"  strap VDD: lowest TX dip {lo} mV, highest resting {hi} mV over {len(vdd)} readings "
+              f"(brownout ~1700 mV -> {lo - 1700} mV margin)")
 
     ecg = read_csv(os.path.join(REC, f"ecg_{ses}.csv"))
     rr = read_csv(os.path.join(REC, f"rr_{ses}.csv"))

@@ -80,6 +80,7 @@ class BLESource:
         self._take_raw = False
         self._raw_kick = asyncio.Event()
         self._ecg_last = 0.0             # monotonic time of the last ECG packet
+        self._vdd = None                 # [min, max] mV over all reads since the last log
 
     def stop(self):
         self._stop.set()
@@ -263,11 +264,21 @@ class BLESource:
             return None
         link["host_mtu"] = getattr(c, "mtu_size", None)   # bleak's view, cross-check
         link["t"] = time.time()
+        # every read resets the strap's VDD window, and we read more often than we
+        # log (3 s polling, watchdog): fold all reads into the logged extremes
+        if "vdd_min_mv" in link:
+            v = self._vdd
+            self._vdd = ([min(v[0], link["vdd_min_mv"]), max(v[1], link["vdd_max_mv"])] if v
+                         else [link["vdd_min_mv"], link["vdd_max_mv"]])
+        if log and self._vdd:
+            link["vdd_min_mv"], link["vdd_max_mv"] = self._vdd
+            self._vdd = None
         if log:
             self.log(f"  link: interval {link['interval_ms']:g} ms, latency {link['latency']}, "
                      f"timeout {link['timeout_ms']} ms, ATT MTU {link['mtu']} (host says {link['host_mtu']})"
                      + (f", {link['conn_count']} host(s) connected" if "conn_count" in link else "")
-                     + (f", raw ECG owner: {link['raw_owner']}" if "raw_owner" in link else ""))
+                     + (f", raw ECG owner: {link['raw_owner']}" if "raw_owner" in link else "")
+                     + (f", VDD {link['vdd_min_mv']}-{link['vdd_max_mv']} mV" if "vdd_min_mv" in link else ""))
             self.hub.publish_link(link)
         return link
 

@@ -60,6 +60,10 @@ def parse_link(b: bytes) -> dict:
         d["conn_count"] = b[8]
     if len(b) >= 10:
         d["raw_owner"] = {0: "none", 1: "mine", 2: "other"}.get(b[9], "other")
+    if len(b) >= 14:
+        # VDD extremes since the previous read of this char (the strap resets them
+        # on every read): min = TX-burst dip, max = resting
+        d["vdd_min_mv"], d["vdd_max_mv"] = struct.unpack_from("<HH", b, 10)
     return d
 
 
