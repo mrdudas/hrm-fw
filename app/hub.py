@@ -23,6 +23,8 @@ class Hub:
         self._ecg_seq0 = None
         self._ecg_t0 = None
         self.ecg_fs = 250             # set per connection from the a1b20003 info char
+        self._ecg_last_seq = None
+        self.ecg_duplicates = 0       # packets dropped as exact seq repeats
 
     # ---- broadcaster ------------------------------------------------------
     async def broadcaster(self):
@@ -87,10 +89,18 @@ class Hub:
         """ECG sample rate of the connected strap. A change restarts the ECG time base."""
         if fs != self.ecg_fs:
             self._ecg_seq0 = None
+        self._ecg_last_seq = None     # new connection: a seq repeat across it is not a duplicate
         self.ecg_fs = fs
         self.recorder.set_ecg_fs(fs, info)
 
     def publish_ecg(self, seq: int, samples: list):
+        # The strap can deliver the same packet twice (TX retry after -ENOMEM
+        # re-notifies every connection, so with two hosts one gets a repeat).
+        # Drop exact repeats before they reach the CSV or the dashboard.
+        if seq == self._ecg_last_seq:
+            self.ecg_duplicates += 1
+            return
+        self._ecg_last_seq = seq
         t = time.time()
         if self._ecg_seq0 is None:
             self._ecg_seq0 = seq

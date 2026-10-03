@@ -125,6 +125,21 @@ def main():
     ecto_path = os.path.join(REC, f"ectopy_{ses}.csv")
     ecto = read_csv(ecto_path) if os.path.exists(ecto_path) else []
 
+    # drop repeated packets (same start index as the previous packet): the strap's
+    # TX retry can deliver a packet twice when two hosts are connected
+    batch = 20                            # samples per ECG packet
+    dedup, dups, prev_start = [], 0, None
+    i = 0
+    while i < len(ecg):
+        start = int(ecg[i][1])
+        pkt = ecg[i:i + batch]
+        if start == prev_start:
+            dups += 1
+        else:
+            dedup += pkt
+            prev_start = start
+        i += batch
+    ecg = dedup
     idx = [int(r[1]) for r in ecg]
     x = [float(r[2]) for r in ecg]
     print(f"  ECG samples: {len(x)}  ({len(x) / FS / 60:.1f} min of signal)")
@@ -134,7 +149,6 @@ def main():
     # if the arrival gap matches the missing samples; anything else (seq reset by a
     # strap reboot, wrap misread as a jump, ...) is a restart.
     has_rx = len(ecg[0]) > 3 and ecg[0][3] != ""
-    batch = 20                            # samples per ECG packet
     lost_pkts, restarts = 0, []           # restarts: (row, rx gap s or None, index jump)
     for i in range(1, len(idx)):
         d = idx[i] - idx[i - 1]
@@ -149,6 +163,9 @@ def main():
     total_pkts = len(x) // batch + lost_pkts
     print(f"  BLE packet loss: {lost_pkts} of {total_pkts} ECG packets "
           f"({100 * lost_pkts / max(1, total_pkts):.2f} %), {len(restarts)} stream restarts")
+    if dups:
+        print(f"  duplicate ECG packets dropped: {dups} (same packet delivered twice -- "
+              f"strap TX retry with two hosts connected)")
     gaps = [g for _, g, _ in restarts if g is not None]
     if gaps:
         print(f"    restart gaps (arrival time): min {min(gaps):.2f} s, median {statistics.median(gaps):.2f} s, "

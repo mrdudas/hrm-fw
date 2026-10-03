@@ -40,6 +40,7 @@
 
   function pushEcg(msg, ta) {
     if (msg.fs && msg.fs !== FS) setEcgRate(msg.fs);
+    if (msg.base === ecgLastBase) return;   // repeated packet (strap TX retry): already have it
     const len = msg.samples.length;
     let skip = 0;             // samples missing before this packet
     if (ecgLastBase != null) {
