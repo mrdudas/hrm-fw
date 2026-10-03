@@ -23,6 +23,7 @@ import glob
 import json
 import os
 import statistics
+import time
 import sys
 
 FS = 250
@@ -128,20 +129,35 @@ def main():
     x = [float(r[2]) for r in ecg]
     print(f"  ECG samples: {len(x)}  ({len(x) / FS / 60:.1f} min of signal)")
 
-    # 1) BLE packet loss: gaps in the reconstructed sample index (seq * 20)
-    lost_pkts, resets = 0, 0
+    # 1) BLE packet loss vs stream restarts, from discontinuities in the sample
+    # index (seq * batch). With rx_time, a forward jump counts as lost packets only
+    # if the arrival gap matches the missing samples; anything else (seq reset by a
+    # strap reboot, wrap misread as a jump, ...) is a restart.
+    has_rx = len(ecg[0]) > 3 and ecg[0][3] != ""
     batch = 20                            # samples per ECG packet
-    for a, b in zip(idx, idx[1:]):
-        d = b - a
+    lost_pkts, restarts = 0, []           # restarts: (row, rx gap s or None, index jump)
+    for i in range(1, len(idx)):
+        d = idx[i] - idx[i - 1]
         if d == 1:
             continue
-        if 1 < d <= 2 * FS * 60:          # forward gap within 2 min: lost packets
+        gap = float(ecg[i][3]) - float(ecg[i - 1][3]) if has_rx else None
+        missing_s = (d - 1) / FS
+        if 1 < d <= 2 * FS * 60 and (gap is None or abs(gap - missing_s) < max(0.5, 0.5 * missing_s)):
             lost_pkts += (d - 1) // batch
-        else:                               # wrap / reconnect / restart
-            resets += 1
+        else:
+            restarts.append((i, gap, d))
     total_pkts = len(x) // batch + lost_pkts
     print(f"  BLE packet loss: {lost_pkts} of {total_pkts} ECG packets "
-          f"({100 * lost_pkts / max(1, total_pkts):.2f} %), {resets} stream restarts")
+          f"({100 * lost_pkts / max(1, total_pkts):.2f} %), {len(restarts)} stream restarts")
+    gaps = [g for _, g, _ in restarts if g is not None]
+    if gaps:
+        print(f"    restart gaps (arrival time): min {min(gaps):.2f} s, median {statistics.median(gaps):.2f} s, "
+              f"max {max(gaps):.1f} s  (a strap reboot + reconnect takes seconds)")
+        for i, g, d in restarts:
+            if g is not None and g < 0.5:
+                when = time.strftime("%H:%M:%S", time.localtime(float(ecg[i][3])))
+                print(f"    ! restart at {when} (row {i}) with only {g * 1000:.0f} ms arrival gap, "
+                      f"index jump {d:+d}: not a reboot?")
 
     # 2) firmware sample loss.
     # Preferred (recordings with the rx_time column): within each continuous
@@ -152,7 +168,6 @@ def main():
     rr_fw = [float(r[2]) for r in rr if r[2] and 350 <= float(r[2]) <= 1500]
     cuts = [0] + [i for i in range(1, len(idx)) if idx[i] - idx[i - 1] != 1] + [len(idx)]
     segs = [(a, b) for a, b in zip(cuts, cuts[1:]) if b - a >= 20 * FS]
-    has_rx = len(ecg[0]) > 3 and ecg[0][3] != ""
     if has_rx and segs:
         n_tot = t_tot = 0.0
         for a, b in segs:
