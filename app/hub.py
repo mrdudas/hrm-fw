@@ -58,7 +58,7 @@ class Hub:
     def snapshot_messages(self):
         """JSON strings to send a newly connected client (status + last of each)."""
         out = [json.dumps(self._status)]
-        for key in ("devices", "battery", "rr", "accel", "ectopy"):
+        for key in ("devices", "battery", "rr", "accel", "ectopy", "link"):
             if key in self._snapshot:
                 out.append(self._snapshot[key])
         return out
@@ -77,6 +77,11 @@ class Hub:
     def publish_devices(self, devices: list, scanning: bool):
         self._emit({"type": "devices", "devices": devices, "scanning": scanning,
                     "t": time.time()}, snapshot_key="devices")
+
+    def publish_link(self, link: dict):
+        """Connection parameters as reported by the strap (a1b20004)."""
+        self.recorder.add_link(link)
+        self._emit({"type": "link", **link}, snapshot_key="link")
 
     def set_ecg_fs(self, fs: int, info: dict | None = None):
         """ECG sample rate of the connected strap. A change restarts the ECG time base."""

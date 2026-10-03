@@ -117,7 +117,7 @@
     lastR = -1e9;
     if (avgPlot) avgPlot.setData([avgX, avgX.map(() => null)]);
     setText("avg-count", 0);
-    setText("ecg-fs", FS + " Hz");
+    setText("ecg-fs", fsLabel());
   }
 
   function onRr(msg) {
@@ -746,6 +746,13 @@
   }
   setInterval(() => { if (status.state === "waiting") setText("status-text", statusLabel()); }, 1000);
 
+  // connection parameters the strap reports (a1b20004)
+  let link = null;
+  function onLink(msg) { link = msg; setText("ecg-fs", fsLabel()); }
+  function fsLabel() {
+    return FS + " Hz" + (link ? ` · CI ${link.interval_ms} ms · MTU ${link.mtu}` : "");
+  }
+
   function onDevices(msg) {
     devices = msg.devices || [];
     devScanning = !!msg.scanning;
@@ -806,6 +813,7 @@
       case "battery": onBattery(msg); break;
       case "status": onStatus(msg); break;
       case "devices": onDevices(msg); break;
+      case "link": onLink(msg); break;
     }
   }
 

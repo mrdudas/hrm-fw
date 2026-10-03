@@ -41,6 +41,14 @@ def parse_ecg_info(b: bytes) -> dict:
     return {"sample_hz": hz, "raw_batch": batch, "sample_bytes": nbytes, "fmt_ver": ver}
 
 
+def parse_link(b: bytes) -> dict:
+    """Link diagnostics, char a1b20004 (read), little-endian u16 x4: connection
+    interval (1.25 ms units), peripheral latency, supervision timeout (10 ms
+    units), ATT MTU -- what the strap actually got from the central."""
+    iv, lat, tmo, mtu = struct.unpack_from("<HHHH", bytes(b), 0)
+    return {"interval_ms": iv * 1.25, "latency": lat, "timeout_ms": tmo * 10, "mtu": mtu}
+
+
 def parse_ecg(b: bytes):
     """Raw ECG, char a1b20002: uint16 seq/tag + N x 16-bit samples at the rate
     reported by a1b20003 (250 Hz on older firmware). Parsed as int16 so a slightly

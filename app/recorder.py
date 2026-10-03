@@ -35,15 +35,25 @@ class CSVRecorder:
             self._writers[stream] = w
 
         self.ecg_fs = 250
+        self._meta = {}
         self.set_ecg_fs(250)
 
     def set_ecg_fs(self, fs, info=None):
         """ECG sample rate for the CSV time column; also saved to meta_<session>.json
         so offline tools (tools/analyze_recording.py) know the rate."""
         self.ecg_fs = fs
+        self._meta.update({"ecg_fs": fs, "ecg_info": info or {}})
+        self._write_meta()
+
+    def add_link(self, link):
+        """Append a link-parameter reading (a1b20004) to meta_<session>.json."""
+        self._meta.setdefault("link", []).append(link)
+        self._write_meta()
+
+    def _write_meta(self):
         try:
             with open(os.path.join(self.outdir, f"meta_{self.session}.json"), "w") as f:
-                json.dump({"ecg_fs": fs, "ecg_info": info or {}}, f)
+                json.dump(self._meta, f)
         except OSError:
             pass
 

@@ -19,7 +19,8 @@ import os
 import time
 
 from config import (DEVICE_NAME, KNOWN_ADDRESS, HR_UUID, ECG_UUID, ACCEL_UUID,
-                    ECTOPY_UUID, BATTERY_UUID, ACCEL_FS, ECG_INFO_UUID, ECG_FS)
+                    ECTOPY_UUID, BATTERY_UUID, ACCEL_FS, ECG_INFO_UUID, ECG_FS,
+                    LINK_UUID)
 import parsers
 
 SCAN_S = 8          # length of one scan
@@ -220,6 +221,7 @@ class BLESource:
             await self._read_battery(c)
             label = dev.name or dev.address
             self._status("connected", detail=label, address=dev.address)
+            link_task = asyncio.create_task(self._link_params(c))
             # hold the link until it drops, the user disconnects or picks another device
             while (not disconnected.is_set() and not self._stop.is_set()
                    and self.enabled and self._target() == target and c.is_connected):
@@ -229,7 +231,28 @@ class BLESource:
                     self._status("connected", detail=label, address=dev.address)
                     continue
                 await self._sleep(0.5)
+            link_task.cancel()
             self.log("link closed")
+
+    async def _link_params(self, c):
+        """Read the strap's view of the link (a1b20004): 5 s after connecting (once
+        the peripheral's conn-param update has settled), then every minute.
+        Silently stops on firmware without the characteristic."""
+        await asyncio.sleep(5)
+        while True:
+            try:
+                link = parsers.parse_link(await c.read_gatt_char(LINK_UUID))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self.log(f"  link params not available ({e.__class__.__name__})")
+                return
+            link["host_mtu"] = getattr(c, "mtu_size", None)   # bleak's view, cross-check
+            link["t"] = time.time()
+            self.log(f"  link: interval {link['interval_ms']:g} ms, latency {link['latency']}, "
+                     f"timeout {link['timeout_ms']} ms, ATT MTU {link['mtu']} (host says {link['host_mtu']})")
+            self.hub.publish_link(link)
+            await asyncio.sleep(60)
 
     async def _subscribe_all(self, c):
         subs = [

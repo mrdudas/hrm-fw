@@ -15,6 +15,7 @@ KNOWN_ADDRESS = "D7:CD:02:7A:05:33"
 HR_UUID      = "00002a37-0000-1000-8000-00805f9b34fb"  # Heart Rate Measurement
 ECG_UUID     = "a1b20002-0000-1000-8000-00805f9b34fb"  # raw ECG: seq + 20x int16
 ECG_INFO_UUID = "a1b20003-0000-1000-8000-00805f9b34fb" # read: u16 sample_hz, u16 raw_batch, u8 sample_bytes, u8 fmt_ver
+LINK_UUID     = "a1b20004-0000-1000-8000-00805f9b34fb" # read (diagnostic): conn interval, latency, timeout, ATT MTU as the strap sees them
 ACCEL_UUID   = "a1b30002-0000-1000-8000-00805f9b34fb"  # int16 x,y,z + uint16 steps
 ECTOPY_UUID  = "a1b40002-0000-1000-8000-00805f9b34fb"  # extrasystole classifier
 BATTERY_UUID = "00002a19-0000-1000-8000-00805f9b34fb"  # Battery Level (0x2A19)
