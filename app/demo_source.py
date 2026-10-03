@@ -12,9 +12,10 @@ import time
 
 
 class DemoSource:
-    def __init__(self, hub, hr=62.0, log=print, fs=250):
+    def __init__(self, hub, hr=62.0, log=print, fs=250, batch=20):
         self.hub = hub
         self.fs = fs                  # ECG sample rate to simulate (strap: 250 or 1024)
+        self.batch = batch            # ECG samples per packet (strap: 20 or 40)
         self.base_hr = hr
         self.log = log
         self.enabled = True           # UI Disconnect pauses the synthetic stream
@@ -48,7 +49,8 @@ class DemoSource:
         self.log("DEMO mode: streaming synthetic data (no BLE)")
         self.hub.publish_status("demo", detail="synthetic stream", enabled=True,
                                 target=self._target())
-        self.hub.set_ecg_fs(self.fs)
+        self.hub.set_ecg_fs(self.fs, {"sample_hz": self.fs, "raw_batch": self.batch,
+                                      "sample_bytes": 2, "fmt_ver": 1})
         self.command({"cmd": "scan"})
         loop = asyncio.get_event_loop()
         await asyncio.gather(
@@ -72,7 +74,7 @@ class DemoSource:
         next_t = time.monotonic()
         while not self._stop.is_set():
             packet.clear()
-            for _ in range(20):
+            for _ in range(self.batch):
                 # QRS-ish morphology as a function of phase within the beat
                 packet.append(int(self._ecg_sample(phase, rr_s)))
                 phase += 1.0 / fs
@@ -107,7 +109,7 @@ class DemoSource:
                 self.hub.publish_ecg(seq & 0xFFFF, list(packet))
             seq += 1
             # pace on an absolute schedule so the simulated rate doesn't drift
-            next_t += 20 / fs
+            next_t += self.batch / fs
             await asyncio.sleep(max(0.0, next_t - time.monotonic()))
 
     def _ecg_sample(self, phase, rr_s):

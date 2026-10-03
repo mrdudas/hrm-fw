@@ -67,7 +67,7 @@ async def run_dashboard(args):
     # pick the data source
     if args.demo:
         from demo_source import DemoSource
-        source = DemoSource(hub, log=log, fs=args.demo_fs)
+        source = DemoSource(hub, log=log, fs=args.demo_fs, batch=args.demo_batch)
     else:
         try:
             import bleak  # noqa: F401
@@ -112,6 +112,8 @@ def parse_args(argv):
                    help="stream synthetic data (no BLE hardware needed)")
     p.add_argument("--demo-fs", type=int, default=250, choices=(250, 1024),
                    help="ECG sample rate simulated by --demo (default 250)")
+    p.add_argument("--demo-batch", type=int, default=20, choices=(20, 40),
+                   help="ECG samples per packet simulated by --demo (default 20)")
     p.add_argument("--scan", action="store_true",
                    help="list nearby BLE devices and exit")
     p.add_argument("--name", default=DEVICE_NAME,

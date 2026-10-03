@@ -113,12 +113,15 @@ def main():
     print(f"session {ses}")
 
     global FS
+    batch = 20                            # samples per ECG packet (a1b20003 raw_batch)
     try:
         with open(os.path.join(REC, f"meta_{ses}.json")) as f:
-            FS = int(json.load(f).get("ecg_fs") or FS)
+            meta = json.load(f)
+        FS = int(meta.get("ecg_fs") or FS)
+        batch = int((meta.get("ecg_info") or {}).get("raw_batch") or batch)
     except (OSError, ValueError):
         pass
-    print(f"  ECG sample rate: {FS} Hz")
+    print(f"  ECG sample rate: {FS} Hz, {batch} samples per packet")
 
     ecg = read_csv(os.path.join(REC, f"ecg_{ses}.csv"))
     rr = read_csv(os.path.join(REC, f"rr_{ses}.csv"))
@@ -127,7 +130,6 @@ def main():
 
     # drop repeated packets (same start index as the previous packet): the strap's
     # TX retry can deliver a packet twice when two hosts are connected
-    batch = 20                            # samples per ECG packet
     dedup, dups, prev_start = [], 0, None
     i = 0
     while i < len(ecg):
