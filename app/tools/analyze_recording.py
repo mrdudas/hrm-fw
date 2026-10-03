@@ -9,8 +9,10 @@ Pure Python (no numpy/scipy), so it runs with the app's own .venv.
 Reports:
   * BLE packet loss — gaps in the ECG sequence numbers (packets that left the
     strap but never reached the host).
-  * Firmware sample loss — ECG samples that were never put into a packet. R-R
-    counted in ECG samples is compared with the firmware's own RR (timer based):
+  * Firmware sample loss — ECG samples that were never put into a packet.
+    Recordings with the rx_time column: samples received / wall-clock time over
+    continuous stream segments. Older recordings: R-R counted in ECG samples is
+    compared with the firmware's own RR (timer based):
     effective rate = fs * RR_samples / RR_firmware. ~fs = no loss. The sample rate
     comes from meta_<session>.json (written by the app; 250 Hz if absent).
   * RR irregularity and ectopy (PAC/PVC/artifact) rates per hour — timing glitches
@@ -141,18 +143,47 @@ def main():
     print(f"  BLE packet loss: {lost_pkts} of {total_pkts} ECG packets "
           f"({100 * lost_pkts / max(1, total_pkts):.2f} %), {resets} stream restarts")
 
-    # 2) firmware sample loss: RR from ECG sample count vs firmware RR
-    peaks = detect_r(x)
-    rr_s = [(b - a) * 1000 / FS for a, b in zip(peaks, peaks[1:])
-            if 350 <= (b - a) * 1000 / FS <= 1500 and idx[b] - idx[a] == b - a]
+    # 2) firmware sample loss.
+    # Preferred (recordings with the rx_time column): within each continuous
+    # segment, samples received / wall-clock time between packet arrivals is the
+    # effective sample rate directly.
+    # Fallback (older recordings): R-R in ECG samples vs firmware RR, using only
+    # continuous segments where the R detector is locked on.
     rr_fw = [float(r[2]) for r in rr if r[2] and 350 <= float(r[2]) <= 1500]
-    if len(rr_s) > 20 and len(rr_fw) > 20:
-        ms, mf = statistics.median(rr_s), statistics.median(rr_fw)
-        eff = FS * ms / mf
-        print(f"  median RR: ECG samples {ms:.1f} ms vs firmware {mf:.1f} ms -> "
-              f"effective ECG rate {eff:.1f} Hz (sample loss ~{max(0.0, 100 * (1 - eff / FS)):.1f} %)")
+    cuts = [0] + [i for i in range(1, len(idx)) if idx[i] - idx[i - 1] != 1] + [len(idx)]
+    segs = [(a, b) for a, b in zip(cuts, cuts[1:]) if b - a >= 20 * FS]
+    has_rx = len(ecg[0]) > 3 and ecg[0][3] != ""
+    if has_rx and segs:
+        n_tot = t_tot = 0.0
+        for a, b in segs:
+            rx_a, rx_b = float(ecg[a][3]), float(ecg[b - 1][3])
+            # samples from the first packet's arrival to the last packet's arrival
+            last_pkt_start = max(i for i in range(b - batch, b) if ecg[i][3] == ecg[b - 1][3])
+            n_tot += last_pkt_start - a
+            t_tot += rx_b - rx_a
+        eff = n_tot / t_tot
+        print(f"  effective ECG rate {eff:.1f} Hz over {t_tot / 60:.1f} min of continuous stream "
+              f"(sample loss ~{max(0.0, 100 * (1 - eff / FS)):.1f} %)")
     else:
-        print("  not enough beats to estimate sample loss")
+        rr_s, used_s, n_seg = [], 0.0, 0
+        for a, b in segs:
+            pk = detect_r(x[a:b])
+            d = [(q - p) * 1000 / FS for p, q in zip(pk, pk[1:])]
+            d = [v for v in d if 350 <= v <= 1500]
+            if len(d) < 15:
+                continue
+            q1, med, q3 = statistics.quantiles(d, n=4)
+            if (q3 - q1) / med < 0.2:            # locked on: tight RR distribution
+                rr_s += d; used_s += (b - a) / FS; n_seg += 1
+        if len(rr_s) > 20 and len(rr_fw) > 20:
+            ms, mf = statistics.median(rr_s), statistics.median(rr_fw)
+            eff = FS * ms / mf
+            print(f"  median RR: ECG samples {ms:.1f} ms vs firmware {mf:.1f} ms -> "
+                  f"effective ECG rate {eff:.1f} Hz (sample loss ~{max(0.0, 100 * (1 - eff / FS)):.1f} %)"
+                  f"\n    (no rx_time column: from {n_seg} clean segment(s), {used_s / 60:.1f} min; "
+                  f"approximate if HR drifted)")
+        else:
+            print("  not enough clean signal to estimate sample loss")
 
     # 3) RR irregularity + ectopy
     if len(rr_fw) > 2:

@@ -34,7 +34,9 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
 - **Auto-reconnects** if the BLE link drops (quick retry, then once a minute).
 - Records each stream to a timestamped CSV in `recordings/`, flushed after every
   packet so a crash loses at most the last one:
-  - `ecg_<session>.csv` — `unix_time, sample_index, adc`
+  - `ecg_<session>.csv` — `unix_time, sample_index, adc, rx_time` (`rx_time` = host
+    arrival time of the sample's BLE packet; lets `tools/analyze_recording.py`
+    measure the real sample rate)
   - `rr_<session>.csv` — `unix_time, hr_bpm, rr_ms`
   - `accel_<session>.csv` — `unix_time, x, y, z, steps`
   - `ectopy_<session>.csv` — `unix_time, type, coupling_ms, pause_ms, pvc, pac, artifact, total, burden_pct`

@@ -91,7 +91,7 @@ class Hub:
             self._ecg_seq0 = seq
             self._ecg_t0 = t
         base = ((seq - self._ecg_seq0) & 0xFFFF) * len(samples)
-        self.recorder.write_ecg(self._ecg_t0, base, samples)
+        self.recorder.write_ecg(self._ecg_t0, base, samples, rx_time=t)
         self._emit({"type": "ecg", "t": t, "seq": seq, "fs": self.ecg_fs,
                     "base": base, "samples": samples})
 

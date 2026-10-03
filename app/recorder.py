@@ -11,7 +11,7 @@ import time
 
 class CSVRecorder:
     HEADERS = {
-        "ecg":     ["unix_time", "sample_index", "adc"],
+        "ecg":     ["unix_time", "sample_index", "adc", "rx_time"],
         "rr":      ["unix_time", "hr_bpm", "rr_ms"],
         "accel":   ["unix_time", "x", "y", "z", "steps"],
         "ectopy":  ["unix_time", "type", "coupling_ms", "pause_ms",
@@ -51,12 +51,15 @@ class CSVRecorder:
         return {s: os.path.join(self.outdir, f"{s}_{self.session}.csv")
                 for s in self.HEADERS}
 
-    def write_ecg(self, t0_wall, base_index, samples):
-        """One row per sample; time reconstructed from the packet's base index."""
+    def write_ecg(self, t0_wall, base_index, samples, rx_time=None):
+        """One row per sample; time reconstructed from the packet's base index.
+        rx_time: host arrival time of the packet (same on all its rows), so
+        offline tools can measure the real sample rate over wall-clock time."""
         w = self._writers["ecg"]
+        rx = f"{rx_time:.4f}" if rx_time is not None else ""
         for k, adc in enumerate(samples):
             idx = base_index + k
-            w.writerow([f"{t0_wall + idx / self.ecg_fs:.5f}", idx, adc])
+            w.writerow([f"{t0_wall + idx / self.ecg_fs:.5f}", idx, adc, rx])
         self._files["ecg"].flush()
 
     def write_rr(self, t, hr, rr_list):
