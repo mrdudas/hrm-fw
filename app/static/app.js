@@ -104,8 +104,34 @@
       }
     },
   };
-  try { const f = localStorage.getItem("hrm.notch"); if (f != null) notch.f0 = +f; } catch (e) {}
+  let notchPref = 50;                 // the user's choice (remembered); the strap may override
+  try { const f = localStorage.getItem("hrm.notch"); if (f != null) notchPref = +f; } catch (e) {}
+  notch.f0 = notchPref;
   notch.design();
+  let strapNotchHz = 0;               // > 0: the strap already notches the stream at this frequency
+
+  // a1b20003 flags: if the strap notches in firmware, the display notch would
+  // only notch twice -> force it off and say so; otherwise honour the user's choice
+  function onEcgInfo(msg) {
+    strapNotchHz = msg.notched_hz || 0;
+    const ns = $("notch-sel");
+    const strapOpt = ns.querySelector('option[value="strap"]');
+    if (strapNotchHz) {
+      strapOpt.textContent = `Notch in strap (${strapNotchHz} Hz)`;
+      strapOpt.hidden = false;
+      ns.value = "strap";
+      ns.disabled = true;
+      ns.title = "The strap already removes mains hum from the ECG stream (and the recording)";
+      notch.f0 = 0;
+    } else {
+      strapOpt.hidden = true;
+      ns.disabled = false;
+      ns.value = String(notchPref);
+      ns.title = "Mains-hum notch on the displayed ECG only (recording stays raw)";
+      notch.f0 = notchPref;
+    }
+    notch.refilter();
+  }
 
   // hub ECG index (seq * batch + offset, wraps at 65536 packets) -> client ECG
   // index, relative to the newest ECG packet (valid within the current stream run)
@@ -887,7 +913,7 @@
     const ns = $("notch-sel");
     ns.value = String(notch.f0 || 0);
     ns.addEventListener("change", () => {
-      notch.f0 = +ns.value;
+      notchPref = notch.f0 = +ns.value;
       try { localStorage.setItem("hrm.notch", ns.value); } catch (e) {}
       notch.refilter();
     });
@@ -906,6 +932,7 @@
       case "devices": onDevices(msg); break;
       case "link": onLink(msg); break;
       case "raw": $("raw-note").hidden = msg.state !== "other"; break;
+      case "ecg_info": onEcgInfo(msg); break;
     }
   }
 

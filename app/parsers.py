@@ -37,12 +37,16 @@ def parse_hr(b: bytes) -> dict:
 def parse_ecg_info(b: bytes) -> dict:
     """ECG stream info, char a1b20003 (read once on connect), little-endian:
     u16 sample_hz, u16 raw_batch, u8 sample_bytes, u8 fmt_ver
-    [+ u16 acc_div: accel is read every acc_div ECG ticks -- 8-byte firmware]."""
+    [+ u16 acc_div: accel is read every acc_div ECG ticks -- 8-byte firmware]
+    [+ u8 flags: bit0 stream is mains-notched in firmware, bit1 notch at 60 Hz
+       (else 50 Hz) -- 9-byte firmware]."""
     b = bytes(b)
     hz, batch, nbytes, ver = struct.unpack_from("<HHBB", b, 0)
     d = {"sample_hz": hz, "raw_batch": batch, "sample_bytes": nbytes, "fmt_ver": ver}
     if len(b) >= 8:
         d["acc_div"] = struct.unpack_from("<H", b, 6)[0]
+    if len(b) >= 9:
+        d["notched_hz"] = (60 if b[8] & 2 else 50) if b[8] & 1 else 0
     return d
 
 

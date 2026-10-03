@@ -16,6 +16,7 @@ class DemoSource:
         self.hub = hub
         self.fs = fs                  # ECG sample rate to simulate (strap: 250 or 1024)
         self.batch = batch            # ECG samples per packet (strap: 20 or 40)
+        self.notched_hz = 0           # demo stream carries no mains hum, so no strap notch
         self.base_hr = hr
         self.log = log
         self.enabled = True           # UI Disconnect pauses the synthetic stream
@@ -50,7 +51,8 @@ class DemoSource:
         self.hub.publish_status("demo", detail="synthetic stream", enabled=True,
                                 target=self._target())
         self.hub.set_ecg_fs(self.fs, {"sample_hz": self.fs, "raw_batch": self.batch,
-                                      "sample_bytes": 2, "fmt_ver": 1})
+                                      "sample_bytes": 2, "fmt_ver": 1,
+                                      "notched_hz": self.notched_hz})
         self.command({"cmd": "scan"})
         loop = asyncio.get_event_loop()
         await asyncio.gather(

@@ -62,7 +62,7 @@ class Hub:
     def snapshot_messages(self):
         """JSON strings to send a newly connected client (status + last of each)."""
         out = [json.dumps(self._status)]
-        for key in ("devices", "battery", "rr", "accel", "ectopy", "link", "raw"):
+        for key in ("ecg_info", "devices", "battery", "rr", "accel", "ectopy", "link", "raw"):
             if key in self._snapshot:
                 out.append(self._snapshot[key])
         return out
@@ -101,6 +101,9 @@ class Hub:
         self._ecg_last_seq = None     # new connection: a seq repeat across it is not a duplicate
         self.ecg_fs = fs
         self.recorder.set_ecg_fs(fs, info)
+        # tell the dashboard whether the strap already notches mains hum
+        self._emit({"type": "ecg_info", "fs": fs, "notched_hz": info.get("notched_hz", 0)},
+                   snapshot_key="ecg_info")
 
     def publish_ecg(self, seq: int, samples: list):
         # The strap can deliver the same packet twice (TX retry after -ENOMEM
