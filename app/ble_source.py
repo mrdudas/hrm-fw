@@ -19,7 +19,7 @@ import os
 import time
 
 from config import (DEVICE_NAME, KNOWN_ADDRESS, HR_UUID, ECG_UUID, ACCEL_UUID,
-                    ECTOPY_UUID, BATTERY_UUID, ACCEL_FS, ECG_INFO_UUID, ECG_FS,
+                    ECTOPY_UUID, BATTERY_UUID, ECG_INFO_UUID, ECG_FS,
                     LINK_UUID)
 import parsers
 
@@ -250,7 +250,8 @@ class BLESource:
             link["host_mtu"] = getattr(c, "mtu_size", None)   # bleak's view, cross-check
             link["t"] = time.time()
             self.log(f"  link: interval {link['interval_ms']:g} ms, latency {link['latency']}, "
-                     f"timeout {link['timeout_ms']} ms, ATT MTU {link['mtu']} (host says {link['host_mtu']})")
+                     f"timeout {link['timeout_ms']} ms, ATT MTU {link['mtu']} (host says {link['host_mtu']})"
+                     + (f", {link['conn_count']} host(s) connected" if "conn_count" in link else ""))
             self.hub.publish_link(link)
             await asyncio.sleep(60)
 
@@ -298,9 +299,7 @@ class BLESource:
 
     def _accel_cb(self, _sender, data):
         d = parsers.parse_accel(data)
-        n = len(d["samples"])
-        for k, (x, y, z) in enumerate(d["samples"]):     # batched: oldest first, 40 ms apart
-            self.hub.publish_accel(x, y, z, d["steps"], age=(n - 1 - k) / ACCEL_FS)
+        self.hub.publish_accel_batch(d["samples"], d["steps"], d.get("ecg_seq"), d.get("ecg_off"))
 
     def _ecto_cb(self, _sender, data):
         self.hub.publish_ectopy(parsers.parse_ectopy(data))

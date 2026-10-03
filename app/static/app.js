@@ -35,6 +35,7 @@
   let ecgFit = new StreamClock(1 / FS, 0.10);     // ±10 %: follows firmware sample loss
   let ecgLast = -1;           // index of newest sample
   let ecgLastBase = null;     // last server `base` (wraps at 65536 packets)
+  let ecgLastLen = 0;         // samples in that packet
   let ecgLastArrival = 0;
   const ecgAt = (n) => (n > ecgLast - RING && n <= ecgLast && n >= 0) ? ecgRing[n % RING] : NaN;
 
@@ -56,13 +57,28 @@
     ecgLast += skip;
     for (const s of msg.samples) { ecgLast++; ecgRing[ecgLast % RING] = s; }
     ecgLastBase = msg.base;
+    ecgLastLen = len;
     ecgLastArrival = ta;
     ecgFit.add(ecgLast, ta);
   }
   const ecgLive = () => ecgFit.ready && now() - ecgLastArrival < 5;
 
+  // hub ECG index (seq * batch + offset, wraps at 65536 packets) -> client ECG
+  // index, relative to the newest ECG packet (valid within the current stream run)
+  function hubToClientEcg(hubIdx) {
+    if (ecgLastBase == null || !ecgFit.ready) return NaN;
+    const wrap = 65536 * ecgLastLen;
+    let d = ((ecgLastBase + ecgLastLen - 1 - hubIdx) % wrap + wrap) % wrap;
+    if (d > wrap / 2) d -= wrap;             // accel ahead of the last ECG packet
+    return Math.abs(d) < 10 * FS ? ecgLast - d : NaN;
+  }
+
   // ---------- accelerometer ring (timestamps from a packet-counter fit) ----------
   const ACC_RING = ACC_FS * (WIN_MAX + 6);
+  // accE: the sample's position on the client ECG index (accel v2 firmware reports
+  // it), so it is drawn on the ECG clock -- exact and immune to dropped accel
+  // packets. NaN -> fall back to the accel packet-counter clock (accI / accFit).
+  const accE = new Float64Array(ACC_RING).fill(NaN);
   const accI = new Float64Array(ACC_RING), accX = new Float32Array(ACC_RING),
         accY = new Float32Array(ACC_RING), accZ = new Float32Array(ACC_RING);
   const accFit = new StreamClock(1 / ACC_FS, 0.25);
@@ -77,6 +93,7 @@
     accFit.add(accK, ta);
     const j = accN % ACC_RING;
     accI[j] = accK; accX[j] = m.x; accY[j] = m.y; accZ[j] = m.z;
+    accE[j] = m.ecg_index != null ? hubToClientEcg(m.ecg_index) : NaN;
     accN++; accK++; accLastArrival = ta;
   }
 
@@ -109,7 +126,8 @@
     ecgRing = new Float32Array(RING).fill(NaN);
     ecgFit = new StreamClock(1 / FS, 0.10);
     ecgFit.delay = oldDelay;                 // keep the playout delay: no jump in the view
-    ecgLast = -1; ecgLastBase = null; ecgLastArrival = 0;
+    ecgLast = -1; ecgLastBase = null; ecgLastLen = 0; ecgLastArrival = 0;
+    accE.fill(NaN);                          // accel ECG positions referred to the old index space
     SNAP_BACK = Math.round(0.35 * FS); SNAP_FWD = Math.round(0.12 * FS);
     AVG_PRE = Math.round(0.20 * FS); AVG_POST = Math.round(0.50 * FS);
     AVG_LEN = AVG_PRE + AVG_POST + 1;
@@ -427,13 +445,22 @@
     // accelerometer: walk back from the newest sample
     accXs.length = 0; accVs.x.length = 0; accVs.y.length = 0; accVs.z.length = 0;
     const mm = { x: [Infinity, -Infinity], y: [Infinity, -Infinity], z: [Infinity, -Infinity] };
-    const accT = (k) => accFit.t(accI[k % ACC_RING]);
+    const accT = (k) => {
+      const j = k % ACC_RING, e = accE[j];
+      return e === e ? ecgFit.t(e) : accFit.t(accI[j]);
+    };
     let first = accN;
     while (first > 0 && accN - first < ACC_RING && accT(first - 1) >= tStart - 0.1) first--;
     if (first > 0 && accN - first < ACC_RING) first--;   // one sample left of the edge
     for (let k = first; k < accN; k++) {
       const j = k % ACC_RING, x = accT(k);
       if (x > tEnd + 0.1) break;
+      // missing accel packets (strap drops accel first when its TX queue fills):
+      // break the line instead of drawing a straight segment across the gap
+      if (accXs.length && x - accXs[accXs.length - 1] > 3 / ACC_FS) {
+        accXs.push((x + accXs[accXs.length - 1]) / 2);
+        for (const c of ["x", "y", "z"]) accVs[c].push(null);
+      }
       accXs.push(x);
       for (const [c, arr] of ACC_CH) {
         const v = arr[j]; accVs[c].push(v);
@@ -751,7 +778,8 @@
   let link = null;
   function onLink(msg) { link = msg; setText("ecg-fs", fsLabel()); }
   function fsLabel() {
-    return FS + " Hz" + (link ? ` · CI ${link.interval_ms} ms · MTU ${link.mtu}` : "");
+    return FS + " Hz" + (link ? ` · CI ${link.interval_ms} ms · MTU ${link.mtu}` : "") +
+      (link && link.conn_count > 1 ? ` · ⚠ ${link.conn_count} hosts connected` : "");
   }
 
   function onDevices(msg) {

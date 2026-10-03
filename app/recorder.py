@@ -13,7 +13,7 @@ class CSVRecorder:
     HEADERS = {
         "ecg":     ["unix_time", "sample_index", "adc", "rx_time"],
         "rr":      ["unix_time", "hr_bpm", "rr_ms"],
-        "accel":   ["unix_time", "x", "y", "z", "steps"],
+        "accel":   ["unix_time", "x", "y", "z", "steps", "ecg_index"],
         "ectopy":  ["unix_time", "type", "coupling_ms", "pause_ms",
                     "pvc", "pac", "artifact", "total", "burden_pct"],
         "battery": ["unix_time", "pct"],
@@ -81,8 +81,11 @@ class CSVRecorder:
             w.writerow([f"{t:.4f}", hr, ""])
         self._files["rr"].flush()
 
-    def write_accel(self, t, x, y, z, steps):
-        self._writers["accel"].writerow([f"{t:.4f}", x, y, z, steps])
+    def write_accel(self, t, x, y, z, steps, ecg_index=None):
+        """ecg_index: the sample's index in ecg_<session>.csv's sample_index space
+        (accel v2 firmware), else empty."""
+        self._writers["accel"].writerow([f"{t:.4f}", x, y, z, steps,
+                                         "" if ecg_index is None else ecg_index])
         self._files["accel"].flush()
 
     def write_ectopy(self, t, d):

@@ -28,7 +28,7 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
   | HR / RR  | `0x2A37`            | flags + HR + RR intervals (1/1024 s → ms) |
   | Raw ECG  | `a1b20002-…`        | uint16 seq + 20× int16 @ 250 or 1024 Hz |
   | ECG info | `a1b20003-…` (read) | u16 sample_hz, u16 raw_batch, u8 sample_bytes, u8 fmt_ver — read on connect; absent on older firmware → 250 Hz |
-  | Accel    | `a1b30002-…`        | int16 x/y/z + uint16 steps @ ~25 Hz |
+  | Accel    | `a1b30002-…`        | ~25 Hz; legacy int16 x/y/z + u16 steps (8 B), or batched `u8 n, n×(x,y,z), u16 steps[, u16 ecg_seq, u8 ecg_off]` — v2 carries the ECG position of the last sample, so accel is drawn on the ECG clock |
   | Ectopy   | `a1b40002-…`        | PVC/PAC/artifact classifier + burden |
   | Battery  | `0x2A19`            | 1 byte percent (read + notify) |
 - **Auto-reconnects** if the BLE link drops (quick retry, then once a minute).
@@ -38,7 +38,8 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
     arrival time of the sample's BLE packet; lets `tools/analyze_recording.py`
     measure the real sample rate)
   - `rr_<session>.csv` — `unix_time, hr_bpm, rr_ms`
-  - `accel_<session>.csv` — `unix_time, x, y, z, steps`
+  - `accel_<session>.csv` — `unix_time, x, y, z, steps, ecg_index` (`ecg_index` =
+    the sample's position in the ECG `sample_index` space, with v2 firmware)
   - `ectopy_<session>.csv` — `unix_time, type, coupling_ms, pause_ms, pvc, pac, artifact, total, burden_pct`
   - `battery_<session>.csv` — `unix_time, pct`
   - `meta_<session>.json` — `{"ecg_fs": …}`, the ECG sample rate used for the

@@ -55,7 +55,6 @@ class DemoSource:
         loop = asyncio.get_event_loop()
         await asyncio.gather(
             self._ecg_and_beats(loop),
-            self._accel_loop(),
             self._battery_loop(),
         )
 
@@ -72,6 +71,10 @@ class DemoSource:
         reported = True             # R of the current cycle already published?
         t_samp = 0.0
         next_t = time.monotonic()
+        # accelerometer like the v2 firmware: one sample every acc_div ECG ticks,
+        # batched 5 per packet with the ECG position (seq, offset) of the last one
+        acc_div = max(1, round(fs / 25))
+        acc_buf, tick = [], 0
         while not self._stop.is_set():
             packet.clear()
             for _ in range(self.batch):
@@ -79,6 +82,14 @@ class DemoSource:
                 packet.append(int(self._ecg_sample(phase, rr_s)))
                 phase += 1.0 / fs
                 t_samp += 1.0 / fs
+                tick += 1
+                if tick % acc_div == 0:
+                    acc_buf.append(self._accel_sample(t_samp))
+                    if len(acc_buf) == 5:
+                        if self.enabled:
+                            self.hub.publish_accel_batch(acc_buf, self._steps,
+                                                         ecg_seq=seq & 0xFFFF, ecg_off=len(packet) - 1)
+                        acc_buf = []
                 # like the firmware: report the beat shortly AFTER its R peak
                 # (R sits at 0.32 of the cycle; ~60 ms detector latency)
                 if not reported and phase >= 0.32 * rr_s + 0.06:
@@ -136,20 +147,14 @@ class DemoSource:
         })
 
     # ---- accelerometer ----------------------------------------------------
-    async def _accel_loop(self):
-        steps = 0
-        t = 0.0
-        while not self._stop.is_set():
-            # gentle breathing motion on Z + occasional step
-            x = int(random.gauss(0, 300))
-            y = int(random.gauss(0, 300))
-            z = int(16000 + 800 * math.sin(t * 2 * math.pi * 0.25) + random.gauss(0, 200))
-            if random.random() < 0.15:
-                steps += 1
-            if self.enabled:
-                self.hub.publish_accel(x, y, z, steps)
-            t += 0.04
-            await asyncio.sleep(0.04)   # ~25 Hz
+    _steps = 0
+
+    def _accel_sample(self, t):
+        """Gentle breathing motion on Z, noise on X/Y, an occasional step."""
+        if random.random() < 0.006:
+            self._steps += 1
+        return (int(random.gauss(0, 300)), int(random.gauss(0, 300)),
+                int(16000 + 800 * math.sin(t * 2 * math.pi * 0.25) + random.gauss(0, 200)))
 
     # ---- battery ----------------------------------------------------------
     async def _battery_loop(self):
