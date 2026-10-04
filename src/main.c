@@ -178,7 +178,7 @@ static volatile int conn_count;   /* defined once; also used by the power state 
 static ssize_t read_cap_link(struct bt_conn *c, const struct bt_gatt_attr *a,
 			     void *buf, uint16_t len, uint16_t off)
 {
-	uint8_t out[9] = {0};
+	uint8_t out[10] = {0};
 	struct bt_conn_info ci;
 	if (c && bt_conn_get_info(c, &ci) == 0 && ci.type == BT_CONN_TYPE_LE) {
 		sys_put_le16((uint16_t)(ci.le.interval_us / 1250), &out[0]);
@@ -187,27 +187,34 @@ static ssize_t read_cap_link(struct bt_conn *c, const struct bt_gatt_attr *a,
 	}
 	sys_put_le16(bt_gatt_get_mtu(c), &out[6]);
 	out[8] = (uint8_t)conn_count;
+	out[9] = (uint8_t)nrf_gpio_pin_read(CONTACT_PIN);  /* live P0.12 level (AFE contact out) */
 	return bt_gatt_attr_read(c, a, buf, len, off, out, sizeof(out));
 }
 
-/* DIAGNOSTIC: drive P0.13 to probe its role in the analog front-end. Write one
- * byte: 0=input NOPULL (float, current), 1=pull-down, 2=pull-up, 3=drive LOW,
- * 4=drive HIGH. Watch the ECG baseline/noise on a scope and the dashboard to see
- * which state cleans it up (-> P0.13 wants that level) or breaks it. */
+/* DIAGNOSTIC: drive a front-end GPIO to probe its role. Write [pin, mode] (2 B)
+ * or [mode] (1 B = P0.13). pin = 12 or 13. mode: 0=input NOPULL (float), 1=pull-
+ * down, 2=pull-up, 3=drive LOW, 4=drive HIGH. Watch the ECG (AD) response to see
+ * whether the pin gates/biases the AFE. (Boot leaves both pins at their native
+ * config; P0.12 is the read-only contact line, so restore it to 0 after probing.) */
 #define P013_PIN 13
+static void probe_set(uint8_t pin, uint8_t mode)
+{
+	if (pin != 12 && pin != 13) return;
+	switch (mode) {
+	case 0: nrf_gpio_cfg_input(pin, NRF_GPIO_PIN_NOPULL);   break;
+	case 1: nrf_gpio_cfg_input(pin, NRF_GPIO_PIN_PULLDOWN); break;
+	case 2: nrf_gpio_cfg_input(pin, NRF_GPIO_PIN_PULLUP);   break;
+	case 3: nrf_gpio_pin_clear(pin); nrf_gpio_cfg_output(pin); break;
+	case 4: nrf_gpio_pin_set(pin);   nrf_gpio_cfg_output(pin); break;
+	default: break;
+	}
+}
 static ssize_t write_cap_probe(struct bt_conn *c, const struct bt_gatt_attr *a,
 			       const void *buf, uint16_t len, uint16_t off, uint8_t flags)
 {
-	if (len >= 1) {
-		switch (*(const uint8_t *)buf) {
-		case 0: nrf_gpio_cfg_input(P013_PIN, NRF_GPIO_PIN_NOPULL);   break;
-		case 1: nrf_gpio_cfg_input(P013_PIN, NRF_GPIO_PIN_PULLDOWN); break;
-		case 2: nrf_gpio_cfg_input(P013_PIN, NRF_GPIO_PIN_PULLUP);   break;
-		case 3: nrf_gpio_pin_clear(P013_PIN); nrf_gpio_cfg_output(P013_PIN); break;
-		case 4: nrf_gpio_pin_set(P013_PIN);   nrf_gpio_cfg_output(P013_PIN); break;
-		default: break;
-		}
-	}
+	const uint8_t *b = buf;
+	if (len >= 2)      probe_set(b[0], b[1]);
+	else if (len == 1) probe_set(P013_PIN, b[0]);
 	return len;
 }
 
