@@ -62,7 +62,8 @@ main{max-width:1200px; margin:0 auto; padding:18px 16px; display:flex; flex-dire
 .kpi-label{color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.05em}
 .kpi-value{font-size:44px; font-weight:700; line-height:1.1; font-variant-numeric:tabular-nums; margin-top:2px}
 .kpi-value .unit{font-size:16px; font-weight:500; color:var(--muted); margin-left:6px}
-.hrv-trend{width:100%; height:56px; margin-top:6px; line-height:0}
+.chart-hrv{width:100%}
+.chart-hrv .u-legend{font-size:12px}
 .kpi-sub{color:var(--muted); font-size:12px; margin-top:2px}
 
 .chart-strip{width:100%; display:flex; flex-direction:column}

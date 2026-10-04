@@ -240,6 +240,7 @@
   let hrvEma = null;                     // { t, rmssd, sdnn, pnn50 }
   let hrvMin = null;                     // current minute bucket { key, sumSq, n }
   const hrvTrend = { t: [], v: [], ma: [] };
+  const hrvLive = { t: [], v: [] };      // smoothed RMSSD, one point every 5 s
   let hrvPlot = null;
   function hrvAdd(rrs) {
     const tArr = now();
@@ -289,6 +290,10 @@
       hrvEma.t = t;
     }
     setText("hrv", Math.round(hrvEma.rmssd));
+    if (!hrvLive.t.length || t - hrvLive.t[hrvLive.t.length - 1] >= 5) {
+      hrvLive.t.push(t); hrvLive.v.push(hrvEma.rmssd);
+      drawHrvTrend();
+    }
     const win = span < HRV_WIN - 5 ? `${Math.round(span)} s` : "5 min";
     setText("hrv-sub", `SDNN ${Math.round(hrvEma.sdnn)} ms · pNN50 ${Math.round(hrvEma.pnn50)} % · ` +
                        `${good.length} beats / ${win}` +
@@ -316,29 +321,48 @@
     T.ma.push(s / c);
     drawHrvTrend();
   }
+  // full-width HRV trend card: RMSSD per minute (dots), its 5-minute moving
+  // average and the live smoothed RMSSD, over the whole session, clock on x
   function makeHrvTrend() {
-    const host = $("hrv-trend");
+    const host = $("hrv-chart");
+    const clock = (u, splits) => splits.map((v) =>
+      new Date(v * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }));
     hrvPlot = new uPlot({
-      width: host.clientWidth, height: 56, legend: { show: false }, cursor: { show: false },
-      padding: [4, 2, 0, 0],
+      width: host.clientWidth, height: 220,
+      cursor: { y: false, drag: { x: false, y: false, setScale: false }, points: { size: 6 } },
+      padding: [8, 12, 0, 0],
       scales: { x: { time: false },
-                y: { range: (u, lo, hi) => {             // keep dots off the edges, >= 10 ms span
-                  const mid = (lo + hi) / 2, half = Math.max(hi - lo, 10) * 0.65;
+                y: { range: (u, lo, hi) => {             // margin above/below, >= 10 ms span
+                  if (lo == null || !(hi >= lo)) return [0, 100];
+                  const mid = (lo + hi) / 2, half = Math.max(hi - lo, 10) * 0.6;
                   return [Math.max(0, mid - half), mid + half];
                 } } },
-      axes: [{ show: false },
-             { stroke: COL.text, font: "9px -apple-system,BlinkMacSystemFont,sans-serif", size: 26, space: 18,
-               ticks: { show: false }, grid: { stroke: COL.grid } }],
-      series: [{}, { stroke: "transparent", points: { show: true, size: 4, fill: COL.text, stroke: COL.text } },
-               { stroke: COL.ecg, width: 2, points: { show: false } }],
-    }, [[], [], []], host);
+      axes: [
+        { stroke: COL.text, font: FONT, grid: { stroke: COL.grid }, ticks: { show: false },
+          space: 70, incrs: [60, 120, 300, 600, 900, 1800, 3600, 7200], values: clock },
+        { stroke: COL.text, font: FONT, grid: { stroke: COL.grid }, ticks: { show: false },
+          label: "RMSSD ms", labelSize: 14, labelFont: FONT, size: 50 },
+      ],
+      series: [
+        { label: "time", value: (u, v) => v == null ? "–" : new Date(v * 1000).toLocaleTimeString([], { hour12: false }) },
+        { label: "RMSSD / minute", stroke: COL.text, width: 0, paths: () => null,
+          points: { show: true, size: 6, fill: COL.text, stroke: COL.text },
+          value: (u, v) => v == null ? "–" : v.toFixed(0) + " ms" },
+        { label: `${HRV_MA_MIN}-min average`, stroke: COL.ecg, width: 2, spanGaps: true, points: { show: false },
+          value: (u, v) => v == null ? "–" : v.toFixed(0) + " ms" },
+        { label: "live (smoothed)", stroke: COL.y, width: 1, spanGaps: true, points: { show: false },
+          value: (u, v) => v == null ? "–" : v.toFixed(0) + " ms" },
+      ],
+    }, [[], [], [], []], host);
   }
   function drawHrvTrend() {
     if (!hrvPlot) return;
-    hrvPlot.setData([hrvTrend.t, hrvTrend.v, hrvTrend.ma]);
-    $("hrv-trend").title = `RMSSD per minute (dots) and ${HRV_MA_MIN}-minute moving average (line); ` +
-                           `${hrvTrend.t.length} min since this page was opened`;
+    const T = hrvTrend, L = hrvLive;
+    if (!T.t.length && !L.t.length) return;
+    hrvPlot.setData(uPlot.join([[T.t, T.v, T.ma], [L.t, L.v]]));
+    setText("hrv-span", T.t.length ? `${T.t.length} min` : "first minute…");
   }
+
 
   // place RR values ending at beat position `end` (sample index or time)
   function placeRr(rr, end, byIdx) {
@@ -870,7 +894,8 @@
     for (const L of LANES) lanes[L.key].u.setSize({ width: w, height: L.h });
     const a = $("avg-chart");
     if (avgPlot) avgPlot.setSize({ width: a.clientWidth, height: a.clientHeight || 300 });
-    if (hrvPlot) hrvPlot.setSize({ width: $("hrv-trend").clientWidth, height: 56 });
+    const h = $("hrv-chart");
+    if (hrvPlot) hrvPlot.setSize({ width: h.clientWidth, height: 220 });
   }
 
   // ---------- DOM panels ----------

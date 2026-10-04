@@ -54,7 +54,6 @@
       <div class="kpi-label">HRV · RMSSD</div>
       <div class="kpi-value"><span id="hrv">--</span><span class="unit">ms</span></div>
       <div class="kpi-sub" id="hrv-sub">collecting…</div>
-      <div id="hrv-trend" class="hrv-trend"></div>
     </div>
     <div class="card kpi">
       <div class="kpi-label">Ectopy burden</div>
@@ -88,6 +87,16 @@
       scroll: zoom · drag: scroll back (pauses) · double-click: reset zoom ·
       <kbd>Space</kbd> pause · <kbd>M</kbd> measure · <kbd>Esc</kbd> clear
     </div>
+  </section>
+
+  <!-- HRV trend over the whole session -->
+  <section class="card wide">
+    <div class="card-head">
+      <h2>HRV trend</h2>
+      <span class="hint">RMSSD per minute · 5-min moving average · live (smoothed) — since this page was opened ·
+        <span id="hrv-span">waiting for beats…</span></span>
+    </div>
+    <div id="hrv-chart" class="chart-hrv"></div>
   </section>
 
   <!-- signal-averaged beat (ensemble average, R-aligned) -->
