@@ -28,6 +28,15 @@ header{flex-wrap:wrap; gap:10px}
 .tool-btn:disabled{opacity:.4; cursor:default}
 
 .status{display:flex; align-items:center; gap:8px; font-size:13px; color:var(--muted)}
+/* fixed widths in the header so changing labels never shift the buttons */
+.status{width:270px; flex:none}
+#status-text{overflow:hidden; white-space:nowrap; text-overflow:ellipsis}
+.dev-btn{width:86px; flex:none}
+.dev-btn.busy .spin{display:inline-block; animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.battery{flex:none}
+.batt-vdd{display:inline-block; min-width:72px}
+.device select{width:300px; flex:none}
 .status .dot{width:9px; height:9px; border-radius:50%; background:var(--off)}
 .status-on .dot{background:var(--ok); box-shadow:0 0 8px var(--ok)}
 .status-demo .dot{background:var(--warn); box-shadow:0 0 8px var(--warn)}
@@ -83,6 +92,7 @@ footer code{background:var(--panel-2); padding:2px 6px; border-radius:4px}
 .u-legend{color:var(--muted)}
 
 .chart-avg{width:100%; height:300px; line-height:0}
+.hint.avg-tools{display:flex; align-items:center; gap:6px}
 .avg-n{width:56px; background:var(--panel-2,#1a1f28); color:var(--text,#dfe6ee);
        border:1px solid var(--border,#2a3140); border-radius:6px; padding:2px 6px;
        font:inherit; text-align:center}

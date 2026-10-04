@@ -46,7 +46,8 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
     session (read by `tools/analyze_recording.py`)
 - Live dashboard at **http://localhost:8770** (opened automatically): rolling
   ECG waveform (optional 50/60 Hz mains notch on the display only — recordings
-  stay raw), big HR number + RR, live HRV (RMSSD, SDNN, pNN50 over a rolling
+  stay raw), big HR number + beat-to-beat HR (60000/RR, also as the strip's HR lane),
+  a signal-averaged beat with Clear and CSV download (mean + SD per sample), live HRV (RMSSD, SDNN, pNN50 over a rolling
   5 min window, ectopic/artifact beats excluded), RR/HRV tachogram, accelerometer + step count,
   ectopy counts / burden / event log, and battery. Dark theme. The page
   reconnects its WebSocket by itself if you reload it.

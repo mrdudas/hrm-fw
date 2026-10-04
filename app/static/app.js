@@ -203,7 +203,7 @@
     SNAP_BACK = Math.round(0.35 * FS); SNAP_FWD = Math.round(0.12 * FS);
     AVG_PRE = Math.round(0.20 * FS); AVG_POST = Math.round(0.50 * FS);
     AVG_LEN = AVG_PRE + AVG_POST + 1;
-    avgX = Array.from({ length: AVG_LEN }, (_, i) => Math.round((i - AVG_PRE) / FS * 1000));
+    avgX = Array.from({ length: AVG_LEN }, (_, i) => (i - AVG_PRE) / FS * 1000);
     pendingBeats.length = 0; pendingSegs.length = 0; beatDots.length = 0; segs.length = 0;
     lastR = -1e9;
     if (avgPlot) avgPlot.setData([avgX, avgX.map(() => null)]);
@@ -215,7 +215,9 @@
     if (msg.hr != null) setText("hr", msg.hr);
     if (msg.contact) setText("contact", msg.contact);
     if (msg.rr && msg.rr.length) {
-      setText("rr", Math.round(msg.rr[msg.rr.length - 1]));
+      const lastRr = msg.rr[msg.rr.length - 1];
+      setText("rr", Math.round(lastRr));
+      if (lastRr > 0) setText("ibpm", Math.round(60000 / lastRr));
       stream("rr", msg.rr.slice());
       hrvAdd(msg.rr);
     }
@@ -363,7 +365,7 @@
     { key: "x",   label: "X",   h: 66,  color: COL.x,   width: 1,   minSpan: 400 },
     { key: "y",   label: "Y",   h: 66,  color: COL.y,   width: 1,   minSpan: 400 },
     { key: "z",   label: "Z",   h: 66,  color: COL.z,   width: 1,   minSpan: 400 },
-    { key: "rr",  label: "RR ms", h: 140, color: COL.rr, width: 1.4, minSpan: 80, bottom: true },
+    { key: "rr",  label: "HR bpm", h: 140, color: COL.rr, width: 1.4, minSpan: 6, bottom: true },
   ];
 
   function laneOpts(L, width) {
@@ -541,20 +543,21 @@
     }
     for (const c of ["x", "y", "z"]) update(c, [accXs, accVs[c]], xr, mm[c][0], mm[c][1]);
 
-    // RR points (the line is drawn beat to beat)
+    // beat-to-beat HR (60000 / RR) at each beat, drawn beat to beat
     const rx = [], ry = [];
     let rmin = Infinity, rmax = -Infinity;
     for (const p of rrPts) {
       const x = xOfPt(p);
-      if (x < tStart - 3 || x > tEnd + 1) continue;
-      rx.push(x); ry.push(p.v);
-      if (p.v < rmin) rmin = p.v; if (p.v > rmax) rmax = p.v;
+      if (x < tStart - 3 || x > tEnd + 1 || !(p.v > 0)) continue;
+      const bpm = 60000 / p.v;
+      rx.push(x); ry.push(bpm);
+      if (bpm < rmin) rmin = bpm; if (bpm > rmax) rmax = bpm;
     }
     update("rr", [rx, ry], xr, rmin, rmax);
   }
 
   // ---------- signal-averaged beat ----------
-  let avgX = Array.from({ length: AVG_LEN }, (_, i) => Math.round((i - AVG_PRE) / FS * 1000));
+  let avgX = Array.from({ length: AVG_LEN }, (_, i) => (i - AVG_PRE) / FS * 1000);
   let avgPlot = null;
   function avgN() {
     const n = parseInt($("avg-n")?.value, 10);
@@ -576,14 +579,47 @@
       series: [{}, { stroke: COL.ecg, width: 2, points: { show: false } }],
     }, [avgX, avgX.map(() => null)], host);
   }
+  function avgStats() {                 // mean and SD per sample over the collected beats
+    const n = segs.length, mean = new Array(AVG_LEN).fill(0), sd = new Array(AVG_LEN).fill(0);
+    for (const seg of segs) for (let i = 0; i < AVG_LEN; i++) mean[i] += seg[i];
+    for (let i = 0; i < AVG_LEN; i++) mean[i] /= n;
+    if (n > 1) {
+      for (const seg of segs) for (let i = 0; i < AVG_LEN; i++) sd[i] += (seg[i] - mean[i]) ** 2;
+      for (let i = 0; i < AVG_LEN; i++) sd[i] = Math.sqrt(sd[i] / (n - 1));
+    }
+    return { n, mean, sd };
+  }
   function drawAvg() {
     while (segs.length > avgN()) segs.shift();
     setText("avg-count", segs.length);
+    $("avg-csv").disabled = !segs.length;
     if (!segs.length) return;
-    const avg = new Array(AVG_LEN).fill(0);
-    for (const seg of segs) for (let i = 0; i < AVG_LEN; i++) avg[i] += seg[i];
-    for (let i = 0; i < AVG_LEN; i++) avg[i] /= segs.length;
-    avgPlot.setData([avgX, avg]);
+    avgPlot.setData([avgX, avgStats().mean]);
+  }
+  function clearAvg() {
+    segs.length = 0; pendingSegs.length = 0;
+    avgPlot.setData([avgX, avgX.map(() => null)]);
+    drawAvg();
+  }
+  function downloadAvg() {
+    if (!segs.length) return;
+    const { n, mean, sd } = avgStats();
+    const stamp = new Date();
+    const lines = [
+      `# HRM Raw RR signal-averaged beat (R-aligned at t_ms = 0)`,
+      `# exported ${stamp.toISOString()}, ${n} beats, ECG ${FS} Hz, display notch ${notch.f0 ? notch.f0 + " Hz" : (strapNotchHz ? "in strap " + strapNotchHz + " Hz" : "off")}`,
+      "t_ms,mean_adc,sd_adc",
+    ];
+    for (let i = 0; i < AVG_LEN; i++)
+      lines.push(`${((i - AVG_PRE) * 1000 / FS).toFixed(3)},${mean[i].toFixed(2)},${sd[i].toFixed(2)}`);
+    const pad = (v) => String(v).padStart(2, "0");
+    const name = `hrm_avg_beat_${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}_` +
+                 `${pad(stamp.getHours())}${pad(stamp.getMinutes())}${pad(stamp.getSeconds())}.csv`;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([lines.join("\n") + "\n"], { type: "text/csv" }));
+    a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
 
   // ---------- render loop ----------
@@ -806,24 +842,42 @@
   const AUTO = "";   // select value for "auto: find by name"
 
   function send(obj) {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+    if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify(obj)); return true; }
+    setText("status-text", "Not connected to the app — reconnecting…");
+    return false;
   }
 
+  // Connection state machine as the user sees it:
+  //   Connect    -> Connecting… -> Connected | Failed (auto-retry countdown)
+  //   Disconnect -> Disconnecting… -> Disconnected
+  // A click shows its "…ing" state immediately (`pending`) until the backend's
+  // next status confirms or replaces it.
+  let pending = null;            // "connecting" | "disconnecting" | null
+  function uiState() {
+    if (pending) return pending;
+    switch (status.state) {
+      case "connected": return "connected";
+      case "scanning": case "connecting": return "connecting";
+      case "disconnected": return "reconnecting";
+      case "failed": case "waiting": case "error": return "failed";
+      case "disconnecting": return "disconnecting";
+      case "demo": return "demo";
+      case "idle": return "disconnected";
+      default: return "disconnected";
+    }
+  }
   function statusLabel() {
     const s = status;
-    switch (s.state) {
-      case "connected": return "connected" + (s.detail ? " · " + s.detail : "");
-      case "connecting": return "connecting" + (s.detail ? " · " + s.detail : "") + "…";
-      case "scanning": return "scanning for " + targetName() + "…";
-      case "waiting": {
-        const left = Math.max(0, Math.round((s.next_scan || 0) - Date.now() / 1000));
-        return `not found · next scan in ${left} s`;
-      }
-      case "idle": return "disconnected";
-      case "disconnected": return "link lost · reconnecting…";
-      case "demo": return "demo mode";
-      case "error": return s.detail || "error";
-      default: return s.state;
+    const left = Math.max(0, Math.round((s.next_scan || 0) - Date.now() / 1000));
+    switch (uiState()) {
+      case "connected": return "Connected" + (s.detail ? " · " + s.detail : "");
+      case "connecting":
+        return "Connecting… " + (s.state === "connecting" && s.detail ? s.detail : "searching " + targetName());
+      case "reconnecting": return "Connection lost · reconnecting…";
+      case "failed": return `Failed: ${s.detail || "error"}` + (s.next_scan ? ` · retry in ${left} s` : "");
+      case "disconnecting": return "Disconnecting…";
+      case "demo": return "Demo mode";
+      default: return "Disconnected";
     }
   }
   function targetName() {
@@ -836,15 +890,23 @@
     if (!["connected", "demo"].includes(msg.state) && ["connected", "demo"].includes(status.state))
       stream("link", null);        // ordered with the data, so a paused replay sees it too
     status = msg;
+    // the backend has acted on the click once it reports anything but the old state
+    if (pending === "disconnecting" && ["idle", "disconnecting"].includes(msg.state)) pending = null;
+    if (pending === "connecting" && msg.state !== "idle") pending = null;
+    renderStatus();
+  }
+  function renderStatus() {
+    const st = uiState();
     const el = $("status");
     el.classList.remove("status-on", "status-off", "status-demo", "status-wait", "status-idle");
-    el.classList.add({ connected: "status-on", demo: "status-demo", scanning: "status-wait",
-                       connecting: "status-wait", waiting: "status-wait", idle: "status-idle" }[msg.state]
-                     || "status-off");
+    el.classList.add({ connected: "status-on", demo: "status-demo", connecting: "status-wait",
+                       reconnecting: "status-wait", disconnecting: "status-wait",
+                       disconnected: "status-idle" }[st] || "status-off");
     setText("status-text", statusLabel());
+    $("status").title = statusLabel();
     renderDevices();
   }
-  setInterval(() => { if (status.state === "waiting") setText("status-text", statusLabel()); }, 1000);
+  setInterval(() => { if (uiState() === "failed") setText("status-text", statusLabel()); }, 1000);
 
   // connection parameters the strap reports (a1b20004)
   let link = null;
@@ -891,13 +953,19 @@
     }));
     sel.value = keep;
 
-    const enabled = status.enabled !== false;
+    // Fixed labels, fixed widths: only enabled/disabled changes, so nothing moves.
+    //   disconnected / failed : Connect (failed: retry now)   | Disconnect only if retrying
+    //   connecting / reconn.  : Connect off                   | Disconnect = cancel
+    //   connected             : Connect only to switch device | Disconnect
+    //   disconnecting         : both off
+    const st0 = uiState(), st = st0 === "demo" ? "connected" : st0;   // demo behaves as connected
     const scanning = devScanning || status.state === "scanning";
-    $("scan-btn").textContent = scanning ? "Scanning…" : "⟳ Scan";
-    $("scan-btn").disabled = scanning;
-    $("disc-btn").disabled = !enabled;
-    // Connect is useful when idle, or to switch to a different target
-    $("conn-btn").disabled = enabled && sel.value === current;
+    $("scan-btn").classList.toggle("busy", scanning);
+    $("scan-btn").disabled = scanning || st === "disconnecting";
+    $("conn-btn").disabled = !(st === "disconnected" || st === "failed" ||
+                               (st === "connected" && sel.value !== current));
+    $("disc-btn").disabled = !(st === "connecting" || st === "reconnecting" || st === "connected" ||
+                               (st === "failed" && status.enabled !== false));
   }
 
   function initDevicePicker() {
@@ -905,11 +973,17 @@
     sel.addEventListener("change", () => { userPicked = true; renderDevices(); });
     $("conn-btn").addEventListener("click", () => {
       const opt = sel.selectedOptions[0];
-      send({ cmd: "connect", address: sel.value || null, name: opt ? opt.dataset.name : "" });
+      if (!send({ cmd: "connect", address: sel.value || null, name: opt ? opt.dataset.name : "" })) return;
       userPicked = false;
+      pending = "connecting"; renderStatus();
     });
-    $("disc-btn").addEventListener("click", () => send({ cmd: "disconnect" }));
+    $("disc-btn").addEventListener("click", () => {
+      if (!send({ cmd: "disconnect" })) return;
+      pending = "disconnecting"; renderStatus();
+    });
     $("take-raw").addEventListener("click", () => send({ cmd: "take_raw" }));
+    $("avg-clear").addEventListener("click", clearAvg);
+    $("avg-csv").addEventListener("click", downloadAvg);
     const ns = $("notch-sel");
     ns.value = String(notch.f0 || 0);
     ns.addEventListener("change", () => {

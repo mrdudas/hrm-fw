@@ -28,13 +28,20 @@ class DemoSource:
     def command(self, msg: dict):
         """Same UI commands as BLESource, simulated."""
         cmd = msg.get("cmd")
-        if cmd == "disconnect":
+        if cmd == "disconnect":            # same states as the BLE source, with a short delay
             self.enabled = False
-            self.hub.publish_status("idle", enabled=False, target=self._target())
+            self.hub.publish_status("disconnecting", enabled=False, target=self._target())
+            asyncio.get_event_loop().call_later(
+                0.6, lambda: self.hub.publish_status("idle", enabled=False, target=self._target()))
         elif cmd == "connect":
-            self.enabled = True
-            self.hub.publish_status("demo", detail="synthetic stream", enabled=True,
+            self.hub.publish_status("connecting", detail="synthetic stream", enabled=True,
                                     target=self._target())
+
+            def up():
+                self.enabled = True
+                self.hub.publish_status("demo", detail="synthetic stream", enabled=True,
+                                        target=self._target())
+            asyncio.get_event_loop().call_later(0.8, up)
         elif cmd == "scan":
             self.hub.publish_devices([
                 {"address": "D7:CD:02:7A:05:33", "name": "HRM Raw RR", "rssi": -48, "strap": True},

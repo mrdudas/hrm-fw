@@ -16,9 +16,9 @@
   <div class="header-right">
     <div class="device">
       <select id="dev-select" title="Device to connect to"></select>
-      <button id="scan-btn" class="tool-btn" title="Scan for nearby BLE devices">⟳ Scan</button>
-      <button id="conn-btn" class="tool-btn" title="Connect to the selected device">Connect</button>
-      <button id="disc-btn" class="tool-btn" title="Disconnect and stop scanning">Disconnect</button>
+      <button id="scan-btn" class="tool-btn dev-btn" title="Scan for nearby BLE devices"><span class="spin">⟳</span> Scan</button>
+      <button id="conn-btn" class="tool-btn dev-btn" title="Connect to the selected device (when failed: retry now)">Connect</button>
+      <button id="disc-btn" class="tool-btn dev-btn" title="Disconnect, or cancel connecting / retrying">Disconnect</button>
     </div>
     <div id="battery" class="battery">
       <span class="batt-label">Battery</span>
@@ -41,9 +41,9 @@
       <div class="kpi-sub">contact: <span id="contact">n/a</span></div>
     </div>
     <div class="card kpi">
-      <div class="kpi-label">RR interval</div>
-      <div class="kpi-value"><span id="rr">--</span><span class="unit">ms</span></div>
-      <div class="kpi-sub">latest beat-to-beat</div>
+      <div class="kpi-label">Beat-to-beat HR</div>
+      <div class="kpi-value"><span id="ibpm">--</span><span class="unit">bpm</span></div>
+      <div class="kpi-sub">60000 / RR · RR <span id="rr">--</span> ms</div>
     </div>
     <div class="card kpi">
       <div class="kpi-label">Steps</div>
@@ -93,10 +93,13 @@
   <section class="card wide">
     <div class="card-head">
       <h2>Signal-averaged beat</h2>
-      <span class="hint">
+      <span class="hint avg-tools">
         R-aligned average of last
         <input id="avg-n" type="number" min="5" max="300" step="5" value="50" class="avg-n">
         beats · <span id="avg-count">0</span> collected
+        <span class="sep"></span>
+        <button id="avg-clear" class="tool-btn" title="Discard the collected beats and start a new average">Clear</button>
+        <button id="avg-csv" class="tool-btn" title="Download the averaged beat (mean and SD per sample) as CSV" disabled>Download CSV</button>
       </span>
     </div>
     <div id="avg-chart" class="chart-avg"></div>

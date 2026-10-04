@@ -72,6 +72,9 @@ class BLESource:
         self.enabled = True              # False = user pressed Disconnect
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()     # a command arrived: re-evaluate now
+        self._abort = asyncio.Event()    # cancel the running connect attempt / session
+        self._was_connected = False      # did the last session get as far as "connected"?
+        self._phase = "starting"
         self._scan_requested = False
         self._seen = {}                  # address -> (name, rssi) from the last scan
         # raw ECG: with several hosts the strap streams raw ECG to one (last
@@ -84,6 +87,7 @@ class BLESource:
 
     def stop(self):
         self._stop.set()
+        self._abort.set()
         self._wake.set()
 
     # ---- commands from the web UI ------------------------------------------
@@ -91,14 +95,22 @@ class BLESource:
         cmd = msg.get("cmd")
         if cmd == "connect":
             addr = (msg.get("address") or "").strip() or None
+            retarget = addr != self.address
             self.address = addr
             self.address_name = (msg.get("name") or "") if addr else ""
             save_target(self.address, self.address_name)
             self.enabled = True
             self.log(f"UI: connect to {addr or repr(self.name) + ' (auto)'}")
+            if retarget and self._phase in ("connecting", "connected", "disconnected"):
+                self._abort.set()               # drop the current device, go for the new one
+            if self._phase != "connected" or retarget:
+                self._status("scanning")        # immediate feedback; the loop takes over
         elif cmd == "disconnect":
             self.enabled = False
             self.log("UI: disconnect")
+            if self._phase not in ("idle", "starting"):
+                self._status("disconnecting")   # immediate feedback
+            self._abort.set()                   # also cancels a connect attempt in progress
         elif cmd == "scan":
             self._scan_requested = True
         elif cmd == "take_raw":          # subscribe to raw ECG even if another host has it
@@ -115,6 +127,7 @@ class BLESource:
                 "auto": self.address is None}
 
     def _status(self, state, detail="", **extra):
+        self._phase = state
         self.hub.publish_status(state, detail=detail, target=self._target(),
                                 enabled=self.enabled, **extra)
 
@@ -193,19 +206,38 @@ class BLESource:
                     continue
                 nxt = time.time() + RETRY_S
                 self.log(f"strap not found; next scan in {RETRY_S}s")
-                self._status("waiting", next_scan=nxt)
+                self._status("failed", detail="not found", next_scan=nxt)
                 await self._sleep(RETRY_S)
                 continue
 
             self.log(f"connecting to {dev.address} ({dev.name or ''}) ...")
             self._status("connecting", detail=dev.name or dev.address)
+            # run the connect + session as a task so Disconnect (or picking another
+            # device) can cancel it at once, even in the middle of a connect attempt
+            self._abort.clear()
+            self._was_connected = False
+            session = asyncio.create_task(self._session(BleakClient, dev))
+            aborter = asyncio.create_task(self._abort.wait())
+            await asyncio.wait({session, aborter}, return_when=asyncio.FIRST_COMPLETED)
+            aborter.cancel()
+            err = None
+            if not session.done():
+                session.cancel()
             try:
-                await self._session(BleakClient, dev)
+                await session
+            except asyncio.CancelledError:
+                pass
             except Exception as e:
+                err = e
                 self.log(f"BLE session error: {e!r}")
-            if self.enabled and not self._stop.is_set():
-                self._status("disconnected")
-                await self._sleep(RECONNECT_S)
+            if self.enabled and not self._stop.is_set() and not self._abort.is_set():
+                if self._was_connected:
+                    self._status("disconnected")            # link lost -> reconnect
+                    await self._sleep(RECONNECT_S)
+                else:
+                    reason = (str(err) or err.__class__.__name__) if err else "could not connect"
+                    self._status("failed", detail=reason[:80], next_scan=time.time() + 5)
+                    await self._sleep(5)
         self._status("idle")
 
     async def _safe_scan(self, want_target):
@@ -234,6 +266,7 @@ class BLESource:
             # battery: read once up front (notify may not fire otherwise)
             await self._read_battery(c)
             label = dev.name or dev.address
+            self._was_connected = True
             self._status("connected", detail=label, address=dev.address)
             link_task = asyncio.create_task(self._link_params(c))
             # hold the link until it drops, the user disconnects or picks another device
