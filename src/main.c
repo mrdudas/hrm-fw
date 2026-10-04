@@ -160,18 +160,41 @@ static void hrm_notify(uint8_t hr, uint16_t rr_1024)
 }
 
 /* ---- Raw-ECG streaming service (custom) ------------------------------ */
-#define CAP_SVC BT_UUID_128_ENCODE(0xa1b20001,0x0000,0x1000,0x8000,0x00805f9b34fb)
-#define CAP_CHR BT_UUID_128_ENCODE(0xa1b20002,0x0000,0x1000,0x8000,0x00805f9b34fb)
-static struct bt_uuid_128 cap_svc_uuid = BT_UUID_INIT_128(CAP_SVC);
-static struct bt_uuid_128 cap_chr_uuid = BT_UUID_INIT_128(CAP_CHR);
+#define CAP_SVC  BT_UUID_128_ENCODE(0xa1b20001,0x0000,0x1000,0x8000,0x00805f9b34fb)
+#define CAP_CHR  BT_UUID_128_ENCODE(0xa1b20002,0x0000,0x1000,0x8000,0x00805f9b34fb)
+#define CAP_LINK BT_UUID_128_ENCODE(0xa1b20004,0x0000,0x1000,0x8000,0x00805f9b34fb)
+static struct bt_uuid_128 cap_svc_uuid  = BT_UUID_INIT_128(CAP_SVC);
+static struct bt_uuid_128 cap_chr_uuid  = BT_UUID_INIT_128(CAP_CHR);
+static struct bt_uuid_128 cap_link_uuid = BT_UUID_INIT_128(CAP_LINK);
 static uint8_t cap_ccc;
 static void cap_ccc_changed(const struct bt_gatt_attr *a, uint16_t v) { cap_ccc = (v == BT_GATT_CCC_NOTIFY); }
+
+/* Live link parameters for diagnosing host throughput (macOS hides these from its
+ * apps, so the strap reports them). LE: u16 interval (1.25 ms units), u16 latency,
+ * u16 supervision timeout (10 ms units), u16 ATT MTU, u8 conn_count. */
+static volatile int conn_count;   /* defined once; also used by the power state machine */
+static ssize_t read_cap_link(struct bt_conn *c, const struct bt_gatt_attr *a,
+			     void *buf, uint16_t len, uint16_t off)
+{
+	uint8_t out[9] = {0};
+	struct bt_conn_info ci;
+	if (c && bt_conn_get_info(c, &ci) == 0 && ci.type == BT_CONN_TYPE_LE) {
+		sys_put_le16((uint16_t)(ci.le.interval_us / 1250), &out[0]);
+		sys_put_le16(ci.le.latency, &out[2]);
+		sys_put_le16(ci.le.timeout, &out[4]);
+	}
+	sys_put_le16(bt_gatt_get_mtu(c), &out[6]);
+	out[8] = (uint8_t)conn_count;
+	return bt_gatt_attr_read(c, a, buf, len, off, out, sizeof(out));
+}
 
 BT_GATT_SERVICE_DEFINE(cap_svc,
 	BT_GATT_PRIMARY_SERVICE(&cap_svc_uuid),
 	BT_GATT_CHARACTERISTIC(&cap_chr_uuid.uuid, BT_GATT_CHRC_NOTIFY,
 			       BT_GATT_PERM_NONE, NULL, NULL, NULL),
 	BT_GATT_CCC(cap_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+	BT_GATT_CHARACTERISTIC(&cap_link_uuid.uuid, BT_GATT_CHRC_READ,
+			       BT_GATT_PERM_READ, read_cap_link, NULL, NULL),
 );
 
 /* ---- Accelerometer data service: raw X/Y/Z (int16) + step count (u16) ---- */
@@ -275,7 +298,7 @@ static void adv_work_fn(struct k_work *w)
 	LOG_INF("advertising %s", e ? "FAILED" : "started");
 }
 static K_WORK_DEFINE(adv_work, adv_work_fn);
-static volatile int conn_count;   /* live BLE connections (for the power state machine) */
+/* conn_count defined above (needed earlier by the link-info characteristic) */
 static void connected(struct bt_conn *c, uint8_t err) { if (!err) { conn_count++; k_work_submit(&adv_work); } }  /* keep advertising for a 2nd host */
 static void disconnected(struct bt_conn *c, uint8_t r) { if (conn_count > 0) conn_count--; k_work_submit(&adv_work); }
 BT_CONN_CB_DEFINE(conn_cb) = { .connected = connected, .disconnected = disconnected };
