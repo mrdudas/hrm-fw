@@ -162,10 +162,12 @@ static void hrm_notify(uint8_t hr, uint16_t rr_1024)
 /* ---- Raw-ECG streaming service (custom) ------------------------------ */
 #define CAP_SVC  BT_UUID_128_ENCODE(0xa1b20001,0x0000,0x1000,0x8000,0x00805f9b34fb)
 #define CAP_CHR  BT_UUID_128_ENCODE(0xa1b20002,0x0000,0x1000,0x8000,0x00805f9b34fb)
-#define CAP_LINK BT_UUID_128_ENCODE(0xa1b20004,0x0000,0x1000,0x8000,0x00805f9b34fb)
-static struct bt_uuid_128 cap_svc_uuid  = BT_UUID_INIT_128(CAP_SVC);
-static struct bt_uuid_128 cap_chr_uuid  = BT_UUID_INIT_128(CAP_CHR);
-static struct bt_uuid_128 cap_link_uuid = BT_UUID_INIT_128(CAP_LINK);
+#define CAP_LINK  BT_UUID_128_ENCODE(0xa1b20004,0x0000,0x1000,0x8000,0x00805f9b34fb)
+#define CAP_PROBE BT_UUID_128_ENCODE(0xa1b20005,0x0000,0x1000,0x8000,0x00805f9b34fb)
+static struct bt_uuid_128 cap_svc_uuid   = BT_UUID_INIT_128(CAP_SVC);
+static struct bt_uuid_128 cap_chr_uuid   = BT_UUID_INIT_128(CAP_CHR);
+static struct bt_uuid_128 cap_link_uuid  = BT_UUID_INIT_128(CAP_LINK);
+static struct bt_uuid_128 cap_probe_uuid = BT_UUID_INIT_128(CAP_PROBE);
 static uint8_t cap_ccc;
 static void cap_ccc_changed(const struct bt_gatt_attr *a, uint16_t v) { cap_ccc = (v == BT_GATT_CCC_NOTIFY); }
 
@@ -188,6 +190,27 @@ static ssize_t read_cap_link(struct bt_conn *c, const struct bt_gatt_attr *a,
 	return bt_gatt_attr_read(c, a, buf, len, off, out, sizeof(out));
 }
 
+/* DIAGNOSTIC: drive P0.13 to probe its role in the analog front-end. Write one
+ * byte: 0=input NOPULL (float, current), 1=pull-down, 2=pull-up, 3=drive LOW,
+ * 4=drive HIGH. Watch the ECG baseline/noise on a scope and the dashboard to see
+ * which state cleans it up (-> P0.13 wants that level) or breaks it. */
+#define P013_PIN 13
+static ssize_t write_cap_probe(struct bt_conn *c, const struct bt_gatt_attr *a,
+			       const void *buf, uint16_t len, uint16_t off, uint8_t flags)
+{
+	if (len >= 1) {
+		switch (*(const uint8_t *)buf) {
+		case 0: nrf_gpio_cfg_input(P013_PIN, NRF_GPIO_PIN_NOPULL);   break;
+		case 1: nrf_gpio_cfg_input(P013_PIN, NRF_GPIO_PIN_PULLDOWN); break;
+		case 2: nrf_gpio_cfg_input(P013_PIN, NRF_GPIO_PIN_PULLUP);   break;
+		case 3: nrf_gpio_pin_clear(P013_PIN); nrf_gpio_cfg_output(P013_PIN); break;
+		case 4: nrf_gpio_pin_set(P013_PIN);   nrf_gpio_cfg_output(P013_PIN); break;
+		default: break;
+		}
+	}
+	return len;
+}
+
 BT_GATT_SERVICE_DEFINE(cap_svc,
 	BT_GATT_PRIMARY_SERVICE(&cap_svc_uuid),
 	BT_GATT_CHARACTERISTIC(&cap_chr_uuid.uuid, BT_GATT_CHRC_NOTIFY,
@@ -195,6 +218,8 @@ BT_GATT_SERVICE_DEFINE(cap_svc,
 	BT_GATT_CCC(cap_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 	BT_GATT_CHARACTERISTIC(&cap_link_uuid.uuid, BT_GATT_CHRC_READ,
 			       BT_GATT_PERM_READ, read_cap_link, NULL, NULL),
+	BT_GATT_CHARACTERISTIC(&cap_probe_uuid.uuid, BT_GATT_CHRC_WRITE,
+			       BT_GATT_PERM_WRITE, NULL, write_cap_probe, NULL),
 );
 
 /* ---- Accelerometer data service: raw X/Y/Z (int16) + step count (u16) ---- */
