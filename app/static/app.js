@@ -229,9 +229,18 @@
   // previous RR is excluded, and successive differences only use two consecutive
   // accepted beats (so an ectopic beat drops both of its intervals). A pause of
   // more than 3 s (lost link) breaks the chain.
+  // Display: the card shows the window values through a ~1 min exponential
+  // moving average (no jumping from beat to beat); a sparkline shows RMSSD per
+  // wall-clock minute (dots) with a 5-minute moving average (line).
   const HRV_WIN = 300, HRV_MIN_S = 30;   // 5 min window, first value after 30 s
+  const HRV_TAU = 60;                    // s, display smoothing time constant
+  const HRV_MA_MIN = 5;                  // minutes in the trend's moving average
   const hrvBeats = [];                   // { t, rr, ok, chain }  chain: diff to previous is valid
   let hrvPrev = null;
+  let hrvEma = null;                     // { t, rmssd, sdnn, pnn50 }
+  let hrvMin = null;                     // current minute bucket { key, sumSq, n }
+  const hrvTrend = { t: [], v: [], ma: [] };
+  let hrvPlot = null;
   function hrvAdd(rrs) {
     const tArr = now();
     // several RRs in one notification: the last beat is "now", earlier ones step back
@@ -244,6 +253,7 @@
       const beat = { t, rr, ok, chain: ok && linked && prev.ok };
       hrvBeats.push(beat);
       hrvPrev = beat;
+      hrvMinuteAdd(t, beat.chain ? rr - prev.rr : null);
     });
     while (hrvBeats.length && hrvBeats[0].t < tArr - HRV_WIN) hrvBeats.shift();
     hrvUpdate();
@@ -266,11 +276,68 @@
     const mean = good.reduce((a, b) => a + b.rr, 0) / good.length;
     const sdnn = Math.sqrt(good.reduce((a, b) => a + (b.rr - mean) ** 2, 0) / (good.length - 1));
     const rmssd = nDiff ? Math.sqrt(sumSq / nDiff) : NaN;
-    setText("hrv", Number.isFinite(rmssd) ? Math.round(rmssd) : "--");
+    const pnn50 = nDiff ? 100 * nn50 / nDiff : 0;
+    if (!Number.isFinite(rmssd)) { setText("hrv", "--"); return; }
+    // ~1 min exponential moving average of the window values
+    const t = hrvBeats[hrvBeats.length - 1].t;
+    if (!hrvEma) hrvEma = { t, rmssd, sdnn, pnn50 };
+    else {
+      const a = 1 - Math.exp(-Math.max(0, t - hrvEma.t) / HRV_TAU);
+      hrvEma.rmssd += a * (rmssd - hrvEma.rmssd);
+      hrvEma.sdnn += a * (sdnn - hrvEma.sdnn);
+      hrvEma.pnn50 += a * (pnn50 - hrvEma.pnn50);
+      hrvEma.t = t;
+    }
+    setText("hrv", Math.round(hrvEma.rmssd));
     const win = span < HRV_WIN - 5 ? `${Math.round(span)} s` : "5 min";
-    setText("hrv-sub", `SDNN ${Math.round(sdnn)} ms · pNN50 ${nDiff ? Math.round(100 * nn50 / nDiff) : 0} % · ` +
+    setText("hrv-sub", `SDNN ${Math.round(hrvEma.sdnn)} ms · pNN50 ${Math.round(hrvEma.pnn50)} % · ` +
                        `${good.length} beats / ${win}` +
                        (good.length < hrvBeats.length ? ` · ${hrvBeats.length - good.length} excluded` : ""));
+    $("hrv").title = `now (window ${win}): RMSSD ${Math.round(rmssd)} ms, SDNN ${Math.round(sdnn)} ms; ` +
+                     `card shows a ~1 min moving average`;
+  }
+
+  // RMSSD per wall-clock minute (needs >= 10 valid successive differences)
+  function hrvMinuteAdd(t, diff) {
+    const key = Math.floor(t / 60);
+    if (hrvMin && key !== hrvMin.key) {
+      if (hrvMin.n >= 10) hrvTrendPush(hrvMin.key * 60 + 30, Math.sqrt(hrvMin.sumSq / hrvMin.n));
+      hrvMin = null;
+    }
+    if (!hrvMin) hrvMin = { key, sumSq: 0, n: 0 };
+    if (diff != null) { hrvMin.sumSq += diff * diff; hrvMin.n++; }
+  }
+  function hrvTrendPush(t, v) {
+    const T = hrvTrend;
+    T.t.push(t); T.v.push(v);
+    // trailing moving average over the last HRV_MA_MIN minutes that have a value
+    let s = 0, c = 0;
+    for (let i = T.t.length - 1; i >= 0 && T.t[i] > t - HRV_MA_MIN * 60; i--) { s += T.v[i]; c++; }
+    T.ma.push(s / c);
+    drawHrvTrend();
+  }
+  function makeHrvTrend() {
+    const host = $("hrv-trend");
+    hrvPlot = new uPlot({
+      width: host.clientWidth, height: 56, legend: { show: false }, cursor: { show: false },
+      padding: [4, 2, 0, 0],
+      scales: { x: { time: false },
+                y: { range: (u, lo, hi) => {             // keep dots off the edges, >= 10 ms span
+                  const mid = (lo + hi) / 2, half = Math.max(hi - lo, 10) * 0.65;
+                  return [Math.max(0, mid - half), mid + half];
+                } } },
+      axes: [{ show: false },
+             { stroke: COL.text, font: "9px -apple-system,BlinkMacSystemFont,sans-serif", size: 26, space: 18,
+               ticks: { show: false }, grid: { stroke: COL.grid } }],
+      series: [{}, { stroke: "transparent", points: { show: true, size: 4, fill: COL.text, stroke: COL.text } },
+               { stroke: COL.ecg, width: 2, points: { show: false } }],
+    }, [[], [], []], host);
+  }
+  function drawHrvTrend() {
+    if (!hrvPlot) return;
+    hrvPlot.setData([hrvTrend.t, hrvTrend.v, hrvTrend.ma]);
+    $("hrv-trend").title = `RMSSD per minute (dots) and ${HRV_MA_MIN}-minute moving average (line); ` +
+                           `${hrvTrend.t.length} min since this page was opened`;
   }
 
   // place RR values ending at beat position `end` (sample index or time)
@@ -803,6 +870,7 @@
     for (const L of LANES) lanes[L.key].u.setSize({ width: w, height: L.h });
     const a = $("avg-chart");
     if (avgPlot) avgPlot.setSize({ width: a.clientWidth, height: a.clientHeight || 300 });
+    if (hrvPlot) hrvPlot.setSize({ width: $("hrv-trend").clientWidth, height: 56 });
   }
 
   // ---------- DOM panels ----------
@@ -1036,6 +1104,7 @@
   window.addEventListener("load", () => {
     makeStrip();
     makeAvg();
+    makeHrvTrend();
     initZoom();
     initPauseMeasure();
     initDevicePicker();
