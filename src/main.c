@@ -342,7 +342,7 @@ static uint8_t hr_from_rr(uint16_t rr_ms)
  * Search-back lowers the bar if we've waited longer than 1.66x the average RR. */
 static void detector_feed(int16_t sample)
 {
-	static float notch_z[2], bp_z[4];
+	static float bp_z[4];
 	static float spki, npki;            /* running signal / noise peak estimates */
 	static float prev_energy, cand_peak;/* local-maximum tracking                */
 	static float last_qrs_peak;         /* energy of the last accepted QRS       */
@@ -357,8 +357,9 @@ static void detector_feed(int16_t sample)
 	static bool     pend_prem, pend_railed;
 	static float    warm_max;           /* peak energy seen during warm-up (threshold seed) */
 
-	float yn = iir(NOTCH_b, NOTCH_a, notch_z, 3, (float)sample);
-	float yb = iir(BP_b, BP_a, bp_z, 5, yn);
+	/* 50 Hz notch is applied up front in the sampling loop (feeding both the streamed
+	 * signal and this detector), so here we only band-pass. */
+	float yb = iir(BP_b, BP_a, bp_z, 5, (float)sample);
 	float energy = yb * yb;
 
 	if (warm < WARMUP_SAMPLES) {
@@ -612,10 +613,17 @@ int main(void)
 		sample_idx += ticks;
 		if (led_off_idx && sample_idx >= led_off_idx) { led_off(); led_off_idx = 0; }
 
-		detector_feed(adc_raw);
+		/* First processing step: 50 Hz mains notch. The notched sample is what we
+		 * both stream ("raw") and feed the detector, so the broadcast ECG is clean. */
+		static float snotch_z[2];
+		float nf = iir(NOTCH_b, NOTCH_a, snotch_z, 3, (float)adc_raw);
+		nf = CLAMP(nf + (nf >= 0 ? 0.5f : -0.5f), -32768.0f, 32767.0f);
+		int16_t ns = (int16_t)nf;
 
-		/* raw ECG streaming (only when a client subscribes) */
-		sys_put_le16((uint16_t)adc_raw, &raw_buf[2 + rn * 2]);
+		detector_feed(ns);
+
+		/* raw (mains-notched) ECG streaming (only when a client subscribes) */
+		sys_put_le16((uint16_t)ns, &raw_buf[2 + rn * 2]);
 		if (++rn >= RAW_BATCH) {
 			sys_put_le16(seq++, &raw_buf[0]);
 			if (cap_ccc) {
