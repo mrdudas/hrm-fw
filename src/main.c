@@ -162,12 +162,10 @@ static void hrm_notify(uint8_t hr, uint16_t rr_1024)
 /* ---- Raw-ECG streaming service (custom) ------------------------------ */
 #define CAP_SVC  BT_UUID_128_ENCODE(0xa1b20001,0x0000,0x1000,0x8000,0x00805f9b34fb)
 #define CAP_CHR  BT_UUID_128_ENCODE(0xa1b20002,0x0000,0x1000,0x8000,0x00805f9b34fb)
-#define CAP_LINK  BT_UUID_128_ENCODE(0xa1b20004,0x0000,0x1000,0x8000,0x00805f9b34fb)
-#define CAP_PROBE BT_UUID_128_ENCODE(0xa1b20005,0x0000,0x1000,0x8000,0x00805f9b34fb)
-static struct bt_uuid_128 cap_svc_uuid   = BT_UUID_INIT_128(CAP_SVC);
-static struct bt_uuid_128 cap_chr_uuid   = BT_UUID_INIT_128(CAP_CHR);
-static struct bt_uuid_128 cap_link_uuid  = BT_UUID_INIT_128(CAP_LINK);
-static struct bt_uuid_128 cap_probe_uuid = BT_UUID_INIT_128(CAP_PROBE);
+#define CAP_LINK BT_UUID_128_ENCODE(0xa1b20004,0x0000,0x1000,0x8000,0x00805f9b34fb)
+static struct bt_uuid_128 cap_svc_uuid  = BT_UUID_INIT_128(CAP_SVC);
+static struct bt_uuid_128 cap_chr_uuid  = BT_UUID_INIT_128(CAP_CHR);
+static struct bt_uuid_128 cap_link_uuid = BT_UUID_INIT_128(CAP_LINK);
 static uint8_t cap_ccc;
 static void cap_ccc_changed(const struct bt_gatt_attr *a, uint16_t v) { cap_ccc = (v == BT_GATT_CCC_NOTIFY); }
 
@@ -178,7 +176,7 @@ static volatile int conn_count;   /* defined once; also used by the power state 
 static ssize_t read_cap_link(struct bt_conn *c, const struct bt_gatt_attr *a,
 			     void *buf, uint16_t len, uint16_t off)
 {
-	uint8_t out[10] = {0};
+	uint8_t out[9] = {0};
 	struct bt_conn_info ci;
 	if (c && bt_conn_get_info(c, &ci) == 0 && ci.type == BT_CONN_TYPE_LE) {
 		sys_put_le16((uint16_t)(ci.le.interval_us / 1250), &out[0]);
@@ -187,35 +185,7 @@ static ssize_t read_cap_link(struct bt_conn *c, const struct bt_gatt_attr *a,
 	}
 	sys_put_le16(bt_gatt_get_mtu(c), &out[6]);
 	out[8] = (uint8_t)conn_count;
-	out[9] = (uint8_t)nrf_gpio_pin_read(CONTACT_PIN);  /* live P0.12 level (AFE contact out) */
 	return bt_gatt_attr_read(c, a, buf, len, off, out, sizeof(out));
-}
-
-/* DIAGNOSTIC: drive a front-end GPIO to probe its role. Write [pin, mode] (2 B)
- * or [mode] (1 B = P0.13). pin = 12 or 13. mode: 0=input NOPULL (float), 1=pull-
- * down, 2=pull-up, 3=drive LOW, 4=drive HIGH. Watch the ECG (AD) response to see
- * whether the pin gates/biases the AFE. (Boot leaves both pins at their native
- * config; P0.12 is the read-only contact line, so restore it to 0 after probing.) */
-#define P013_PIN 13
-static void probe_set(uint8_t pin, uint8_t mode)
-{
-	if (pin != 12 && pin != 13) return;
-	switch (mode) {
-	case 0: nrf_gpio_cfg_input(pin, NRF_GPIO_PIN_NOPULL);   break;
-	case 1: nrf_gpio_cfg_input(pin, NRF_GPIO_PIN_PULLDOWN); break;
-	case 2: nrf_gpio_cfg_input(pin, NRF_GPIO_PIN_PULLUP);   break;
-	case 3: nrf_gpio_pin_clear(pin); nrf_gpio_cfg_output(pin); break;
-	case 4: nrf_gpio_pin_set(pin);   nrf_gpio_cfg_output(pin); break;
-	default: break;
-	}
-}
-static ssize_t write_cap_probe(struct bt_conn *c, const struct bt_gatt_attr *a,
-			       const void *buf, uint16_t len, uint16_t off, uint8_t flags)
-{
-	const uint8_t *b = buf;
-	if (len >= 2)      probe_set(b[0], b[1]);
-	else if (len == 1) probe_set(P013_PIN, b[0]);
-	return len;
 }
 
 BT_GATT_SERVICE_DEFINE(cap_svc,
@@ -225,8 +195,6 @@ BT_GATT_SERVICE_DEFINE(cap_svc,
 	BT_GATT_CCC(cap_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 	BT_GATT_CHARACTERISTIC(&cap_link_uuid.uuid, BT_GATT_CHRC_READ,
 			       BT_GATT_PERM_READ, read_cap_link, NULL, NULL),
-	BT_GATT_CHARACTERISTIC(&cap_probe_uuid.uuid, BT_GATT_CHRC_WRITE,
-			       BT_GATT_PERM_WRITE, NULL, write_cap_probe, NULL),
 );
 
 /* ---- Accelerometer data service: raw X/Y/Z (int16) + step count (u16) ---- */
