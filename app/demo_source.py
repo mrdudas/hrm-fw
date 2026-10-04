@@ -1,6 +1,7 @@
 """Synthetic data source so the dashboard can be exercised without hardware.
 
-Generates a plausible ECG waveform at 250 Hz (20-sample packets ~ every 80 ms),
+Generates a plausible ECG waveform at 250 Hz, or 1024 Hz with --demo-fs 1024
+(20-sample packets, every 80 / 19.5 ms),
 HR/RR beats derived from the same rhythm, accelerometer, occasional ectopic
 beats, and a slowly draining battery. Same publish_* API as BLESource.
 """
@@ -11,8 +12,11 @@ import time
 
 
 class DemoSource:
-    def __init__(self, hub, hr=62.0, log=print):
+    def __init__(self, hub, hr=62.0, log=print, fs=250, batch=20):
         self.hub = hub
+        self.fs = fs                  # ECG sample rate to simulate (strap: 250 or 1024)
+        self.batch = batch            # ECG samples per packet (strap: 20 or 40)
+        self.notched_hz = 0           # demo stream carries no mains hum, so no strap notch
         self.base_hr = hr
         self.log = log
         self.enabled = True           # UI Disconnect pauses the synthetic stream
@@ -24,13 +28,20 @@ class DemoSource:
     def command(self, msg: dict):
         """Same UI commands as BLESource, simulated."""
         cmd = msg.get("cmd")
-        if cmd == "disconnect":
+        if cmd == "disconnect":            # same states as the BLE source, with a short delay
             self.enabled = False
-            self.hub.publish_status("idle", enabled=False, target=self._target())
+            self.hub.publish_status("disconnecting", enabled=False, target=self._target())
+            asyncio.get_event_loop().call_later(
+                0.6, lambda: self.hub.publish_status("idle", enabled=False, target=self._target()))
         elif cmd == "connect":
-            self.enabled = True
-            self.hub.publish_status("demo", detail="synthetic stream", enabled=True,
+            self.hub.publish_status("connecting", detail="synthetic stream", enabled=True,
                                     target=self._target())
+
+            def up():
+                self.enabled = True
+                self.hub.publish_status("demo", detail="synthetic stream", enabled=True,
+                                        target=self._target())
+            asyncio.get_event_loop().call_later(0.8, up)
         elif cmd == "scan":
             self.hub.publish_devices([
                 {"address": "D7:CD:02:7A:05:33", "name": "HRM Raw RR", "rssi": -48, "strap": True},
@@ -46,17 +57,19 @@ class DemoSource:
         self.log("DEMO mode: streaming synthetic data (no BLE)")
         self.hub.publish_status("demo", detail="synthetic stream", enabled=True,
                                 target=self._target())
+        self.hub.set_ecg_fs(self.fs, {"sample_hz": self.fs, "raw_batch": self.batch,
+                                      "sample_bytes": 2, "fmt_ver": 1,
+                                      "notched_hz": self.notched_hz})
         self.command({"cmd": "scan"})
         loop = asyncio.get_event_loop()
         await asyncio.gather(
             self._ecg_and_beats(loop),
-            self._accel_loop(),
             self._battery_loop(),
         )
 
     # ---- ECG + beat detection driving RR/ectopy --------------------------
     async def _ecg_and_beats(self, loop):
-        fs = 250.0
+        fs = float(self.fs)
         seq = 0
         phase = 0.0                 # position within current RR interval (s)
         rr_s = 60.0 / self.base_hr  # current beat-to-beat interval (s)
@@ -66,13 +79,26 @@ class DemoSource:
         last_r = None               # sample time of the previous R peak
         reported = True             # R of the current cycle already published?
         t_samp = 0.0
+        next_t = time.monotonic()
+        # accelerometer like the v2 firmware: one sample every acc_div ECG ticks,
+        # batched 5 per packet with the ECG position (seq, offset) of the last one
+        acc_div = max(1, round(fs / 25))
+        acc_buf, tick = [], 0
         while not self._stop.is_set():
             packet.clear()
-            for _ in range(20):
+            for _ in range(self.batch):
                 # QRS-ish morphology as a function of phase within the beat
                 packet.append(int(self._ecg_sample(phase, rr_s)))
                 phase += 1.0 / fs
                 t_samp += 1.0 / fs
+                tick += 1
+                if tick % acc_div == 0:
+                    acc_buf.append(self._accel_sample(t_samp))
+                    if len(acc_buf) == 5:
+                        if self.enabled:
+                            self.hub.publish_accel_batch(acc_buf, self._steps,
+                                                         ecg_seq=seq & 0xFFFF, ecg_off=len(packet) - 1)
+                        acc_buf = []
                 # like the firmware: report the beat shortly AFTER its R peak
                 # (R sits at 0.32 of the cycle; ~60 ms detector latency)
                 if not reported and phase >= 0.32 * rr_s + 0.06:
@@ -102,7 +128,9 @@ class DemoSource:
             if self.enabled:
                 self.hub.publish_ecg(seq & 0xFFFF, list(packet))
             seq += 1
-            await asyncio.sleep(20 / fs)   # 80 ms per packet
+            # pace on an absolute schedule so the simulated rate doesn't drift
+            next_t += self.batch / fs
+            await asyncio.sleep(max(0.0, next_t - time.monotonic()))
 
     def _ecg_sample(self, phase, rr_s):
         """A crude but recognizable P-QRS-T over the interval [0, rr_s)."""
@@ -128,20 +156,14 @@ class DemoSource:
         })
 
     # ---- accelerometer ----------------------------------------------------
-    async def _accel_loop(self):
-        steps = 0
-        t = 0.0
-        while not self._stop.is_set():
-            # gentle breathing motion on Z + occasional step
-            x = int(random.gauss(0, 300))
-            y = int(random.gauss(0, 300))
-            z = int(16000 + 800 * math.sin(t * 2 * math.pi * 0.25) + random.gauss(0, 200))
-            if random.random() < 0.15:
-                steps += 1
-            if self.enabled:
-                self.hub.publish_accel(x, y, z, steps)
-            t += 0.04
-            await asyncio.sleep(0.04)   # ~25 Hz
+    _steps = 0
+
+    def _accel_sample(self, t):
+        """Gentle breathing motion on Z, noise on X/Y, an occasional step."""
+        if random.random() < 0.006:
+            self._steps += 1
+        return (int(random.gauss(0, 300)), int(random.gauss(0, 300)),
+                int(16000 + 800 * math.sin(t * 2 * math.pi * 0.25) + random.gauss(0, 200)))
 
     # ---- battery ----------------------------------------------------------
     async def _battery_loop(self):

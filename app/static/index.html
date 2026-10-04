@@ -16,14 +16,15 @@
   <div class="header-right">
     <div class="device">
       <select id="dev-select" title="Device to connect to"></select>
-      <button id="scan-btn" class="tool-btn" title="Scan for nearby BLE devices">⟳ Scan</button>
-      <button id="conn-btn" class="tool-btn" title="Connect to the selected device">Connect</button>
-      <button id="disc-btn" class="tool-btn" title="Disconnect and stop scanning">Disconnect</button>
+      <button id="scan-btn" class="tool-btn dev-btn" title="Scan for nearby BLE devices"><span class="spin">⟳</span> Scan</button>
+      <button id="conn-btn" class="tool-btn dev-btn" title="Connect to the selected device (when failed: retry now)">Connect</button>
+      <button id="disc-btn" class="tool-btn dev-btn" title="Disconnect, or cancel connecting / retrying">Disconnect</button>
     </div>
     <div id="battery" class="battery">
       <span class="batt-label">Battery</span>
       <div class="batt-bar"><div id="batt-fill" class="batt-fill"></div></div>
       <span id="batt-pct" class="batt-pct">--%</span>
+      <span id="batt-vdd" class="batt-vdd"></span>
     </div>
     <div id="status" class="status status-off">
       <span class="dot"></span><span id="status-text">connecting…</span>
@@ -40,9 +41,9 @@
       <div class="kpi-sub">contact: <span id="contact">n/a</span></div>
     </div>
     <div class="card kpi">
-      <div class="kpi-label">RR interval</div>
-      <div class="kpi-value"><span id="rr">--</span><span class="unit">ms</span></div>
-      <div class="kpi-sub">latest beat-to-beat</div>
+      <div class="kpi-label">Beat-to-beat HR</div>
+      <div class="kpi-value"><span id="ibpm">--</span><span class="unit">bpm</span></div>
+      <div class="kpi-sub">60000 / RR · RR <span id="rr">--</span> ms</div>
     </div>
     <div class="card kpi">
       <div class="kpi-label">Steps</div>
@@ -64,9 +65,15 @@
   <!-- unified strip: ECG + accel X/Y/Z + RR on one shared time axis (EEG-style) -->
   <section id="strip-card" class="card wide">
     <div class="card-head">
-      <h2>Live strip</h2>
+      <h2>Live strip <span id="ecg-fs" class="fs-label" title="ECG sample rate reported by the strap">250 Hz</span>
+        <span id="raw-note" class="raw-note" hidden>raw ECG is streaming to another host
+          <button id="take-raw" class="tool-btn" title="Subscribe to raw ECG here; the other host loses it">Take over</button></span></h2>
       <span class="hint zoom">
         <span id="meas-readout" class="meas-readout"></span>
+        <select id="notch-sel" class="tool-sel" title="Mains-hum notch on the displayed ECG only (recording stays raw)">
+          <option value="0">Notch off</option><option value="50">Notch 50 Hz</option><option value="60">Notch 60 Hz</option>
+          <option value="strap" hidden>Notch in strap</option>
+        </select>
         <button id="pause-btn" class="tool-btn" title="Pause / resume (Space). Drag the chart to scroll back.">⏸ Pause</button>
         <button id="measure-btn" class="tool-btn" title="Measure time (M): click start, click end. Esc clears.">📏 Measure</button>
         <span class="sep"></span>
@@ -82,14 +89,27 @@
     </div>
   </section>
 
+  <!-- HRV trend over the whole session -->
+  <section class="card wide">
+    <div class="card-head">
+      <h2>HRV trend</h2>
+      <span class="hint">RMSSD per minute · 5-min moving average · live (smoothed) — since this page was opened ·
+        <span id="hrv-span">waiting for beats…</span></span>
+    </div>
+    <div id="hrv-chart" class="chart-hrv"></div>
+  </section>
+
   <!-- signal-averaged beat (ensemble average, R-aligned) -->
   <section class="card wide">
     <div class="card-head">
       <h2>Signal-averaged beat</h2>
-      <span class="hint">
+      <span class="hint avg-tools">
         R-aligned average of last
         <input id="avg-n" type="number" min="5" max="300" step="5" value="50" class="avg-n">
         beats · <span id="avg-count">0</span> collected
+        <span class="sep"></span>
+        <button id="avg-clear" class="tool-btn" title="Discard the collected beats and start a new average">Clear</button>
+        <button id="avg-csv" class="tool-btn" title="Download the averaged beat (mean and SD per sample) as CSV" disabled>Download CSV</button>
       </span>
     </div>
     <div id="avg-chart" class="chart-avg"></div>

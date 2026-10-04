@@ -26,21 +26,31 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
   | Stream   | Characteristic UUID | Payload |
   |----------|---------------------|---------|
   | HR / RR  | `0x2A37`            | flags + HR + RR intervals (1/1024 s → ms) |
-  | Raw ECG  | `a1b20002-…`        | uint16 seq + 20× int16 @ 250 Hz |
-  | Accel    | `a1b30002-…`        | int16 x/y/z + uint16 steps @ ~25 Hz |
+  | Raw ECG  | `a1b20002-…`        | uint16 seq + 20× int16 @ 250 or 1024 Hz |
+  | ECG info | `a1b20003-…` (read) | u16 sample_hz, u16 raw_batch, u8 sample_bytes, u8 fmt_ver — read on connect; absent on older firmware → 250 Hz |
+  | Accel    | `a1b30002-…`        | ~25 Hz; legacy int16 x/y/z + u16 steps (8 B), or batched `u8 n, n×(x,y,z), u16 steps[, u16 ecg_seq, u8 ecg_off]` — v2 carries the ECG position of the last sample, so accel is drawn on the ECG clock |
   | Ectopy   | `a1b40002-…`        | PVC/PAC/artifact classifier + burden |
   | Battery  | `0x2A19`            | 1 byte percent (read + notify) |
 - **Auto-reconnects** if the BLE link drops (quick retry, then once a minute).
 - Records each stream to a timestamped CSV in `recordings/`, flushed after every
   packet so a crash loses at most the last one:
-  - `ecg_<session>.csv` — `unix_time, sample_index, adc`
+  - `ecg_<session>.csv` — `unix_time, sample_index, adc, rx_time` (`rx_time` = host
+    arrival time of the sample's BLE packet; lets `tools/analyze_recording.py`
+    measure the real sample rate)
   - `rr_<session>.csv` — `unix_time, hr_bpm, rr_ms`
-  - `accel_<session>.csv` — `unix_time, x, y, z, steps`
+  - `accel_<session>.csv` — `unix_time, x, y, z, steps, ecg_index` (`ecg_index` =
+    the sample's position in the ECG `sample_index` space, with v2 firmware)
   - `ectopy_<session>.csv` — `unix_time, type, coupling_ms, pause_ms, pvc, pac, artifact, total, burden_pct`
   - `battery_<session>.csv` — `unix_time, pct`
+  - `meta_<session>.json` — `{"ecg_fs": …}`, the ECG sample rate used for the
+    session (read by `tools/analyze_recording.py`)
 - Live dashboard at **http://localhost:8770** (opened automatically): rolling
-  ECG waveform, big HR number + RR, live HRV (RMSSD, SDNN, pNN50 over a rolling
-  5 min window, ectopic/artifact beats excluded), RR/HRV tachogram, accelerometer + step count,
+  ECG waveform (optional 50/60 Hz mains notch on the display only — recordings
+  stay raw), big HR number + beat-to-beat HR (60000/RR, also as the strip's HR lane),
+  a signal-averaged beat with Clear and CSV download (mean + SD per sample), live HRV (RMSSD, SDNN, pNN50 over a rolling
+  5 min window, ectopic/artifact beats excluded, shown as a ~1 min moving average),
+  an HRV trend card (RMSSD per minute, 5 min moving average and the live smoothed
+  value over the whole session), RR/HRV tachogram, accelerometer + step count,
   ectopy counts / burden / event log, and battery. Dark theme. The page
   reconnects its WebSocket by itself if you reload it.
 
@@ -72,6 +82,7 @@ pip install -r requirements.txt
 ```bash
 python app.py               # scan for the strap, stream live, open the dashboard
 python app.py --demo        # synthetic data — no hardware needed (great for UI testing)
+python app.py --demo --demo-fs 1024   # same, simulating the 1024 Hz firmware
 python app.py --scan        # just list nearby BLE devices and exit
 python app.py --address D7:CD:02:7A:05:33   # connect to a specific address / macOS UUID
 python app.py --no-open --port 9000         # don't open a browser, custom port

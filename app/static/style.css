@@ -28,6 +28,15 @@ header{flex-wrap:wrap; gap:10px}
 .tool-btn:disabled{opacity:.4; cursor:default}
 
 .status{display:flex; align-items:center; gap:8px; font-size:13px; color:var(--muted)}
+/* fixed widths in the header so changing labels never shift the buttons */
+.status{width:270px; flex:none}
+#status-text{overflow:hidden; white-space:nowrap; text-overflow:ellipsis}
+.dev-btn{width:86px; flex:none}
+.dev-btn.busy .spin{display:inline-block; animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.battery{flex:none}
+.batt-vdd{display:inline-block; min-width:72px}
+.device select{width:300px; flex:none}
 .status .dot{width:9px; height:9px; border-radius:50%; background:var(--off)}
 .status-on .dot{background:var(--ok); box-shadow:0 0 8px var(--ok)}
 .status-demo .dot{background:var(--warn); box-shadow:0 0 8px var(--warn)}
@@ -36,6 +45,7 @@ header{flex-wrap:wrap; gap:10px}
 .battery{display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted)}
 .batt-bar{width:46px; height:12px; border:1px solid var(--border); border-radius:3px; overflow:hidden; background:var(--panel-2)}
 .batt-fill{height:100%; width:0%; background:var(--ok); transition:width .5s}
+.batt-vdd{color:var(--muted); font-variant-numeric:tabular-nums; font-size:11px}
 .batt-pct{color:var(--text); font-variant-numeric:tabular-nums; min-width:34px; text-align:right}
 
 main{max-width:1200px; margin:0 auto; padding:18px 16px; display:flex; flex-direction:column; gap:16px}
@@ -52,6 +62,8 @@ main{max-width:1200px; margin:0 auto; padding:18px 16px; display:flex; flex-dire
 .kpi-label{color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.05em}
 .kpi-value{font-size:44px; font-weight:700; line-height:1.1; font-variant-numeric:tabular-nums; margin-top:2px}
 .kpi-value .unit{font-size:16px; font-weight:500; color:var(--muted); margin-left:6px}
+.chart-hrv{width:100%}
+.chart-hrv .u-legend{font-size:12px}
 .kpi-sub{color:var(--muted); font-size:12px; margin-top:2px}
 
 .chart-strip{width:100%; display:flex; flex-direction:column}
@@ -82,6 +94,7 @@ footer code{background:var(--panel-2); padding:2px 6px; border-radius:4px}
 .u-legend{color:var(--muted)}
 
 .chart-avg{width:100%; height:300px; line-height:0}
+.hint.avg-tools{display:flex; align-items:center; gap:6px}
 .avg-n{width:56px; background:var(--panel-2,#1a1f28); color:var(--text,#dfe6ee);
        border:1px solid var(--border,#2a3140); border-radius:6px; padding:2px 6px;
        font:inherit; text-align:center}
@@ -96,11 +109,16 @@ footer code{background:var(--panel-2); padding:2px 6px; border-radius:4px}
           border:1px solid var(--border); border-radius:6px; font:inherit; font-size:12px; cursor:pointer}
 .tool-btn:hover{border-color:var(--muted)}
 .tool-btn.active{background:#3a2f12; border-color:var(--warn); color:#ffd479}
+.tool-sel{height:24px; padding:0 6px; background:var(--panel-2); color:var(--text);
+          border:1px solid var(--border); border-radius:6px; font:inherit; font-size:12px; cursor:pointer}
 .hint .sep{width:1px; height:18px; background:var(--border); margin:0 4px}
 .meas-readout{color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; margin-right:6px}
 #strip-card.paused{border-color:var(--warn)}
 #strip-card.paused .card-head h2::after{content:"  ·  PAUSED"; color:var(--warn); font-size:12px}
 #strip-chart{user-select:none}
+.raw-note{color:var(--warn); font-size:12px; font-weight:500; margin-left:10px}
+.raw-note .tool-btn{margin-left:6px; height:22px}
+.fs-label{color:var(--muted); font-size:11px; font-weight:500; margin-left:6px; font-variant-numeric:tabular-nums}
 .strip-help{color:var(--muted); font-size:11px; margin-top:6px; text-align:right}
 .strip-help kbd{background:var(--panel-2); border:1px solid var(--border); border-radius:4px; padding:0 4px; font:inherit}
 .status-wait .dot{background:var(--warn)}

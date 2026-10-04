@@ -20,25 +20,32 @@
                 meas:"#f2f5f8", measFill:"rgba(242,245,248,0.07)", measBox:"rgba(14,17,22,0.85)" };
   const FONT = "11px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif";
 
-  const FS = 250;            // ECG sample rate (Hz)
+  let FS = 250;              // ECG sample rate (Hz); each ECG message carries the strap's real rate
   const ACC_FS = 25;         // accelerometer rate (Hz, nominal)
   const WIN_DEFAULT = 6;     // visible window (s), zoomable WIN_MIN..WIN_MAX
   const WIN_MIN = 2, WIN_MAX = 60;
-  const RING = FS * (WIN_MAX + 4);   // ECG ring buffer: longest window + margin
+  let RING = FS * (WIN_MAX + 4);     // ECG ring buffer: longest window + margin
 
   const now = () => (performance.timeOrigin + performance.now()) / 1000;
   const $ = (id) => document.getElementById(id);
   function setText(id, v) { const e = $(id); if (e) e.textContent = v; }
 
   // ---------- ECG ring buffer (continuous client-side sample index) ----------
-  const ecgRing = new Float32Array(RING).fill(NaN);
-  const ecgFit = new StreamClock(1 / FS, 0.10);   // ±10 %: follows firmware sample loss
+  // ecgRaw: samples as received (the CSV is written server-side, always raw).
+  // ecgRing: what is displayed / used for beat dots and the averaged beat --
+  // ecgRaw through the optional mains notch.
+  let ecgRaw = new Float32Array(RING).fill(NaN);
+  let ecgRing = new Float32Array(RING).fill(NaN);
+  let ecgFit = new StreamClock(1 / FS, 0.10);     // ±10 %: follows firmware sample loss
   let ecgLast = -1;           // index of newest sample
   let ecgLastBase = null;     // last server `base` (wraps at 65536 packets)
+  let ecgLastLen = 0;         // samples in that packet
   let ecgLastArrival = 0;
   const ecgAt = (n) => (n > ecgLast - RING && n <= ecgLast && n >= 0) ? ecgRing[n % RING] : NaN;
 
   function pushEcg(msg, ta) {
+    if (msg.fs && msg.fs !== FS) setEcgRate(msg.fs);
+    if (msg.base === ecgLastBase) return;   // repeated packet (strap TX retry): already have it
     const len = msg.samples.length;
     let skip = 0;             // samples missing before this packet
     if (ecgLastBase != null) {
@@ -50,17 +57,98 @@
           skip = Math.max(0, Math.round((ta - ecgLastArrival - len / FS) * FS));   // index ~ time
       }
     }
-    for (let k = 0; k < Math.min(skip, RING); k++) ecgRing[(ecgLast + 1 + k) % RING] = NaN;
+    for (let k = 0; k < Math.min(skip, RING); k++) {
+      const j = (ecgLast + 1 + k) % RING; ecgRaw[j] = NaN; ecgRing[j] = NaN;
+    }
+    if (skip) notch.reset();              // gap: don't ring across it
     ecgLast += skip;
-    for (const s of msg.samples) { ecgLast++; ecgRing[ecgLast % RING] = s; }
+    for (const s of msg.samples) {
+      ecgLast++;
+      ecgRaw[ecgLast % RING] = s;
+      ecgRing[ecgLast % RING] = notch.step(s);
+    }
     ecgLastBase = msg.base;
+    ecgLastLen = len;
     ecgLastArrival = ta;
     ecgFit.add(ecgLast, ta);
   }
   const ecgLive = () => ecgFit.ready && now() - ecgLastArrival < 5;
 
+  // ---------- display-only mains notch (biquad, RBJ cookbook, Q = 30) ----------
+  // The strap streams raw ECG on purpose; this only cleans the plotted trace.
+  const notch = {
+    f0: 50, b: null, a: null, z1: 0, z2: 0,
+    design() {                                        // null when off
+      if (!this.f0 || this.f0 >= FS / 2) { this.b = this.a = null; return; }
+      const w0 = 2 * Math.PI * this.f0 / FS, alpha = Math.sin(w0) / (2 * 30), c = Math.cos(w0);
+      const a0 = 1 + alpha;
+      this.b = [1 / a0, -2 * c / a0, 1 / a0];
+      this.a = [-2 * c / a0, (1 - alpha) / a0];
+      this.reset();
+    },
+    reset() { this.z1 = this.z2 = 0; },
+    step(x) {                                         // direct form II transposed
+      if (!this.b || x !== x) { if (x !== x) this.reset(); return x; }
+      const y = this.b[0] * x + this.z1;
+      this.z1 = this.b[1] * x - this.a[0] * y + this.z2;
+      this.z2 = this.b[2] * x - this.a[1] * y;
+      return y;
+    },
+    // re-filter everything in the buffer (toggle / rate change), so the trace is
+    // never half filtered
+    refilter() {
+      this.design();
+      for (let n = Math.max(0, ecgLast - RING + 1); n <= ecgLast; n++) {
+        const j = n % RING;
+        ecgRing[j] = this.step(ecgRaw[j]);
+      }
+    },
+  };
+  let notchPref = 50;                 // the user's choice (remembered); the strap may override
+  try { const f = localStorage.getItem("hrm.notch"); if (f != null) notchPref = +f; } catch (e) {}
+  notch.f0 = notchPref;
+  notch.design();
+  let strapNotchHz = 0;               // > 0: the strap already notches the stream at this frequency
+
+  // a1b20003 flags: if the strap notches in firmware, the display notch would
+  // only notch twice -> force it off and say so; otherwise honour the user's choice
+  function onEcgInfo(msg) {
+    strapNotchHz = msg.notched_hz || 0;
+    const ns = $("notch-sel");
+    const strapOpt = ns.querySelector('option[value="strap"]');
+    if (strapNotchHz) {
+      strapOpt.textContent = `Notch in strap (${strapNotchHz} Hz)`;
+      strapOpt.hidden = false;
+      ns.value = "strap";
+      ns.disabled = true;
+      ns.title = "The strap already removes mains hum from the ECG stream (and the recording)";
+      notch.f0 = 0;
+    } else {
+      strapOpt.hidden = true;
+      ns.disabled = false;
+      ns.value = String(notchPref);
+      ns.title = "Mains-hum notch on the displayed ECG only (recording stays raw)";
+      notch.f0 = notchPref;
+    }
+    notch.refilter();
+  }
+
+  // hub ECG index (seq * batch + offset, wraps at 65536 packets) -> client ECG
+  // index, relative to the newest ECG packet (valid within the current stream run)
+  function hubToClientEcg(hubIdx) {
+    if (ecgLastBase == null || !ecgFit.ready) return NaN;
+    const wrap = 65536 * ecgLastLen;
+    let d = ((ecgLastBase + ecgLastLen - 1 - hubIdx) % wrap + wrap) % wrap;
+    if (d > wrap / 2) d -= wrap;             // accel ahead of the last ECG packet
+    return Math.abs(d) < 10 * FS ? ecgLast - d : NaN;
+  }
+
   // ---------- accelerometer ring (timestamps from a packet-counter fit) ----------
   const ACC_RING = ACC_FS * (WIN_MAX + 6);
+  // accE: the sample's position on the client ECG index (accel v2 firmware reports
+  // it), so it is drawn on the ECG clock -- exact and immune to dropped accel
+  // packets. NaN -> fall back to the accel packet-counter clock (accI / accFit).
+  const accE = new Float64Array(ACC_RING).fill(NaN);
   const accI = new Float64Array(ACC_RING), accX = new Float32Array(ACC_RING),
         accY = new Float32Array(ACC_RING), accZ = new Float32Array(ACC_RING);
   const accFit = new StreamClock(1 / ACC_FS, 0.25);
@@ -75,16 +163,17 @@
     accFit.add(accK, ta);
     const j = accN % ACC_RING;
     accI[j] = accK; accX[j] = m.x; accY[j] = m.y; accZ[j] = m.z;
+    accE[j] = m.ecg_index != null ? hubToClientEcg(m.ecg_index) : NaN;
     accN++; accK++; accLastArrival = ta;
   }
 
   // ---------- beats: R-peak snapping, RR points, ensemble average ----------
   // search window around the newest ECG sample at the time the RR event arrived
   // (both share the BLE link, so a stall delays them together)
-  const SNAP_BACK = Math.round(0.35 * FS), SNAP_FWD = Math.round(0.12 * FS);
-  const AVG_PRE = Math.round(0.20 * FS);    // -200 ms
-  const AVG_POST = Math.round(0.50 * FS);   // +500 ms
-  const AVG_LEN = AVG_PRE + AVG_POST + 1;
+  let SNAP_BACK = Math.round(0.35 * FS), SNAP_FWD = Math.round(0.12 * FS);
+  let AVG_PRE = Math.round(0.20 * FS);      // -200 ms
+  let AVG_POST = Math.round(0.50 * FS);     // +500 ms
+  let AVG_LEN = AVG_PRE + AVG_POST + 1;
   const pendingBeats = [];  // { ta, rr: [ms...] }  awaiting ECG data around the beat
   const pendingSegs = [];   // R indices awaiting +AVG_POST samples
   const beatDots = [];      // R-peak sample indices (value read back from the ring)
@@ -92,11 +181,43 @@
   const segs = [];          // Float32Array(AVG_LEN) ring for the ensemble average
   let lastR = -1e9;
 
+  // The strap reports its ECG rate (250 Hz on older firmware, 1024 Hz newer).
+  // A change re-creates everything indexed by ECG sample; RR points already
+  // placed on the old index are converted to absolute times so they stay put.
+  function setEcgRate(fs) {
+    if (ecgFit.ready) {
+      for (const p of rrPts) if (p.t == null) { p.t = ecgFit.t(p.idx); delete p.idx; }
+    } else {
+      rrPts.length = 0;
+    }
+    const oldDelay = ecgFit.delay;
+    FS = fs;
+    RING = FS * (WIN_MAX + 4);
+    ecgRaw = new Float32Array(RING).fill(NaN);
+    ecgRing = new Float32Array(RING).fill(NaN);
+    notch.design();                          // coefficients depend on fs
+    ecgFit = new StreamClock(1 / FS, 0.10);
+    ecgFit.delay = oldDelay;                 // keep the playout delay: no jump in the view
+    ecgLast = -1; ecgLastBase = null; ecgLastLen = 0; ecgLastArrival = 0;
+    accE.fill(NaN);                          // accel ECG positions referred to the old index space
+    SNAP_BACK = Math.round(0.35 * FS); SNAP_FWD = Math.round(0.12 * FS);
+    AVG_PRE = Math.round(0.20 * FS); AVG_POST = Math.round(0.50 * FS);
+    AVG_LEN = AVG_PRE + AVG_POST + 1;
+    avgX = Array.from({ length: AVG_LEN }, (_, i) => (i - AVG_PRE) / FS * 1000);
+    pendingBeats.length = 0; pendingSegs.length = 0; beatDots.length = 0; segs.length = 0;
+    lastR = -1e9;
+    if (avgPlot) avgPlot.setData([avgX, avgX.map(() => null)]);
+    setText("avg-count", 0);
+    setText("ecg-fs", fsLabel());
+  }
+
   function onRr(msg) {
     if (msg.hr != null) setText("hr", msg.hr);
     if (msg.contact) setText("contact", msg.contact);
     if (msg.rr && msg.rr.length) {
-      setText("rr", Math.round(msg.rr[msg.rr.length - 1]));
+      const lastRr = msg.rr[msg.rr.length - 1];
+      setText("rr", Math.round(lastRr));
+      if (lastRr > 0) setText("ibpm", Math.round(60000 / lastRr));
       stream("rr", msg.rr.slice());
       hrvAdd(msg.rr);
     }
@@ -108,9 +229,19 @@
   // previous RR is excluded, and successive differences only use two consecutive
   // accepted beats (so an ectopic beat drops both of its intervals). A pause of
   // more than 3 s (lost link) breaks the chain.
+  // Display: the card shows the window values through a ~1 min exponential
+  // moving average (no jumping from beat to beat); a sparkline shows RMSSD per
+  // wall-clock minute (dots) with a 5-minute moving average (line).
   const HRV_WIN = 300, HRV_MIN_S = 30;   // 5 min window, first value after 30 s
+  const HRV_TAU = 60;                    // s, display smoothing time constant
+  const HRV_MA_MIN = 5;                  // minutes in the trend's moving average
   const hrvBeats = [];                   // { t, rr, ok, chain }  chain: diff to previous is valid
   let hrvPrev = null;
+  let hrvEma = null;                     // { t, rmssd, sdnn, pnn50 }
+  let hrvMin = null;                     // current minute bucket { key, sumSq, n }
+  const hrvTrend = { t: [], v: [], ma: [] };
+  const hrvLive = { t: [], v: [] };      // smoothed RMSSD, one point every 5 s
+  let hrvPlot = null;
   function hrvAdd(rrs) {
     const tArr = now();
     // several RRs in one notification: the last beat is "now", earlier ones step back
@@ -123,6 +254,7 @@
       const beat = { t, rr, ok, chain: ok && linked && prev.ok };
       hrvBeats.push(beat);
       hrvPrev = beat;
+      hrvMinuteAdd(t, beat.chain ? rr - prev.rr : null);
     });
     while (hrvBeats.length && hrvBeats[0].t < tArr - HRV_WIN) hrvBeats.shift();
     hrvUpdate();
@@ -145,12 +277,92 @@
     const mean = good.reduce((a, b) => a + b.rr, 0) / good.length;
     const sdnn = Math.sqrt(good.reduce((a, b) => a + (b.rr - mean) ** 2, 0) / (good.length - 1));
     const rmssd = nDiff ? Math.sqrt(sumSq / nDiff) : NaN;
-    setText("hrv", Number.isFinite(rmssd) ? Math.round(rmssd) : "--");
+    const pnn50 = nDiff ? 100 * nn50 / nDiff : 0;
+    if (!Number.isFinite(rmssd)) { setText("hrv", "--"); return; }
+    // ~1 min exponential moving average of the window values
+    const t = hrvBeats[hrvBeats.length - 1].t;
+    if (!hrvEma) hrvEma = { t, rmssd, sdnn, pnn50 };
+    else {
+      const a = 1 - Math.exp(-Math.max(0, t - hrvEma.t) / HRV_TAU);
+      hrvEma.rmssd += a * (rmssd - hrvEma.rmssd);
+      hrvEma.sdnn += a * (sdnn - hrvEma.sdnn);
+      hrvEma.pnn50 += a * (pnn50 - hrvEma.pnn50);
+      hrvEma.t = t;
+    }
+    setText("hrv", Math.round(hrvEma.rmssd));
+    if (!hrvLive.t.length || t - hrvLive.t[hrvLive.t.length - 1] >= 5) {
+      hrvLive.t.push(t); hrvLive.v.push(hrvEma.rmssd);
+      drawHrvTrend();
+    }
     const win = span < HRV_WIN - 5 ? `${Math.round(span)} s` : "5 min";
-    setText("hrv-sub", `SDNN ${Math.round(sdnn)} ms · pNN50 ${nDiff ? Math.round(100 * nn50 / nDiff) : 0} % · ` +
+    setText("hrv-sub", `SDNN ${Math.round(hrvEma.sdnn)} ms · pNN50 ${Math.round(hrvEma.pnn50)} % · ` +
                        `${good.length} beats / ${win}` +
                        (good.length < hrvBeats.length ? ` · ${hrvBeats.length - good.length} excluded` : ""));
+    $("hrv").title = `now (window ${win}): RMSSD ${Math.round(rmssd)} ms, SDNN ${Math.round(sdnn)} ms; ` +
+                     `card shows a ~1 min moving average`;
   }
+
+  // RMSSD per wall-clock minute (needs >= 10 valid successive differences)
+  function hrvMinuteAdd(t, diff) {
+    const key = Math.floor(t / 60);
+    if (hrvMin && key !== hrvMin.key) {
+      if (hrvMin.n >= 10) hrvTrendPush(hrvMin.key * 60 + 30, Math.sqrt(hrvMin.sumSq / hrvMin.n));
+      hrvMin = null;
+    }
+    if (!hrvMin) hrvMin = { key, sumSq: 0, n: 0 };
+    if (diff != null) { hrvMin.sumSq += diff * diff; hrvMin.n++; }
+  }
+  function hrvTrendPush(t, v) {
+    const T = hrvTrend;
+    T.t.push(t); T.v.push(v);
+    // trailing moving average over the last HRV_MA_MIN minutes that have a value
+    let s = 0, c = 0;
+    for (let i = T.t.length - 1; i >= 0 && T.t[i] > t - HRV_MA_MIN * 60; i--) { s += T.v[i]; c++; }
+    T.ma.push(s / c);
+    drawHrvTrend();
+  }
+  // full-width HRV trend card: RMSSD per minute (dots), its 5-minute moving
+  // average and the live smoothed RMSSD, over the whole session, clock on x
+  function makeHrvTrend() {
+    const host = $("hrv-chart");
+    const clock = (u, splits) => splits.map((v) =>
+      new Date(v * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }));
+    hrvPlot = new uPlot({
+      width: host.clientWidth, height: 220,
+      cursor: { y: false, drag: { x: false, y: false, setScale: false }, points: { size: 6 } },
+      padding: [8, 12, 0, 0],
+      scales: { x: { time: false },
+                y: { range: (u, lo, hi) => {             // margin above/below, >= 10 ms span
+                  if (lo == null || !(hi >= lo)) return [0, 100];
+                  const mid = (lo + hi) / 2, half = Math.max(hi - lo, 10) * 0.6;
+                  return [Math.max(0, mid - half), mid + half];
+                } } },
+      axes: [
+        { stroke: COL.text, font: FONT, grid: { stroke: COL.grid }, ticks: { show: false },
+          space: 70, incrs: [60, 120, 300, 600, 900, 1800, 3600, 7200], values: clock },
+        { stroke: COL.text, font: FONT, grid: { stroke: COL.grid }, ticks: { show: false },
+          label: "RMSSD ms", labelSize: 14, labelFont: FONT, size: 50 },
+      ],
+      series: [
+        { label: "time", value: (u, v) => v == null ? "–" : new Date(v * 1000).toLocaleTimeString([], { hour12: false }) },
+        { label: "RMSSD / minute", stroke: COL.text, width: 0, paths: () => null,
+          points: { show: true, size: 6, fill: COL.text, stroke: COL.text },
+          value: (u, v) => v == null ? "–" : v.toFixed(0) + " ms" },
+        { label: `${HRV_MA_MIN}-min average`, stroke: COL.ecg, width: 2, spanGaps: true, points: { show: false },
+          value: (u, v) => v == null ? "–" : v.toFixed(0) + " ms" },
+        { label: "live (smoothed)", stroke: COL.y, width: 1, spanGaps: true, points: { show: false },
+          value: (u, v) => v == null ? "–" : v.toFixed(0) + " ms" },
+      ],
+    }, [[], [], [], []], host);
+  }
+  function drawHrvTrend() {
+    if (!hrvPlot) return;
+    const T = hrvTrend, L = hrvLive;
+    if (!T.t.length && !L.t.length) return;
+    hrvPlot.setData(uPlot.join([[T.t, T.v, T.ma], [L.t, L.v]]));
+    setText("hrv-span", T.t.length ? `${T.t.length} min` : "first minute…");
+  }
+
 
   // place RR values ending at beat position `end` (sample index or time)
   function placeRr(rr, end, byIdx) {
@@ -244,7 +456,7 @@
     { key: "x",   label: "X",   h: 66,  color: COL.x,   width: 1,   minSpan: 400 },
     { key: "y",   label: "Y",   h: 66,  color: COL.y,   width: 1,   minSpan: 400 },
     { key: "z",   label: "Z",   h: 66,  color: COL.z,   width: 1,   minSpan: 400 },
-    { key: "rr",  label: "RR ms", h: 140, color: COL.rr, width: 1.4, minSpan: 80, bottom: true },
+    { key: "rr",  label: "HR bpm", h: 140, color: COL.rr, width: 1.4, minSpan: 6, bottom: true },
   ];
 
   function laneOpts(L, width) {
@@ -398,13 +610,22 @@
     // accelerometer: walk back from the newest sample
     accXs.length = 0; accVs.x.length = 0; accVs.y.length = 0; accVs.z.length = 0;
     const mm = { x: [Infinity, -Infinity], y: [Infinity, -Infinity], z: [Infinity, -Infinity] };
-    const accT = (k) => accFit.t(accI[k % ACC_RING]);
+    const accT = (k) => {
+      const j = k % ACC_RING, e = accE[j];
+      return e === e ? ecgFit.t(e) : accFit.t(accI[j]);
+    };
     let first = accN;
     while (first > 0 && accN - first < ACC_RING && accT(first - 1) >= tStart - 0.1) first--;
     if (first > 0 && accN - first < ACC_RING) first--;   // one sample left of the edge
     for (let k = first; k < accN; k++) {
       const j = k % ACC_RING, x = accT(k);
       if (x > tEnd + 0.1) break;
+      // missing accel packets (strap drops accel first when its TX queue fills):
+      // break the line instead of drawing a straight segment across the gap
+      if (accXs.length && x - accXs[accXs.length - 1] > 3 / ACC_FS) {
+        accXs.push((x + accXs[accXs.length - 1]) / 2);
+        for (const c of ["x", "y", "z"]) accVs[c].push(null);
+      }
       accXs.push(x);
       for (const [c, arr] of ACC_CH) {
         const v = arr[j]; accVs[c].push(v);
@@ -413,20 +634,21 @@
     }
     for (const c of ["x", "y", "z"]) update(c, [accXs, accVs[c]], xr, mm[c][0], mm[c][1]);
 
-    // RR points (the line is drawn beat to beat)
+    // beat-to-beat HR (60000 / RR) at each beat, drawn beat to beat
     const rx = [], ry = [];
     let rmin = Infinity, rmax = -Infinity;
     for (const p of rrPts) {
       const x = xOfPt(p);
-      if (x < tStart - 3 || x > tEnd + 1) continue;
-      rx.push(x); ry.push(p.v);
-      if (p.v < rmin) rmin = p.v; if (p.v > rmax) rmax = p.v;
+      if (x < tStart - 3 || x > tEnd + 1 || !(p.v > 0)) continue;
+      const bpm = 60000 / p.v;
+      rx.push(x); ry.push(bpm);
+      if (bpm < rmin) rmin = bpm; if (bpm > rmax) rmax = bpm;
     }
     update("rr", [rx, ry], xr, rmin, rmax);
   }
 
   // ---------- signal-averaged beat ----------
-  const avgX = Array.from({ length: AVG_LEN }, (_, i) => Math.round((i - AVG_PRE) / FS * 1000));
+  let avgX = Array.from({ length: AVG_LEN }, (_, i) => (i - AVG_PRE) / FS * 1000);
   let avgPlot = null;
   function avgN() {
     const n = parseInt($("avg-n")?.value, 10);
@@ -448,14 +670,47 @@
       series: [{}, { stroke: COL.ecg, width: 2, points: { show: false } }],
     }, [avgX, avgX.map(() => null)], host);
   }
+  function avgStats() {                 // mean and SD per sample over the collected beats
+    const n = segs.length, mean = new Array(AVG_LEN).fill(0), sd = new Array(AVG_LEN).fill(0);
+    for (const seg of segs) for (let i = 0; i < AVG_LEN; i++) mean[i] += seg[i];
+    for (let i = 0; i < AVG_LEN; i++) mean[i] /= n;
+    if (n > 1) {
+      for (const seg of segs) for (let i = 0; i < AVG_LEN; i++) sd[i] += (seg[i] - mean[i]) ** 2;
+      for (let i = 0; i < AVG_LEN; i++) sd[i] = Math.sqrt(sd[i] / (n - 1));
+    }
+    return { n, mean, sd };
+  }
   function drawAvg() {
     while (segs.length > avgN()) segs.shift();
     setText("avg-count", segs.length);
+    $("avg-csv").disabled = !segs.length;
     if (!segs.length) return;
-    const avg = new Array(AVG_LEN).fill(0);
-    for (const seg of segs) for (let i = 0; i < AVG_LEN; i++) avg[i] += seg[i];
-    for (let i = 0; i < AVG_LEN; i++) avg[i] /= segs.length;
-    avgPlot.setData([avgX, avg]);
+    avgPlot.setData([avgX, avgStats().mean]);
+  }
+  function clearAvg() {
+    segs.length = 0; pendingSegs.length = 0;
+    avgPlot.setData([avgX, avgX.map(() => null)]);
+    drawAvg();
+  }
+  function downloadAvg() {
+    if (!segs.length) return;
+    const { n, mean, sd } = avgStats();
+    const stamp = new Date();
+    const lines = [
+      `# HRM Raw RR signal-averaged beat (R-aligned at t_ms = 0)`,
+      `# exported ${stamp.toISOString()}, ${n} beats, ECG ${FS} Hz, display notch ${notch.f0 ? notch.f0 + " Hz" : (strapNotchHz ? "in strap " + strapNotchHz + " Hz" : "off")}`,
+      "t_ms,mean_adc,sd_adc",
+    ];
+    for (let i = 0; i < AVG_LEN; i++)
+      lines.push(`${((i - AVG_PRE) * 1000 / FS).toFixed(3)},${mean[i].toFixed(2)},${sd[i].toFixed(2)}`);
+    const pad = (v) => String(v).padStart(2, "0");
+    const name = `hrm_avg_beat_${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}_` +
+                 `${pad(stamp.getHours())}${pad(stamp.getMinutes())}${pad(stamp.getSeconds())}.csv`;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([lines.join("\n") + "\n"], { type: "text/csv" }));
+    a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
 
   // ---------- render loop ----------
@@ -639,6 +894,8 @@
     for (const L of LANES) lanes[L.key].u.setSize({ width: w, height: L.h });
     const a = $("avg-chart");
     if (avgPlot) avgPlot.setSize({ width: a.clientWidth, height: a.clientHeight || 300 });
+    const h = $("hrv-chart");
+    if (hrvPlot) hrvPlot.setSize({ width: h.clientWidth, height: 220 });
   }
 
   // ---------- DOM panels ----------
@@ -678,24 +935,42 @@
   const AUTO = "";   // select value for "auto: find by name"
 
   function send(obj) {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+    if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify(obj)); return true; }
+    setText("status-text", "Not connected to the app — reconnecting…");
+    return false;
   }
 
+  // Connection state machine as the user sees it:
+  //   Connect    -> Connecting… -> Connected | Failed (auto-retry countdown)
+  //   Disconnect -> Disconnecting… -> Disconnected
+  // A click shows its "…ing" state immediately (`pending`) until the backend's
+  // next status confirms or replaces it.
+  let pending = null;            // "connecting" | "disconnecting" | null
+  function uiState() {
+    if (pending) return pending;
+    switch (status.state) {
+      case "connected": return "connected";
+      case "scanning": case "connecting": return "connecting";
+      case "disconnected": return "reconnecting";
+      case "failed": case "waiting": case "error": return "failed";
+      case "disconnecting": return "disconnecting";
+      case "demo": return "demo";
+      case "idle": return "disconnected";
+      default: return "disconnected";
+    }
+  }
   function statusLabel() {
     const s = status;
-    switch (s.state) {
-      case "connected": return "connected" + (s.detail ? " · " + s.detail : "");
-      case "connecting": return "connecting" + (s.detail ? " · " + s.detail : "") + "…";
-      case "scanning": return "scanning for " + targetName() + "…";
-      case "waiting": {
-        const left = Math.max(0, Math.round((s.next_scan || 0) - Date.now() / 1000));
-        return `not found · next scan in ${left} s`;
-      }
-      case "idle": return "disconnected";
-      case "disconnected": return "link lost · reconnecting…";
-      case "demo": return "demo mode";
-      case "error": return s.detail || "error";
-      default: return s.state;
+    const left = Math.max(0, Math.round((s.next_scan || 0) - Date.now() / 1000));
+    switch (uiState()) {
+      case "connected": return "Connected" + (s.detail ? " · " + s.detail : "");
+      case "connecting":
+        return "Connecting… " + (s.state === "connecting" && s.detail ? s.detail : "searching " + targetName());
+      case "reconnecting": return "Connection lost · reconnecting…";
+      case "failed": return `Failed: ${s.detail || "error"}` + (s.next_scan ? ` · retry in ${left} s` : "");
+      case "disconnecting": return "Disconnecting…";
+      case "demo": return "Demo mode";
+      default: return "Disconnected";
     }
   }
   function targetName() {
@@ -708,15 +983,39 @@
     if (!["connected", "demo"].includes(msg.state) && ["connected", "demo"].includes(status.state))
       stream("link", null);        // ordered with the data, so a paused replay sees it too
     status = msg;
+    // the backend has acted on the click once it reports anything but the old state
+    if (pending === "disconnecting" && ["idle", "disconnecting"].includes(msg.state)) pending = null;
+    if (pending === "connecting" && msg.state !== "idle") pending = null;
+    renderStatus();
+  }
+  function renderStatus() {
+    const st = uiState();
     const el = $("status");
     el.classList.remove("status-on", "status-off", "status-demo", "status-wait", "status-idle");
-    el.classList.add({ connected: "status-on", demo: "status-demo", scanning: "status-wait",
-                       connecting: "status-wait", waiting: "status-wait", idle: "status-idle" }[msg.state]
-                     || "status-off");
+    el.classList.add({ connected: "status-on", demo: "status-demo", connecting: "status-wait",
+                       reconnecting: "status-wait", disconnecting: "status-wait",
+                       disconnected: "status-idle" }[st] || "status-off");
     setText("status-text", statusLabel());
+    $("status").title = statusLabel();
     renderDevices();
   }
-  setInterval(() => { if (status.state === "waiting") setText("status-text", statusLabel()); }, 1000);
+  setInterval(() => { if (uiState() === "failed") setText("status-text", statusLabel()); }, 1000);
+
+  // connection parameters the strap reports (a1b20004)
+  let link = null;
+  function onLink(msg) {
+    link = msg;
+    setText("ecg-fs", fsLabel());
+    if (msg.vdd_min_mv != null) {   // strap supply: resting max and TX-burst dip since the last reading
+      $("battery").title = `VDD ${(msg.vdd_max_mv / 1000).toFixed(2)} V resting, ` +
+                           `dips to ${(msg.vdd_min_mv / 1000).toFixed(2)} V under radio load (last minute)`;
+      setText("batt-vdd", `${(msg.vdd_min_mv / 1000).toFixed(2)}–${(msg.vdd_max_mv / 1000).toFixed(2)} V`);
+    }
+  }
+  function fsLabel() {
+    return FS + " Hz" + (link ? ` · CI ${link.interval_ms} ms · MTU ${link.mtu}` : "") +
+      (link && link.conn_count > 1 ? ` · ⚠ ${link.conn_count} hosts connected` : "");
+  }
 
   function onDevices(msg) {
     devices = msg.devices || [];
@@ -747,13 +1046,19 @@
     }));
     sel.value = keep;
 
-    const enabled = status.enabled !== false;
+    // Fixed labels, fixed widths: only enabled/disabled changes, so nothing moves.
+    //   disconnected / failed : Connect (failed: retry now)   | Disconnect only if retrying
+    //   connecting / reconn.  : Connect off                   | Disconnect = cancel
+    //   connected             : Connect only to switch device | Disconnect
+    //   disconnecting         : both off
+    const st0 = uiState(), st = st0 === "demo" ? "connected" : st0;   // demo behaves as connected
     const scanning = devScanning || status.state === "scanning";
-    $("scan-btn").textContent = scanning ? "Scanning…" : "⟳ Scan";
-    $("scan-btn").disabled = scanning;
-    $("disc-btn").disabled = !enabled;
-    // Connect is useful when idle, or to switch to a different target
-    $("conn-btn").disabled = enabled && sel.value === current;
+    $("scan-btn").classList.toggle("busy", scanning);
+    $("scan-btn").disabled = scanning || st === "disconnecting";
+    $("conn-btn").disabled = !(st === "disconnected" || st === "failed" ||
+                               (st === "connected" && sel.value !== current));
+    $("disc-btn").disabled = !(st === "connecting" || st === "reconnecting" || st === "connected" ||
+                               (st === "failed" && status.enabled !== false));
   }
 
   function initDevicePicker() {
@@ -761,10 +1066,24 @@
     sel.addEventListener("change", () => { userPicked = true; renderDevices(); });
     $("conn-btn").addEventListener("click", () => {
       const opt = sel.selectedOptions[0];
-      send({ cmd: "connect", address: sel.value || null, name: opt ? opt.dataset.name : "" });
+      if (!send({ cmd: "connect", address: sel.value || null, name: opt ? opt.dataset.name : "" })) return;
       userPicked = false;
+      pending = "connecting"; renderStatus();
     });
-    $("disc-btn").addEventListener("click", () => send({ cmd: "disconnect" }));
+    $("disc-btn").addEventListener("click", () => {
+      if (!send({ cmd: "disconnect" })) return;
+      pending = "disconnecting"; renderStatus();
+    });
+    $("take-raw").addEventListener("click", () => send({ cmd: "take_raw" }));
+    $("avg-clear").addEventListener("click", clearAvg);
+    $("avg-csv").addEventListener("click", downloadAvg);
+    const ns = $("notch-sel");
+    ns.value = String(notch.f0 || 0);
+    ns.addEventListener("change", () => {
+      notchPref = notch.f0 = +ns.value;
+      try { localStorage.setItem("hrm.notch", ns.value); } catch (e) {}
+      notch.refilter();
+    });
     $("scan-btn").addEventListener("click", () => { devScanning = true; renderDevices(); send({ cmd: "scan" }); });
     renderDevices();
   }
@@ -778,6 +1097,9 @@
       case "battery": onBattery(msg); break;
       case "status": onStatus(msg); break;
       case "devices": onDevices(msg); break;
+      case "link": onLink(msg); break;
+      case "raw": $("raw-note").hidden = msg.state !== "other"; break;
+      case "ecg_info": onEcgInfo(msg); break;
     }
   }
 
@@ -800,12 +1122,14 @@
   }
 
   // handle for poking at the clocks from the devtools console
-  window.hrmDebug = { ecgFit, accFit, delay: () => delayNow, paused: () => paused };
+  window.hrmDebug = { get ecgFit() { return ecgFit; }, accFit, fs: () => FS,
+                      delay: () => delayNow, paused: () => paused };
 
   // ---------- init ----------
   window.addEventListener("load", () => {
     makeStrip();
     makeAvg();
+    makeHrvTrend();
     initZoom();
     initPauseMeasure();
     initDevicePicker();

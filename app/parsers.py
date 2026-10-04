@@ -34,8 +34,47 @@ def parse_hr(b: bytes) -> dict:
     return {"flags": f, "hr": hr, "contact": contact, "rr": rr}
 
 
+def parse_ecg_info(b: bytes) -> dict:
+    """ECG stream info, char a1b20003 (read once on connect), little-endian:
+    u16 sample_hz, u16 raw_batch, u8 sample_bytes, u8 fmt_ver
+    [+ u16 acc_div: accel is read every acc_div ECG ticks -- 8-byte firmware]
+    [+ u8 flags: bit0 stream is mains-notched in firmware, bit1 notch at 60 Hz
+       (else 50 Hz) -- 9-byte firmware]."""
+    b = bytes(b)
+    hz, batch, nbytes, ver = struct.unpack_from("<HHBB", b, 0)
+    d = {"sample_hz": hz, "raw_batch": batch, "sample_bytes": nbytes, "fmt_ver": ver}
+    if len(b) >= 8:
+        d["acc_div"] = struct.unpack_from("<H", b, 6)[0]
+    if len(b) >= 9:
+        d["notched_hz"] = (60 if b[8] & 2 else 50) if b[8] & 1 else 0
+    return d
+
+
+def parse_link(b: bytes) -> dict:
+    """Link diagnostics, char a1b20004 (read), little-endian u16 x4: connection
+    interval (1.25 ms units), peripheral latency, supervision timeout (10 ms
+    units), ATT MTU -- what the strap actually got from the central
+    [+ u8 conn_count: centrals connected right now -- 9-byte firmware]
+    [+ u8 raw owner of the raw ECG stream: 0 none, 1 this connection, 2 another
+       connection -- 10-byte firmware; one host gets raw ECG, last subscriber wins]."""
+    b = bytes(b)
+    iv, lat, tmo, mtu = struct.unpack_from("<HHHH", b, 0)
+    d = {"interval_ms": iv * 1.25, "latency": lat, "timeout_ms": tmo * 10, "mtu": mtu}
+    if len(b) >= 9:
+        d["conn_count"] = b[8]
+    if len(b) >= 10:
+        d["raw_owner"] = {0: "none", 1: "mine", 2: "other"}.get(b[9], "other")
+    if len(b) >= 14:
+        # VDD extremes since the previous read of this char (the strap resets them
+        # on every read): min = TX-burst dip, max = resting
+        d["vdd_min_mv"], d["vdd_max_mv"] = struct.unpack_from("<HH", b, 10)
+    return d
+
+
 def parse_ecg(b: bytes):
-    """Raw ECG, char a1b20002: uint16 seq/tag + N x int16 samples @250 Hz."""
+    """Raw ECG, char a1b20002: uint16 seq/tag + N x 16-bit samples at the rate
+    reported by a1b20003 (250 Hz on older firmware). Parsed as int16 so a slightly
+    negative SAADC reading (sent as its uint16 two's complement) stays negative."""
     b = bytes(b)
     seq = struct.unpack_from("<H", b, 0)[0]
     samples = [struct.unpack_from("<h", b, i)[0] for i in range(2, len(b) - 1, 2)]
@@ -43,24 +82,31 @@ def parse_ecg(b: bytes):
 
 
 def parse_accel(b: bytes) -> dict:
-    """Accelerometer, char a1b30002, ~25 Hz. Two layouts, told apart by length:
+    """Accelerometer, char a1b30002, ~25 Hz. Three layouts, told apart by length:
 
     legacy (8 B):        int16 x, y, z + uint16 step_count      (one sample)
-    batched (3 + 6n B):  uint8 n, n x (int16 x, y, z), uint16 step_count of the
+    v1 (3 + 6n B):       uint8 n, n x (int16 x, y, z), uint16 step_count of the
                          last sample                             (n samples, oldest first)
+    v2 (6 + 6n B):       v1 + uint16 ecg_seq + uint8 ecg_off: the ECG position
+                         (packet seq, offset in it) of the LAST accel sample, so
+                         accel can be placed on the ECG timebase exactly
 
-    Returns {"samples": [(x, y, z), ...], "steps": int}.
+    Returns {"samples": [(x, y, z), ...], "steps": int[, "ecg_seq", "ecg_off"]}.
     """
     b = bytes(b)
     if len(b) == 8:
         x, y, z, steps = struct.unpack_from("<hhhH", b, 0)
         return {"samples": [(x, y, z)], "steps": steps}
     n = b[0]
-    if n == 0 or len(b) < 3 + 6 * n:
+    v2 = len(b) == 6 + 6 * n
+    if n == 0 or not (v2 or len(b) == 3 + 6 * n):
         raise ValueError(f"bad accel packet: {len(b)} B, n={n}")
     samples = [struct.unpack_from("<hhh", b, 1 + 6 * k) for k in range(n)]
     steps = struct.unpack_from("<H", b, 1 + 6 * n)[0]
-    return {"samples": samples, "steps": steps}
+    d = {"samples": samples, "steps": steps}
+    if v2:
+        d["ecg_seq"], d["ecg_off"] = struct.unpack_from("<HB", b, 3 + 6 * n)
+    return d
 
 
 def parse_ectopy(b: bytes) -> dict:
