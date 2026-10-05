@@ -65,7 +65,8 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
                                            * gates the AFE -> READ ONLY, never drive it. */
 #define OFFBODY_MS     60000              /* off-body + no motion this long -> sleep */
 #define MAX_ACTIVE_MS  (3LL*60*60*1000)   /* 3 h max session -> sleep           */
-#define PROBATION_MS   60000              /* advertise this long after wake; no connection -> sleep */
+#define PROBATION_MS   60000              /* advertise this long after wake; not worn -> sleep */
+#define ASSIST_MS      5000               /* P0.12 pull-up assist window while the AFE latches on */
 #define CONTACT_DEB    (SAMPLE_HZ/2)      /* P0.12 contact debounce samples (~0.5 s, fs-relative) */
 #define MOTION_THR     1200               /* accel high-pass magnitude that counts as "moving" */
 #define LED_PULSE_N    (SAMPLE_HZ*12/1000) /* ~12 ms LED pulse per beat (fs-relative) */
@@ -716,6 +717,15 @@ static void accel_thread_fn(void *a, void *b, void *c)
 }
 K_THREAD_DEFINE(accel_tid, 640, accel_thread_fn, NULL, NULL, NULL, 5, 0, 0);
 
+/* True if P0.12 reads on-body for >75% of a ~win_ms window (read-only, no ADC). */
+static bool onbody_held(int win_ms)
+{
+	int hi = 0, n = win_ms / 10;
+	if (n < 1) n = 1;
+	for (int i = 0; i < n; i++) { if (nrf_gpio_pin_read(CONTACT_PIN)) hi++; k_msleep(10); }
+	return hi * 4 > n * 3;
+}
+
 int main(void)
 {
 	uint8_t raw_buf[2 + RAW_BATCH * 2];
@@ -768,15 +778,48 @@ int main(void)
 		LOG_ERR("saadc ECG mode failed");
 		return -1;
 	}
+	/* ---- AFE-friendly startup --------------------------------------------
+	 * The AFE wakes slowly and is sensitive to supply noise; running the ADC +
+	 * DSP while it is still settling injects CPU/supply noise that disturbs it,
+	 * which makes more noise -- a feedback loop. So after wake we ONLY advertise
+	 * and READ P0.12 (on-body); the ADC/DSP stay off until the AFE reports a held
+	 * on-body contact (someone put the belt on). Then a 5 s weak pull-up assists
+	 * the AFE to latch on (LED blinks 2 Hz), we release the pin back to read-only,
+	 * confirm the contact persists, and only then start sampling. Nobody wears it
+	 * within PROBATION_MS -> back to sleep. */
+	int64_t wake = k_uptime_get();
+	bool running = false;
+	while (!running) {
+		/* phase 1: wait until the AFE's on-body line (P0.12) looks like it's coming
+		 * up -- a light ~200 ms debounce, since the AFE wakes slowly/weakly and we
+		 * only need "someone put it on"; the real confirmation is the post-assist
+		 * persistence check. Off-body P0.12 sits solidly low, so no false trigger. */
+		led_off();
+		int lp = 0;
+		const int ONBODY_DETECT = 50;   /* ~200 ms at the 4 ms poll */
+		while (lp < ONBODY_DETECT) {
+			if (k_uptime_get() - wake > PROBATION_MS) enter_deep_sleep();  /* not worn in 1 min */
+			if (nrf_gpio_pin_read(CONTACT_PIN)) { lp++; }
+			else if (lp > 0) { lp--; }
+			k_msleep(4);
+		}
+		/* phase 2: 5 s weak pull-up assist + 2 Hz LED blink (~100 ms flashes) */
+		nrf_gpio_cfg_input(CONTACT_PIN, NRF_GPIO_PIN_PULLUP);   /* pull-up assist, NOT an output drive */
+		for (int64_t a0 = k_uptime_get(); k_uptime_get() - a0 < ASSIST_MS; ) {
+			led_on(); k_msleep(100); led_off(); k_msleep(400);
+		}
+		nrf_gpio_cfg_input(CONTACT_PIN, NRF_GPIO_PIN_NOPULL);   /* back to read-only for normal op */
+		/* phase 3 gate: did on-body persist after releasing the pull-up? */
+		running = onbody_held(500);
+		wake = k_uptime_get();   /* restart the probation window if it fell off */
+	}
 	nrfx_saadc_buffer_set(adc_bufs[0], ADC_BUF_SMP);
-	nrfx_saadc_offset_calibrate(saadc_handler);   /* -> CALIBRATEDONE -> mode_trigger */
+	nrfx_saadc_offset_calibrate(saadc_handler);   /* -> CALIBRATEDONE -> mode_trigger: sampling starts */
 
-	int64_t active_start = k_uptime_get();
-	last_beat_ms = active_start;
-	last_motion_ms = active_start;
-	int64_t session_start = 0;     /* set when a connection first appears (contact alone won't) */
-	bool was_on_body = false;      /* did P0.12 ever report on-body this session */
-	int  contact_lp = 0;           /* P0.12 debounce integrator */
+	int64_t session_start = k_uptime_get();
+	last_beat_ms = session_start;
+	last_motion_ms = session_start;
+	int  contact_lp = CONTACT_DEB;   /* we entered RUN on a held on-body contact */
 
 	/* Processing loop: the SAADC fills buffers via DMA in hardware; here we just
 	 * drain filled buffers, average OVERSAMPLE raw samples -> one 500 Hz sample,
@@ -814,31 +857,18 @@ int main(void)
 				rn = 0;
 			}
 
-			/* ---- power state machine (P0.12 contact + BLE conn + accel motion) ----
-			 * wake(shake) -> advertise; PROBATION: sleep if nobody CONNECTS in 1 min
-			 * (being worn is not enough -- a connection starts the session).
-			 * connection -> engaged, start the 3 h session.
-			 * engaged: sleep if 3 h elapsed (drops conns), OR off-body + no motion for
-			 * 1 min AND (it was worn OR nobody is connected). Motion INT on P0.14 wakes.
-			 * (accelerometer + battery run elsewhere: accel in its own 25 Hz thread,
-			 * battery one-shot at boot.) */
+			/* ---- power state machine (running = already on-body) ----
+			 * Sleep when the 3 h session cap elapses, OR the belt is taken off
+			 * (P0.12 off-body) and there's no motion for 1 min. Motion INT on
+			 * P0.14 wakes from System OFF. (Startup/on-body gating is handled
+			 * before this loop; accel runs in its own thread, battery at boot.) */
 			int64_t now = k_uptime_get();
 			if (nrf_gpio_pin_read(CONTACT_PIN)) { if (contact_lp < CONTACT_DEB) contact_lp++; }
 			else                                { if (contact_lp > 0) contact_lp--; }
 			bool contact = contact_lp > (CONTACT_DEB / 2);
-			if (contact) was_on_body = true;
-			bool is_connected = conn_count > 0;
-			if (session_start == 0 && is_connected) session_start = now;   /* only a connection commits */
 
-			bool go_sleep;
-			if (session_start == 0) {
-				go_sleep = (now - active_start > PROBATION_MS);        /* nobody connected in 1 min */
-			} else if (now - session_start > MAX_ACTIVE_MS) {
-				go_sleep = true;                                       /* 3 h cap */
-			} else {
-				go_sleep = !contact && (now - last_motion_ms > OFFBODY_MS) &&
-					   (was_on_body || !is_connected);             /* off-body + still */
-			}
+			bool go_sleep = (now - session_start > MAX_ACTIVE_MS) ||        /* 3 h cap */
+					(!contact && (now - last_motion_ms > OFFBODY_MS)); /* off-body + still */
 			if (go_sleep) enter_deep_sleep();   /* drops connections, System OFF; does not return */
 		}
 	}
