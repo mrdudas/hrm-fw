@@ -64,13 +64,6 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 #define MOTION_THR     1200               /* accel high-pass magnitude that counts as "moving" */
 #define LED_PULSE_N    3                  /* ~12 ms LED pulse per beat (energy-saving) */
 
-/* Display/stream mains filter @250 Hz: 50 Hz notch (Q=5, wide so it rings little)
- * then a 40 Hz Butterworth low-pass (kills the notch's residual 50 Hz ring + EMG).
- * Deterministic LTI -- no adaptation, works on any signal. */
-static const float NOTCH_b[] = {0.88783976f, -0.54871515f, 0.88783976f};
-static const float NOTCH_a[] = {1.00000000f, -0.54871515f, 0.77567951f};
-static const float LP_b[]    = {0.14532388f,  0.29064777f, 0.14532388f};
-static const float LP_a[]    = {1.00000000f, -0.67102909f, 0.25232463f};
 /* 8-22 Hz band-pass (Butterworth order 2 -> 4th order section) @250 Hz */
 static const float BP_b[] = {0.02463061f, 0.0f, -0.04926122f, 0.0f, 0.02463061f};
 static const float BP_a[] = {1.0f, -3.31428620f, 4.28994755f, -2.57411291f, 0.60810569f};
@@ -325,6 +318,32 @@ static float iir(const float *b, const float *a, float *z, int n, float x)
 	}
 	z[n - 2] = b[n - 1] * x - a[n - 1] * y;
 	return y;
+}
+
+/* Levkov subtraction procedure for 50 Hz mains (deterministic, no ringing).
+ * 50 Hz @ 250 Hz = exactly 5 samples/period (LV_M). In LINEAR segments (slow ECG,
+ * low curvature) the mains over one period is estimated as sample - centred 5-tap
+ * mean (the mean sums one full period so it cancels the mains, leaving the ECG),
+ * and stored per phase. The stored periodic template is then subtracted from every
+ * sample -- including the QRS, where the template is HELD (curvature too high to
+ * update) so a beat never perturbs it. Output is delayed by LV_M samples (20 ms). */
+#define LV_M    5
+#define LV_CURV 120.0f    /* 2nd-difference-over-period above this = QRS -> hold the template */
+static float levkov(int16_t xin)
+{
+	static float b[2 * LV_M + 1];   /* b[0]=oldest .. b[2M]=newest */
+	static float iref[LV_M];
+	static uint32_t idx;
+	for (int i = 0; i < 2 * LV_M; i++) b[i] = b[i + 1];
+	b[2 * LV_M] = (float)xin;
+	idx++;
+	float centre = b[LV_M];
+	float ecg = (b[LV_M - 2] + b[LV_M - 1] + b[LV_M] + b[LV_M + 1] + b[LV_M + 2]) * 0.2f;
+	float curv = b[0] - 2.0f * b[LV_M] + b[2 * LV_M];
+	if (curv < 0) curv = -curv;
+	uint8_t p = (uint8_t)((idx - LV_M) % LV_M);
+	if (curv < LV_CURV) iref[p] = centre - ecg;   /* update template only in linear segments */
+	return centre - iref[p];
 }
 
 static uint8_t hr_from_rr(uint16_t rr_ms)
@@ -617,18 +636,16 @@ int main(void)
 		sample_idx += ticks;
 		if (led_off_idx && sample_idx >= led_off_idx) { led_off(); led_off_idx = 0; }
 
-		/* First processing step: deterministic mains filter -- 50 Hz notch then a
-		 * 40 Hz low-pass. The cleaned sample is both streamed ("raw") and fed to
-		 * the detector. */
-		static float notch_z[2], lp_z[2];
-		float nf = iir(NOTCH_b, NOTCH_a, notch_z, 3, (float)adc_raw);
-		float lf = iir(LP_b, LP_a, lp_z, 3, nf);
-		lf = CLAMP(lf + (lf >= 0 ? 0.5f : -0.5f), -32768.0f, 32767.0f);
-		int16_t ns = (int16_t)lf;
+		/* First processing step: Levkov 50 Hz subtraction (deterministic, no ring).
+		 * Output is delayed by LV_M samples; it is both streamed and fed to the
+		 * detector (constant delay -> RR timing unaffected). */
+		float lv = levkov(adc_raw);
+		lv = CLAMP(lv + (lv >= 0 ? 0.5f : -0.5f), -32768.0f, 32767.0f);
+		int16_t ns = (int16_t)lv;
 
 		detector_feed(ns);
 
-		/* raw (notch + 40 Hz low-passed) ECG streaming (only when a client subscribes) */
+		/* raw (mains-subtracted) ECG streaming (only when a client subscribes) */
 		sys_put_le16((uint16_t)ns, &raw_buf[2 + rn * 2]);
 		if (++rn >= RAW_BATCH) {
 			sys_put_le16(seq++, &raw_buf[0]);
