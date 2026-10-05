@@ -326,7 +326,7 @@ static float iir(const float *b, const float *a, float *z, int n, float x)
  * Unlike an IIR notch it does not ring, and the weight update freezes on QRS-sized
  * outliers (|err| > MAINS_GATE x the running mean |err|) so a beat can't drag the
  * estimate -- that is what removes the post-QRS 50 Hz ringing. Tunables below. */
-#define MAINS_MU    0.02f    /* LMS step: tracking speed vs noise */
+#define MAINS_MU    0.005f    /* LMS step: tracking speed vs noise */
 #define MAINS_GATE  6.0f     /* freeze update when |err| exceeds this x mean|err| */
 static float mains_cancel(int16_t x)
 {
