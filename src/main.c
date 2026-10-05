@@ -17,6 +17,7 @@
  */
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/adc.h>
+#include <zephyr/drivers/counter.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/poweroff.h>
@@ -32,7 +33,7 @@
 LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 
 /* ---- Tunables (filters are fs-specific: designed for 250 Hz) ---------- */
-#define SAMPLE_HZ      250
+#define SAMPLE_HZ      500            /* exact, from TIMER1 on the 16 MHz HFCLK (16M/32000) */
 #define REFRACTORY_MS  300            /* min beat gap (~200 bpm max)          */
 #define RR_MIN_MS      300
 #define RR_MAX_MS      2000
@@ -48,7 +49,7 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 #define SNR_GATE       8.0f           /* classify ectopy only when spki > this*npki (clean signal) */
 #define RAIL_LO        100            /* raw ADC near the bottom rail = contact artifact */
 #define RAIL_HI        3995           /* raw ADC near the top rail (12-bit, 0..4095)      */
-#define RAIL_WIN       25             /* samples (~100 ms) a rail flag persists           */
+#define RAIL_WIN       (SAMPLE_HZ/10)  /* ~100 ms a rail flag persists (fs-relative)       */
 #define MOTION_FRAC    5.0f           /* energy > this*normal QRS = contact spike (real PVC is ~2-3x) */
 #define TWAVE_LO_FRAC  0.4f           /* energy < this*normal QRS = T-wave/low (drop)      */
 
@@ -60,13 +61,13 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 #define OFFBODY_MS     60000              /* off-body + no motion this long -> sleep */
 #define MAX_ACTIVE_MS  (3LL*60*60*1000)   /* 3 h max session -> sleep           */
 #define PROBATION_MS   60000              /* advertise this long after wake; no connection -> sleep */
-#define CONTACT_DEB    125                /* P0.12 contact debounce samples (~0.5 s @250 Hz) */
+#define CONTACT_DEB    (SAMPLE_HZ/2)      /* P0.12 contact debounce samples (~0.5 s, fs-relative) */
 #define MOTION_THR     1200               /* accel high-pass magnitude that counts as "moving" */
-#define LED_PULSE_N    3                  /* ~12 ms LED pulse per beat (energy-saving) */
+#define LED_PULSE_N    (SAMPLE_HZ*12/1000) /* ~12 ms LED pulse per beat (fs-relative) */
 
-/* 8-22 Hz band-pass (Butterworth order 2 -> 4th order section) @250 Hz */
-static const float BP_b[] = {0.02463061f, 0.0f, -0.04926122f, 0.0f, 0.02463061f};
-static const float BP_a[] = {1.0f, -3.31428620f, 4.28994755f, -2.57411291f, 0.60810569f};
+/* 8-22 Hz band-pass (Butterworth order 2 -> 4th order section) @500 Hz */
+static const float BP_b[] = {0.00686787f, 0.0f, -0.01373573f, 0.0f, 0.00686787f};
+static const float BP_a[] = {1.0f, -3.70011109f, 5.18676736f, -3.26571330f, 0.77973946f};
 
 /* ---- ADC (AIN3 = P0.05 = ball F6) ------------------------------------ */
 static const struct adc_dt_spec adc_ch =
@@ -159,12 +160,30 @@ static void hrm_notify(uint8_t hr, uint16_t rr_1024)
 /* ---- Raw-ECG streaming service (custom) ------------------------------ */
 #define CAP_SVC  BT_UUID_128_ENCODE(0xa1b20001,0x0000,0x1000,0x8000,0x00805f9b34fb)
 #define CAP_CHR  BT_UUID_128_ENCODE(0xa1b20002,0x0000,0x1000,0x8000,0x00805f9b34fb)
+#define CAP_INFO BT_UUID_128_ENCODE(0xa1b20003,0x0000,0x1000,0x8000,0x00805f9b34fb)
 #define CAP_LINK BT_UUID_128_ENCODE(0xa1b20004,0x0000,0x1000,0x8000,0x00805f9b34fb)
 static struct bt_uuid_128 cap_svc_uuid  = BT_UUID_INIT_128(CAP_SVC);
 static struct bt_uuid_128 cap_chr_uuid  = BT_UUID_INIT_128(CAP_CHR);
+static struct bt_uuid_128 cap_info_uuid = BT_UUID_INIT_128(CAP_INFO);
 static struct bt_uuid_128 cap_link_uuid = BT_UUID_INIT_128(CAP_LINK);
 static uint8_t cap_ccc;
 static void cap_ccc_changed(const struct bt_gatt_attr *a, uint16_t v) { cap_ccc = (v == BT_GATT_CCC_NOTIFY); }
+
+/* Stream descriptor so the host sets its time axis from the strap, not a hard-coded
+ * rate. LE: u16 sample_hz, u16 raw_batch, u8 sample_bytes, u8 fmt_ver, u16 acc_div,
+ * u8 flags (bit0 = stream is mains-filtered in firmware; bit1 = 60 Hz, 0 = 50). */
+static ssize_t read_cap_info(struct bt_conn *c, const struct bt_gatt_attr *a,
+			     void *buf, uint16_t len, uint16_t off)
+{
+	uint8_t info[9];
+	sys_put_le16(SAMPLE_HZ, &info[0]);
+	sys_put_le16(RAW_BATCH, &info[2]);
+	info[4] = 2;
+	info[5] = 1;
+	sys_put_le16(SAMPLE_HZ / 25, &info[6]);
+	info[8] = 0x01;   /* mains-filtered (Levkov) @ 50 Hz */
+	return bt_gatt_attr_read(c, a, buf, len, off, info, sizeof(info));
+}
 
 /* Live link parameters for diagnosing host throughput (macOS hides these from its
  * apps, so the strap reports them). LE: u16 interval (1.25 ms units), u16 latency,
@@ -190,6 +209,8 @@ BT_GATT_SERVICE_DEFINE(cap_svc,
 	BT_GATT_CHARACTERISTIC(&cap_chr_uuid.uuid, BT_GATT_CHRC_NOTIFY,
 			       BT_GATT_PERM_NONE, NULL, NULL, NULL),
 	BT_GATT_CCC(cap_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+	BT_GATT_CHARACTERISTIC(&cap_info_uuid.uuid, BT_GATT_CHRC_READ,
+			       BT_GATT_PERM_READ, read_cap_info, NULL, NULL),
 	BT_GATT_CHARACTERISTIC(&cap_link_uuid.uuid, BT_GATT_CHRC_READ,
 			       BT_GATT_PERM_READ, read_cap_link, NULL, NULL),
 );
@@ -321,14 +342,14 @@ static float iir(const float *b, const float *a, float *z, int n, float x)
 }
 
 /* Levkov subtraction procedure for 50 Hz mains (deterministic, no ringing).
- * 50 Hz @ 250 Hz = exactly 5 samples/period (LV_M). In LINEAR segments (slow ECG,
- * low curvature) the mains over one period is estimated as sample - centred 5-tap
- * mean (the mean sums one full period so it cancels the mains, leaving the ECG),
- * and stored per phase. The stored periodic template is then subtracted from every
- * sample -- including the QRS, where the template is HELD (curvature too high to
- * update) so a beat never perturbs it. Output is delayed by LV_M samples (20 ms). */
-#define LV_M    5
-#define LV_CURV 120.0f    /* 2nd-difference-over-period above this = QRS -> hold the template */
+ * 50 Hz @ 500 Hz = exactly 10 samples/period (LV_M). In LINEAR segments (slow ECG,
+ * low curvature) the mains over one period is estimated as sample - one-period mean
+ * (the mean sums a full period so it cancels the mains, leaving the ECG), and stored
+ * per phase. The stored periodic template is then subtracted from every sample --
+ * including the QRS, where the template is HELD (curvature too high to update) so a
+ * beat never perturbs it. Output is delayed by LV_M samples (20 ms at 500 Hz). */
+#define LV_M    10
+#define LV_CURV 120.0f    /* 2nd-difference-over-period (20 ms span) above this = QRS -> hold */
 static float levkov(int16_t xin)
 {
 	static float b[2 * LV_M + 1];   /* b[0]=oldest .. b[2M]=newest */
@@ -338,7 +359,9 @@ static float levkov(int16_t xin)
 	b[2 * LV_M] = (float)xin;
 	idx++;
 	float centre = b[LV_M];
-	float ecg = (b[LV_M - 2] + b[LV_M - 1] + b[LV_M] + b[LV_M + 1] + b[LV_M + 2]) * 0.2f;
+	float sum = 0.0f;               /* one-period (LV_M-sample) mean -> mains-free ECG estimate */
+	for (int i = LV_M / 2; i < LV_M + LV_M / 2; i++) sum += b[i];
+	float ecg = sum / (float)LV_M;
 	float curv = b[0] - 2.0f * b[LV_M] + b[2 * LV_M];
 	if (curv < 0) curv = -curv;
 	uint8_t p = (uint8_t)((idx - LV_M) % LV_M);
@@ -502,8 +525,13 @@ static void detector_feed(int16_t sample)
 }
 
 /* ---- Sampling loop --------------------------------------------------- */
-static K_TIMER_DEFINE(sample_timer, NULL, NULL);   /* no callback; polled with k_timer_status_sync */
-static uint32_t lost_ticks;   /* ticks whose sample we couldn't read (sampler no longer blocks -> ~0) */
+/* Exact 500 Hz sample clock: TIMER1 (16 MHz HFCLK) via the counter driver. Its top
+ * callback (ISR) gives sample_sem; the sampling loop waits on it. The RTC-based
+ * k_timer can't make an exact 50 Hz-multiple rate, which the Levkov step needs. */
+static const struct device *const samp_tmr = DEVICE_DT_GET(DT_NODELABEL(timer1));
+static K_SEM_DEFINE(sample_sem, 0, 4);
+static uint32_t lost_ticks;   /* sem backlog when the loop fell behind a tick */
+static void samp_top_cb(const struct device *d, void *u) { ARG_UNUSED(d); ARG_UNUSED(u); k_sem_give(&sample_sem); }
 
 /* ---- SC7A20 accelerometer: motion-wake (I2C bit-bang, SCL=P0.16, SDA=P0.18,
  * addr 0x19). Its INT1 pin is wired to nRF P0.14 (active-high). We arm a motion
@@ -617,7 +645,19 @@ int main(void)
 		return -1;
 	}
 	k_work_init_delayable(&tx_dwork, tx_work_fn);
-	k_timer_start(&sample_timer, K_NO_WAIT, K_USEC(1000000 / SAMPLE_HZ));
+	/* start the exact 500 Hz sample clock on TIMER1 */
+	if (device_is_ready(samp_tmr)) {
+		struct counter_top_cfg tc = {
+			.ticks = counter_us_to_ticks(samp_tmr, 1000000 / SAMPLE_HZ),
+			.callback = samp_top_cb,
+			.user_data = NULL,
+			.flags = 0,
+		};
+		counter_set_top_value(samp_tmr, &tc);
+		counter_start(samp_tmr);
+	} else {
+		LOG_ERR("sample timer not ready");
+	}
 
 	int64_t active_start = k_uptime_get();
 	last_beat_ms = active_start;
@@ -627,10 +667,11 @@ int main(void)
 	int  contact_lp = 0;           /* P0.12 debounce integrator */
 
 	while (1) {
-		/* block until the next 250 Hz tick; ticks returns how many expired since
-		 * the last call, so sample_idx tracks real time even if one is ever missed */
-		uint32_t ticks = k_timer_status_sync(&sample_timer);
-		if (ticks > 1) lost_ticks += ticks - 1;
+		/* block until the next 500 Hz tick (TIMER1 top callback gives the sem). If
+		 * the loop fell behind, the sem backlog counts the missed ticks. */
+		k_sem_take(&sample_sem, K_FOREVER);
+		uint32_t ticks = 1 + k_sem_count_get(&sample_sem);
+		if (ticks > 1) { lost_ticks += ticks - 1; k_sem_reset(&sample_sem); }
 		if (adc_read_dt(&adc_ch, &adc_seq) != 0) continue;
 
 		sample_idx += ticks;
