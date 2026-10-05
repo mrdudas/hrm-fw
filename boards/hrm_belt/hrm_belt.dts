@@ -31,7 +31,7 @@
 		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 10)>;
 		zephyr,input-positive = <NRF_SAADC_AIN3>;   /* AIN3 = P0.05 = ball F6 */
 		zephyr,resolution = <12>;
-		zephyr,oversampling = <2>;
+		zephyr,oversampling = <0>;   /* 1x: 4x oversampling made adc_read_dt ~ms, capping the loop */
 	};
 
 	/* VDD (battery) measurement: gain 1/6, internal 0.6 V ref -> 0..3.6 V range */
@@ -48,13 +48,8 @@
 &gpio0    { status = "okay"; };
 &gpiote   { status = "okay"; };
 
-/* TIMER1 (16 MHz HFCLK) drives the exact 500 Hz sample clock via the counter
- * driver -- the RTC can't make an exact 50 Hz-multiple rate, which the Levkov
- * mains subtraction needs. TIMER0 belongs to the BLE controller; TIMER1 is free. */
-&timer1 {
-	status = "okay";
-	prescaler = <0>;   /* 16 MHz -> top 32000 = exactly 500 Hz */
-};
+/* ECG is sampled by the SAADC's own internal timer (8 kHz, averaged to 500 Hz)
+ * via nrfx + EasyDMA, so no external timer is needed for the sample clock. */
 
 /* nRF52805 flash: 192 kB. Single app slot (no MCUboot — we flash via SWD). */
 &flash0 {

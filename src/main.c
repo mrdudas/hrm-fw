@@ -16,8 +16,11 @@
  * 250 Hz in software float is trivial.)
  */
 #include <zephyr/kernel.h>
-#include <zephyr/drivers/adc.h>
-#include <zephyr/drivers/counter.h>
+#include <zephyr/drivers/clock_control.h>
+#include <zephyr/drivers/clock_control/nrf_clock_control.h>
+#include <nrfx.h>
+#include <nrfx_saadc.h>
+#include <hal/nrf_saadc.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/poweroff.h>
@@ -33,7 +36,7 @@
 LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 
 /* ---- Tunables (filters are fs-specific: designed for 250 Hz) ---------- */
-#define SAMPLE_HZ      500            /* exact, from TIMER1 on the 16 MHz HFCLK (16M/32000) */
+#define SAMPLE_HZ      500            /* ECG output rate: SAADC samples 8 kHz, averaged /16 */
 #define REFRACTORY_MS  300            /* min beat gap (~200 bpm max)          */
 #define RR_MIN_MS      300
 #define RR_MAX_MS      2000
@@ -69,32 +72,94 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 static const float BP_b[] = {0.00686787f, 0.0f, -0.01373573f, 0.0f, 0.00686787f};
 static const float BP_a[] = {1.0f, -3.70011109f, 5.18676736f, -3.26571330f, 0.77973946f};
 
-/* ---- ADC (AIN3 = P0.05 = ball F6) ------------------------------------ */
-static const struct adc_dt_spec adc_ch =
-	ADC_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user), 0);
-static int16_t adc_raw;
-static struct adc_sequence adc_seq = {
-	.buffer = &adc_raw, .buffer_size = sizeof(adc_raw),
+/* ---- SAADC: hardware-timed ECG sampling (immune to BLE preemption) ----
+ * The SAADC's own internal timer samples AIN3 (P0.05) into RAM via EasyDMA with
+ * ZERO per-sample CPU, so BLE connection events can no longer steal sample ticks
+ * (the former thread-polled 500 Hz loop lost ~30 % of ticks to the radio ISR).
+ * The internal timer's minimum rate is ~7.8 kHz (SAMPLERATE.CC is 11-bit), so we
+ * run it at 8 kHz and average every 16 raw samples down to an exact 500 Hz ECG
+ * stream (the 16x oversampling also lifts SNR ~12 dB). The internal timer needs a
+ * single channel, so VDD (battery) is read once per wake at boot. */
+#define ADC_HW_HZ      8000                      /* SAADC internal-timer rate         */
+#define OVERSAMPLE     (ADC_HW_HZ / SAMPLE_HZ)   /* 16 raw -> 1 output sample         */
+#define ADC_TIMER_CC   (16000000UL / ADC_HW_HZ)  /* 16 MHz / 8 kHz = 2000 (<= 2047 max) */
+#define ADC_BUF_SMP    (OVERSAMPLE * 5)          /* 80 raw/buffer -> 5 output, DONE every 10 ms */
+#define ADC_BUF_CNT    2
+
+static nrf_saadc_value_t adc_bufs[ADC_BUF_CNT][ADC_BUF_SMP];
+K_MSGQ_DEFINE(adc_doneq, sizeof(nrf_saadc_value_t *), ADC_BUF_CNT, sizeof(void *));
+static volatile uint32_t adc_overrun;   /* filled buffers dropped because processing lagged */
+
+/* ECG input channel: AIN3 (P0.05), gain 1/4, ref VDD/4 -> full-scale = VDD. */
+static const nrfx_saadc_channel_t ecg_channel = {
+	.channel_config = {
+		.resistor_p = NRF_SAADC_RESISTOR_DISABLED,
+		.resistor_n = NRF_SAADC_RESISTOR_DISABLED,
+		.gain       = NRF_SAADC_GAIN1_4,
+		.reference  = NRF_SAADC_REFERENCE_VDD4,
+		.acq_time   = NRF_SAADC_ACQTIME_10US,
+		.mode       = NRF_SAADC_MODE_SINGLE_ENDED,
+		.burst      = NRF_SAADC_BURST_DISABLED,
+	},
+	.pin_p = NRFX_ANALOG_EXTERNAL_AIN3,   /* AIN3 = P0.05 (nrfx 4.0 uses nrfx_analog_input_t, NOT the raw PSELP value) */
+	.pin_n = NRFX_ANALOG_INPUT_DISABLED,
+	.channel_index = 0,
 };
 
-/* VDD channel for the Battery Service */
-static const struct adc_dt_spec adc_vdd =
-	ADC_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user), 1);
-static int16_t vdd_raw;
-static struct adc_sequence vdd_seq = {
-	.buffer = &vdd_raw, .buffer_size = sizeof(vdd_raw),
-};
-
-/* Read VDD, map a CR2032 (~2.4 V empty .. 3.0 V full) to % and publish via BAS. */
-static void battery_update(void)
+/* SAADC event handler (ISR): keeps the double buffer full and hands filled
+ * buffers to the processing loop. The 10 ms buffer absorbs BLE stalls. */
+static void saadc_handler(nrfx_saadc_evt_t const *evt)
 {
-	if (adc_read_dt(&adc_vdd, &vdd_seq) != 0) {
-		return;
+	static uint8_t next = 1;   /* buf 0 is set before trigger; supply buf 1 first */
+	switch (evt->type) {
+	case NRFX_SAADC_EVT_CALIBRATEDONE:
+		nrfx_saadc_mode_trigger();              /* start continuous sampling */
+		break;
+	case NRFX_SAADC_EVT_BUF_REQ:
+		nrfx_saadc_buffer_set(adc_bufs[next], ADC_BUF_SMP);
+		next ^= 1;
+		break;
+	case NRFX_SAADC_EVT_DONE: {
+		nrf_saadc_value_t *p = evt->data.done.p_buffer;
+		if (k_msgq_put(&adc_doneq, &p, K_NO_WAIT) != 0) adc_overrun++;
+		break;
 	}
-	int32_t mv = vdd_raw;
-	if (adc_raw_to_millivolts_dt(&adc_vdd, &mv) != 0) {
-		return;
+	default:
+		break;
 	}
+}
+
+/* One blocking VDD conversion -> millivolts. gain 1/6, ref internal 0.6 V,
+ * 12-bit single-ended: RESULT = Vin * (1/6)/0.6 * 4096 -> Vin_mV = RESULT*3600/4096. */
+static int32_t adc_read_vdd_mv(void)
+{
+	static const nrfx_saadc_channel_t vdd_channel = {
+		.channel_config = {
+			.resistor_p = NRF_SAADC_RESISTOR_DISABLED,
+			.resistor_n = NRF_SAADC_RESISTOR_DISABLED,
+			.gain       = NRF_SAADC_GAIN1_6,
+			.reference  = NRF_SAADC_REFERENCE_INTERNAL,
+			.acq_time   = NRF_SAADC_ACQTIME_20US,
+			.mode       = NRF_SAADC_MODE_SINGLE_ENDED,
+			.burst      = NRF_SAADC_BURST_DISABLED,
+		},
+		.pin_p = NRFX_ANALOG_INTERNAL_VDD,
+		.pin_n = NRFX_ANALOG_INPUT_DISABLED,
+		.channel_index = 0,
+	};
+	nrf_saadc_value_t s = 0;
+	if (nrfx_saadc_channel_config(&vdd_channel) != 0) return -1;
+	if (nrfx_saadc_simple_mode_set(BIT(0), NRF_SAADC_RESOLUTION_12BIT,
+				       NRF_SAADC_OVERSAMPLE_DISABLED, NULL) != 0) return -1;
+	nrfx_saadc_buffer_set(&s, 1);
+	nrfx_saadc_mode_trigger();   /* blocking (no handler) */
+	return (int32_t)s * 3600 / 4096;
+}
+
+/* Map a CR2032 (~2.4 V empty .. 3.0 V full) to % and publish via BAS. */
+static void battery_update_mv(int32_t mv)
+{
+	if (mv < 0) return;
 	int32_t pct = (mv - 2400) * 100 / 600;
 	pct = CLAMP(pct, 0, 100);
 	bt_bas_set_battery_level((uint8_t)pct);
@@ -192,7 +257,7 @@ static volatile int conn_count;   /* defined once; also used by the power state 
 static ssize_t read_cap_link(struct bt_conn *c, const struct bt_gatt_attr *a,
 			     void *buf, uint16_t len, uint16_t off)
 {
-	uint8_t out[9] = {0};
+	uint8_t out[15] = {0};
 	struct bt_conn_info ci;
 	if (c && bt_conn_get_info(c, &ci) == 0 && ci.type == BT_CONN_TYPE_LE) {
 		sys_put_le16((uint16_t)(ci.le.interval_us / 1250), &out[0]);
@@ -201,6 +266,7 @@ static ssize_t read_cap_link(struct bt_conn *c, const struct bt_gatt_attr *a,
 	}
 	sys_put_le16(bt_gatt_get_mtu(c), &out[6]);
 	out[8] = (uint8_t)conn_count;
+	sys_put_le32(adc_overrun, &out[9]);   /* DMA buffers dropped if processing ever lagged */
 	return bt_gatt_attr_read(c, a, buf, len, off, out, sizeof(out));
 }
 
@@ -524,15 +590,6 @@ static void detector_feed(int16_t sample)
 	prev_energy = energy;
 }
 
-/* ---- Sampling loop --------------------------------------------------- */
-/* Exact 500 Hz sample clock: TIMER1 (16 MHz HFCLK) via the counter driver. Its top
- * callback (ISR) gives sample_sem; the sampling loop waits on it. The RTC-based
- * k_timer can't make an exact 50 Hz-multiple rate, which the Levkov step needs. */
-static const struct device *const samp_tmr = DEVICE_DT_GET(DT_NODELABEL(timer1));
-static K_SEM_DEFINE(sample_sem, 0, 4);
-static uint32_t lost_ticks;   /* sem backlog when the loop fell behind a tick */
-static void samp_top_cb(const struct device *d, void *u) { ARG_UNUSED(d); ARG_UNUSED(u); k_sem_give(&sample_sem); }
-
 /* ---- SC7A20 accelerometer: motion-wake (I2C bit-bang, SCL=P0.16, SDA=P0.18,
  * addr 0x19). Its INT1 pin is wired to nRF P0.14 (active-high). We arm a motion
  * (any-axis high-g) latched interrupt, then sleep in System OFF and wake via the
@@ -541,7 +598,7 @@ static void samp_top_cb(const struct device *d, void *u) { ARG_UNUSED(d); ARG_UN
 #define ACC_SDA 18
 #define ACC_ADDR 0x19
 #define ACC_INT_PIN 14
-#define AD() k_busy_wait(6)
+#define AD() k_busy_wait(3)   /* I2C half-bit ~200 kHz: the accel read fits the 500 Hz loop budget */
 static inline void a_scl_hi(void){ nrf_gpio_cfg_input(ACC_SCL, NRF_GPIO_PIN_PULLUP); }
 static inline void a_sda_hi(void){ nrf_gpio_cfg_input(ACC_SDA, NRF_GPIO_PIN_PULLUP); }
 static inline void a_sda_lo(void){ nrf_gpio_pin_clear(ACC_SDA); nrf_gpio_cfg_output(ACC_SDA); }
@@ -616,6 +673,47 @@ static void step_update(int16_t x, int16_t y, int16_t z)
 	}
 }
 
+/* Accelerometer thread (25 Hz), decoupled from the 500 Hz sampling loop.
+ * The bit-bang I2C read is a ~1-3 ms busy-wait that used to block the loop and
+ * cap the effective rate at ~320 Hz. Here it runs at a lower priority (5) than
+ * the sampling loop (0), so the loop's timer tick preempts it mid-transaction;
+ * the bit-bang I2C clock phase simply stretches across the preemption, which the
+ * SC7A20 tolerates (the master drives the clock, a paused clock is harmless).
+ * step_update keeps last_motion_ms fresh for the power state machine. */
+static volatile bool accel_ready;
+static void accel_thread_fn(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+	static uint8_t acc_batch[1 + ACC_BATCH * 6 + 2];
+	uint8_t acc_n = 0;
+	while (!accel_ready) k_msleep(20);
+	for (;;) {
+		int16_t xyz[3];
+		if (acc_read6(xyz)) {
+			step_update(xyz[0], xyz[1], xyz[2]);
+			/* batch ACC_BATCH samples into one notify (25 Hz -> 5/s): fewer
+			 * packets + less TX-queue pressure. Layout (LE): u8 n, then
+			 * n x (int16 x,y,z) oldest first, then u16 steps of the last. */
+			if (accs_ccc) {
+				uint8_t *s = &acc_batch[1 + acc_n * 6];
+				sys_put_le16(xyz[0], &s[0]);
+				sys_put_le16(xyz[1], &s[2]);
+				sys_put_le16(xyz[2], &s[4]);
+				if (++acc_n >= ACC_BATCH) {
+					acc_batch[0] = acc_n;
+					sys_put_le16(step_count, &acc_batch[1 + acc_n * 6]);
+					tx_enqueue(TX_ACCEL, acc_batch, 1 + acc_n * 6 + 2);
+					acc_n = 0;
+				}
+			} else {
+				acc_n = 0;
+			}
+		}
+		k_msleep(40);   /* ~25 Hz */
+	}
+}
+K_THREAD_DEFINE(accel_tid, 640, accel_thread_fn, NULL, NULL, NULL, 5, 0, 0);
+
 int main(void)
 {
 	uint8_t raw_buf[2 + RAW_BATCH * 2];
@@ -631,33 +729,45 @@ int main(void)
 	for (int i = 0; i < 2; i++) { led_on(); k_msleep(60); led_off(); k_msleep(120); } /* wake blink */
 
 	accel_init_motion_int();   /* arm SC7A20 motion INT -> P0.14 for deep-sleep wake */
+	accel_ready = true;        /* release the accel thread now the sensor is configured */
 
-	if (!adc_is_ready_dt(&adc_ch) || adc_channel_setup_dt(&adc_ch)) {
-		LOG_ERR("ADC setup failed");
+	/* Keep HFXO (16 MHz crystal) running so the SAADC internal sample timer is
+	 * crystal-accurate: the BLE stack only requests HFXO around radio events,
+	 * leaving HFCLK on the internal RC (~few % off) in between -- which would
+	 * detune the 8 kHz sample clock and break the Levkov exact-50 Hz assumption. */
+	{
+		const struct device *clk = DEVICE_DT_GET_ONE(nordic_nrf_clock);
+		if (device_is_ready(clk)) clock_control_on(clk, CLOCK_CONTROL_NRF_SUBSYS_HF);
+	}
+
+	/* SAADC: connect IRQ, init, read battery once, then (below) start continuous
+	 * hardware-timed ECG sampling. */
+	IRQ_CONNECT(DT_IRQN(DT_NODELABEL(adc)), DT_IRQ(DT_NODELABEL(adc), priority),
+		    nrfx_isr, nrfx_saadc_irq_handler, 0);
+	if (nrfx_saadc_init(DT_IRQ(DT_NODELABEL(adc), priority)) != 0) {
+		LOG_ERR("saadc init failed");
 		return -1;
 	}
-	adc_sequence_init_dt(&adc_ch, &adc_seq);
-	if (adc_is_ready_dt(&adc_vdd) && adc_channel_setup_dt(&adc_vdd) == 0) {
-		adc_sequence_init_dt(&adc_vdd, &vdd_seq);   /* battery (VDD) channel */
-	}
+	battery_update_mv(adc_read_vdd_mv());   /* one-shot VDD read per wake */
+
 	if (bt_enable(bt_ready)) {
 		LOG_ERR("bt_enable failed");
 		return -1;
 	}
 	k_work_init_delayable(&tx_dwork, tx_work_fn);
-	/* start the exact 500 Hz sample clock on TIMER1 */
-	if (device_is_ready(samp_tmr)) {
-		struct counter_top_cfg tc = {
-			.ticks = counter_us_to_ticks(samp_tmr, 1000000 / SAMPLE_HZ),
-			.callback = samp_top_cb,
-			.user_data = NULL,
-			.flags = 0,
-		};
-		counter_set_top_value(samp_tmr, &tc);
-		counter_start(samp_tmr);
-	} else {
-		LOG_ERR("sample timer not ready");
+
+	/* continuous ECG: single channel, advanced mode, internal 8 kHz timer -> DMA */
+	nrfx_saadc_adv_config_t adv = NRFX_SAADC_DEFAULT_ADV_CONFIG;
+	adv.internal_timer_cc = ADC_TIMER_CC;   /* 16 MHz / 8 kHz = 2000 */
+	adv.start_on_end      = true;           /* HW re-arms DMA into the next buffer */
+	if (nrfx_saadc_channel_config(&ecg_channel) != 0 ||
+	    nrfx_saadc_advanced_mode_set(BIT(0), NRF_SAADC_RESOLUTION_12BIT, &adv,
+					 saadc_handler) != 0) {
+		LOG_ERR("saadc ECG mode failed");
+		return -1;
 	}
+	nrfx_saadc_buffer_set(adc_bufs[0], ADC_BUF_SMP);
+	nrfx_saadc_offset_calibrate(saadc_handler);   /* -> CALIBRATEDONE -> mode_trigger */
 
 	int64_t active_start = k_uptime_get();
 	last_beat_ms = active_start;
@@ -666,91 +776,68 @@ int main(void)
 	bool was_on_body = false;      /* did P0.12 ever report on-body this session */
 	int  contact_lp = 0;           /* P0.12 debounce integrator */
 
+	/* Processing loop: the SAADC fills buffers via DMA in hardware; here we just
+	 * drain filled buffers, average OVERSAMPLE raw samples -> one 500 Hz sample,
+	 * and run the same pipeline as before (Levkov -> detector -> stream). Because
+	 * sampling is now hardware, BLE preemption only delays this drain -- it can
+	 * never lose a sample tick (the 10 ms buffer absorbs the stall). */
 	while (1) {
-		/* block until the next 500 Hz tick (TIMER1 top callback gives the sem). If
-		 * the loop fell behind, the sem backlog counts the missed ticks. */
-		k_sem_take(&sample_sem, K_FOREVER);
-		uint32_t ticks = 1 + k_sem_count_get(&sample_sem);
-		if (ticks > 1) { lost_ticks += ticks - 1; k_sem_reset(&sample_sem); }
-		if (adc_read_dt(&adc_ch, &adc_seq) != 0) continue;
+		nrf_saadc_value_t *buf;
+		k_msgq_get(&adc_doneq, &buf, K_FOREVER);
 
-		sample_idx += ticks;
-		if (led_off_idx && sample_idx >= led_off_idx) { led_off(); led_off_idx = 0; }
+		for (int i = 0; i < ADC_BUF_SMP; i += OVERSAMPLE) {
+			int32_t acc = 0;
+			for (int j = 0; j < OVERSAMPLE; j++) acc += buf[i + j];
+			int16_t raw = (int16_t)(acc / OVERSAMPLE);   /* 12-bit range preserved */
 
-		/* First processing step: Levkov 50 Hz subtraction (deterministic, no ring).
-		 * Output is delayed by LV_M samples; it is both streamed and fed to the
-		 * detector (constant delay -> RR timing unaffected). */
-		float lv = levkov(adc_raw);
-		lv = CLAMP(lv + (lv >= 0 ? 0.5f : -0.5f), -32768.0f, 32767.0f);
-		int16_t ns = (int16_t)lv;
+			/* Levkov 50 Hz subtraction (deterministic, no ring); output is
+			 * delayed LV_M samples, both streamed and fed to the detector
+			 * (constant delay -> RR timing unaffected). */
+			float lv = levkov(raw);
+			lv = CLAMP(lv + (lv >= 0 ? 0.5f : -0.5f), -32768.0f, 32767.0f);
+			int16_t ns = (int16_t)lv;
 
-		detector_feed(ns);
+			detector_feed(ns);
 
-		/* raw (mains-subtracted) ECG streaming (only when a client subscribes) */
-		sys_put_le16((uint16_t)ns, &raw_buf[2 + rn * 2]);
-		if (++rn >= RAW_BATCH) {
-			sys_put_le16(seq++, &raw_buf[0]);
-			if (cap_ccc) {
-				tx_enqueue(TX_ECG, raw_buf, sizeof(raw_buf));
-			}
-			rn = 0;
-		}
+			sample_idx++;
+			if (led_off_idx && sample_idx >= led_off_idx) { led_off(); led_off_idx = 0; }
 
-		/* accelerometer: raw X/Y/Z + pedometer, streamed at ~25 Hz */
-		if ((sample_idx % 10) == 0) {
-			int16_t xyz[3];
-			if (acc_read6(xyz)) {
-				step_update(xyz[0], xyz[1], xyz[2]);
-				/* batch ACC_BATCH samples into one notify (25 Hz -> 5/s): fewer
-				 * packets + less TX-queue pressure. Layout (LE): u8 n, then
-				 * n x (int16 x,y,z) oldest first, then u16 steps of the last. */
-				static uint8_t acc_batch[1 + ACC_BATCH * 6 + 2];
-				static uint8_t acc_n;
-				if (accs_ccc) {
-					uint8_t *s = &acc_batch[1 + acc_n * 6];
-					sys_put_le16(xyz[0], &s[0]);
-					sys_put_le16(xyz[1], &s[2]);
-					sys_put_le16(xyz[2], &s[4]);
-					if (++acc_n >= ACC_BATCH) {
-						acc_batch[0] = acc_n;
-						sys_put_le16(step_count, &acc_batch[1 + acc_n * 6]);
-						tx_enqueue(TX_ACCEL, acc_batch, 1 + acc_n * 6 + 2);
-						acc_n = 0;
-					}
-				} else {
-					acc_n = 0;
+			/* raw (mains-subtracted) ECG streaming (only when a client subscribes) */
+			sys_put_le16((uint16_t)ns, &raw_buf[2 + rn * 2]);
+			if (++rn >= RAW_BATCH) {
+				sys_put_le16(seq++, &raw_buf[0]);
+				if (cap_ccc) {
+					tx_enqueue(TX_ECG, raw_buf, sizeof(raw_buf));
 				}
+				rn = 0;
 			}
-		}
 
-		/* battery level (VDD) -> Battery Service, first at ~1 s then every ~10 s */
-		if (sample_idx % 2500 == 250) {
-			battery_update();
-		}
+			/* ---- power state machine (P0.12 contact + BLE conn + accel motion) ----
+			 * wake(shake) -> advertise; PROBATION: sleep if nobody CONNECTS in 1 min
+			 * (being worn is not enough -- a connection starts the session).
+			 * connection -> engaged, start the 3 h session.
+			 * engaged: sleep if 3 h elapsed (drops conns), OR off-body + no motion for
+			 * 1 min AND (it was worn OR nobody is connected). Motion INT on P0.14 wakes.
+			 * (accelerometer + battery run elsewhere: accel in its own 25 Hz thread,
+			 * battery one-shot at boot.) */
+			int64_t now = k_uptime_get();
+			if (nrf_gpio_pin_read(CONTACT_PIN)) { if (contact_lp < CONTACT_DEB) contact_lp++; }
+			else                                { if (contact_lp > 0) contact_lp--; }
+			bool contact = contact_lp > (CONTACT_DEB / 2);
+			if (contact) was_on_body = true;
+			bool is_connected = conn_count > 0;
+			if (session_start == 0 && is_connected) session_start = now;   /* only a connection commits */
 
-		/* ---- power state machine (P0.12 contact + BLE conn + accel motion) ----
-		 * wake(shake) -> advertise; PROBATION: sleep if nobody CONNECTS in 1 min
-		 * (being worn is not enough on its own -- a connection starts the session).
-		 * connection -> engaged, start the 3 h session.
-		 * engaged: sleep if 3 h elapsed (drops conns), OR off-body + no motion for
-		 * 1 min AND (it was worn OR nobody is connected). Motion INT on P0.14 wakes. */
-		int64_t now = k_uptime_get();
-		if (nrf_gpio_pin_read(CONTACT_PIN)) { if (contact_lp < CONTACT_DEB) contact_lp++; }
-		else                                { if (contact_lp > 0) contact_lp--; }
-		bool contact = contact_lp > (CONTACT_DEB / 2);
-		if (contact) was_on_body = true;
-		bool is_connected = conn_count > 0;
-		if (session_start == 0 && is_connected) session_start = now;   /* only a connection commits */
-
-		bool go_sleep;
-		if (session_start == 0) {
-			go_sleep = (now - active_start > PROBATION_MS);        /* nobody connected in 1 min */
-		} else if (now - session_start > MAX_ACTIVE_MS) {
-			go_sleep = true;                                       /* 3 h cap */
-		} else {
-			go_sleep = !contact && (now - last_motion_ms > OFFBODY_MS) &&
-				   (was_on_body || !is_connected);             /* off-body + still */
+			bool go_sleep;
+			if (session_start == 0) {
+				go_sleep = (now - active_start > PROBATION_MS);        /* nobody connected in 1 min */
+			} else if (now - session_start > MAX_ACTIVE_MS) {
+				go_sleep = true;                                       /* 3 h cap */
+			} else {
+				go_sleep = !contact && (now - last_motion_ms > OFFBODY_MS) &&
+					   (was_on_body || !is_connected);             /* off-body + still */
+			}
+			if (go_sleep) enter_deep_sleep();   /* drops connections, System OFF; does not return */
 		}
-		if (go_sleep) enter_deep_sleep();   /* drops connections, System OFF; does not return */
 	}
 }
