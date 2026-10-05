@@ -46,7 +46,7 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
     session (read by `tools/analyze_recording.py`)
 - Live dashboard at **http://localhost:8770** (opened automatically): rolling
   ECG waveform (optional 50/60 Hz mains notch on the display only — recordings
-  stay raw), big HR number + beat-to-beat HR (60000/RR, also as the strip's HR lane),
+  stay raw), big HR number + latest R-R interval (the strip's HR lane shows 60000/RR in bpm),
   a signal-averaged beat with Clear and CSV download (mean + SD per sample), live HRV (RMSSD, SDNN, pNN50 over a rolling
   5 min window, ectopic/artifact beats excluded, shown as a ~1 min moving average),
   an HRV trend card (RMSSD per minute, 5 min moving average and the live smoothed

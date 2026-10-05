@@ -217,7 +217,6 @@
     if (msg.rr && msg.rr.length) {
       const lastRr = msg.rr[msg.rr.length - 1];
       setText("rr", Math.round(lastRr));
-      if (lastRr > 0) setText("ibpm", Math.round(60000 / lastRr));
       stream("rr", msg.rr.slice());
       hrvAdd(msg.rr);
     }
