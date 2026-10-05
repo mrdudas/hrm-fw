@@ -45,7 +45,9 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 #define WARMUP_SAMPLES (SAMPLE_HZ * 8)/* let the AC-coupled ECG front-end settle
                                         * after power-on/wake (~7 s transient) +
                                         * IIR filter settle, before detecting     */
-#define RAW_BATCH      20             /* raw samples per BLE notification      */
+#define RAW_BATCH      30             /* raw samples per BLE notification (62 B pkt): fewer,
+                                       * bigger notifies keep ECG+ACC under the macOS
+                                       * ~30 notify/s ceiling (500 Hz / 30 = 16.7 notify/s) */
 #define ACC_BATCH      5              /* accel samples batched per BLE notify (25 Hz -> 5/s) */
 #define TWAVE_MS       360            /* T-wave window after a QRS (Pan-Tompkins) */
 #define TWAVE_FRAC     0.5f           /* peak in that window below this*QRS energy = T-wave */
@@ -178,8 +180,8 @@ static uint8_t body_loc = 0x01;   /* chest */
  * we then hold the packet and retry, rather than discarding the queue.
  * Queue full on enqueue -> drop newest; ECG seq lets the app see the gap. */
 enum { TX_ECG, TX_ACCEL, TX_HR, TX_ECTOPY };
-struct tx_pkt { uint8_t type; uint8_t len; uint8_t data[42]; };
-#define TXQ_DEPTH 8
+struct tx_pkt { uint8_t type; uint8_t len; uint8_t data[62]; };   /* >= largest notify (ECG = 2 + RAW_BATCH*2) */
+#define TXQ_DEPTH 6
 K_MSGQ_DEFINE(txq, sizeof(struct tx_pkt), TXQ_DEPTH, 4);
 static uint32_t tx_dropped;
 static struct k_work_delayable tx_dwork;   /* drains txq on the system workqueue */
