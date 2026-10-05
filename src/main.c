@@ -459,8 +459,9 @@ static void detector_feed(int16_t sample)
 {
 	static float bp_z[4];
 	static float spki, npki;            /* running signal / noise peak estimates */
-	static float prev_energy, cand_peak;/* local-maximum tracking                */
+	static float prev_energy, prev_prev_energy, cand_peak;/* local-maximum tracking (3-pt) */
 	static float last_qrs_peak;         /* energy of the last accepted QRS       */
+	static float last_delta;            /* last beat's sub-sample peak offset [-0.5,0.5] */
 	static bool  rising;
 	static uint32_t last_cyc, rr_avg_cyc, warm;
 	static bool  have_last;
@@ -490,6 +491,7 @@ static void detector_feed(int16_t sample)
 			spki = warm_max;
 			npki = warm_max * 0.25f;
 		}
+		prev_prev_energy = prev_energy;
 		return;
 	}
 
@@ -532,11 +534,24 @@ static void detector_feed(int16_t sample)
 		if (!in_refr && !twave && cand_peak > thresh && cand_peak > 50.0f /* noise floor */) {
 			last_beat_ms = k_uptime_get();          /* on-body indicator */
 			led_on(); led_off_idx = sample_idx + LED_PULSE_N;  /* heartbeat blink */
+			/* Parabolic interpolation of the energy peak (at sample now-1) for
+			 * sub-sample R-peak timing: fit y[-1],y[0],y[+1] and take the vertex
+			 * offset. Lifts RR resolution from the 2 ms sample period to the ~1 ms
+			 * the rr_1024 wire format already carries. Near-flat peaks -> delta 0. */
+			float denom = prev_prev_energy - 2.0f * prev_energy + energy;
+			float delta = 0.0f;
+			if (denom < -1e-3f) {
+				delta = 0.5f * (prev_prev_energy - energy) / denom;
+				if (delta > 0.5f) delta = 0.5f; else if (delta < -0.5f) delta = -0.5f;
+			}
 			if (have_last) {
 				uint32_t d = now - last_cyc;
-				uint32_t rr_ms = (uint32_t)d * 1000 / SAMPLE_HZ;
+				/* refine RR with the sub-sample offsets; the integer part stays
+				 * exact over long sessions, only the small fractional diff is float */
+				float d_f = (float)d + (delta - last_delta);
+				uint32_t rr_ms = (uint32_t)(d_f * 1000.0f / SAMPLE_HZ + 0.5f);
 				if (rr_ms >= RR_MIN_MS && rr_ms <= RR_MAX_MS) {
-					uint16_t rr_1024 = (uint16_t)((uint32_t)d * 1024 / SAMPLE_HZ);
+					uint16_t rr_1024 = (uint16_t)(d_f * 1024.0f / SAMPLE_HZ + 0.5f);
 					uint8_t hr = hr_from_rr(rr_ms);
 					LOG_INF("beat RR=%u HR=%u", rr_ms, hr);
 					hrm_notify(hr, rr_1024);
@@ -582,7 +597,7 @@ static void detector_feed(int16_t sample)
 					ect_stats_to_buf();
 				}
 			}
-			last_cyc = now; have_last = true;
+			last_cyc = now; last_delta = delta; have_last = true;
 			last_qrs_peak = cand_peak;                  /* remember QRS energy for T-wave test */
 			spki = 0.125f * cand_peak + 0.875f * spki;  /* signal peak update */
 		} else if (!in_refr) {
@@ -590,6 +605,7 @@ static void detector_feed(int16_t sample)
 		}
 		cand_peak = 0.0f;
 	}
+	prev_prev_energy = prev_energy;
 	prev_energy = energy;
 }
 
