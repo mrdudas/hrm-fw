@@ -64,9 +64,6 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 #define MOTION_THR     1200               /* accel high-pass magnitude that counts as "moving" */
 #define LED_PULSE_N    3                  /* ~12 ms LED pulse per beat (energy-saving) */
 
-/* 50 Hz notch (biquad) @250 Hz */
-static const float NOTCH_b[] = {0.97948276f, -0.60535364f, 0.97948276f};
-static const float NOTCH_a[] = {1.00000000f, -0.60535364f, 0.95896552f};
 /* 8-22 Hz band-pass (Butterworth order 2 -> 4th order section) @250 Hz */
 static const float BP_b[] = {0.02463061f, 0.0f, -0.04926122f, 0.0f, 0.02463061f};
 static const float BP_a[] = {1.0f, -3.31428620f, 4.28994755f, -2.57411291f, 0.60810569f};
@@ -321,6 +318,29 @@ static float iir(const float *b, const float *a, float *z, int n, float x)
 	}
 	z[n - 2] = b[n - 1] * x - a[n - 1] * y;
 	return y;
+}
+
+/* Adaptive 50 Hz mains canceller (gated LMS). 50 Hz @ 250 Hz = exactly 5 samples
+ * per cycle, so the sin/cos reference is a 5-entry table. Two weights track the
+ * mains amplitude AND phase; we subtract the estimate and return the residual.
+ * Unlike an IIR notch it does not ring, and the weight update freezes on QRS-sized
+ * outliers (|err| > MAINS_GATE x the running mean |err|) so a beat can't drag the
+ * estimate -- that is what removes the post-QRS 50 Hz ringing. Tunables below. */
+#define MAINS_MU    0.02f    /* LMS step: tracking speed vs noise */
+#define MAINS_GATE  6.0f     /* freeze update when |err| exceeds this x mean|err| */
+static float mains_cancel(int16_t x)
+{
+	static const float S5[5] = {0.0f, 0.95105652f, 0.58778525f, -0.58778525f, -0.95105652f};
+	static const float C5[5] = {1.0f, 0.30901699f, -0.80901699f, -0.80901699f, 0.30901699f};
+	static float ws, wc, err_avg = 50.0f;
+	static uint8_t ph;
+	float rs = S5[ph], rc = C5[ph];
+	if (++ph >= 5) ph = 0;
+	float err = (float)x - (ws * rs + wc * rc);
+	float ae = err < 0 ? -err : err;
+	if (ae < MAINS_GATE * err_avg) { ws += MAINS_MU * err * rs; wc += MAINS_MU * err * rc; }
+	err_avg += 0.01f * (ae - err_avg);   /* ~0.4 s leaky mean of |err| */
+	return err;
 }
 
 static uint8_t hr_from_rr(uint16_t rr_ms)
@@ -613,16 +633,15 @@ int main(void)
 		sample_idx += ticks;
 		if (led_off_idx && sample_idx >= led_off_idx) { led_off(); led_off_idx = 0; }
 
-		/* First processing step: 50 Hz mains notch. The notched sample is what we
-		 * both stream ("raw") and feed the detector, so the broadcast ECG is clean. */
-		static float snotch_z[2];
-		float nf = iir(NOTCH_b, NOTCH_a, snotch_z, 3, (float)adc_raw);
-		nf = CLAMP(nf + (nf >= 0 ? 0.5f : -0.5f), -32768.0f, 32767.0f);
-		int16_t ns = (int16_t)nf;
+		/* First processing step: adaptive 50 Hz mains cancellation (no notch ringing).
+		 * The cleaned sample is what we both stream ("raw") and feed the detector. */
+		float mc = mains_cancel(adc_raw);
+		mc = CLAMP(mc + (mc >= 0 ? 0.5f : -0.5f), -32768.0f, 32767.0f);
+		int16_t ns = (int16_t)mc;
 
 		detector_feed(ns);
 
-		/* raw (mains-notched) ECG streaming (only when a client subscribes) */
+		/* raw (mains-cancelled) ECG streaming (only when a client subscribes) */
 		sys_put_le16((uint16_t)ns, &raw_buf[2 + rn * 2]);
 		if (++rn >= RAW_BATCH) {
 			sys_put_le16(seq++, &raw_buf[0]);
