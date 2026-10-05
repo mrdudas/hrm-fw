@@ -5,7 +5,9 @@ in ~/hrm-fw/host/. Keep them in sync with the firmware GATT table.
 """
 
 # Advertised device name (primary discovery mechanism, works cross-platform)
-DEVICE_NAME = "HRM Raw RR"
+DEVICE_NAME = "Govinda"            # firmware v1.0+
+# Names advertised by older firmware; auto discovery matches these too.
+LEGACY_NAMES = ("HRM Raw RR",)
 
 # A known address seen on Linux; on macOS the address is an opaque UUID, so we
 # always prefer name-based discovery and treat this only as a convenience match.

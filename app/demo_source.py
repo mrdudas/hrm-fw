@@ -44,14 +44,14 @@ class DemoSource:
             asyncio.get_event_loop().call_later(0.8, up)
         elif cmd == "scan":
             self.hub.publish_devices([
-                {"address": "D7:CD:02:7A:05:33", "name": "HRM Raw RR", "rssi": -48, "strap": True},
+                {"address": "D7:CD:02:7A:05:33", "name": "Govinda", "rssi": -48, "strap": True},
                 {"address": "D8:0F:B5:10:EA:56", "name": "Stratos 4 Pro", "rssi": -68, "strap": False},
                 {"address": "56:9A:33:44:07:69", "name": "", "rssi": -56, "strap": False},
             ], scanning=False)
 
     @staticmethod
     def _target():
-        return {"address": None, "name": "HRM Raw RR", "auto": True}
+        return {"address": None, "name": "Govinda", "auto": True}
 
     async def run(self):
         self.log("DEMO mode: streaming synthetic data (no BLE)")

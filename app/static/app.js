@@ -1027,7 +1027,7 @@
     const t = status.target || {};
     const current = t.auto === false ? t.address : AUTO;
     const keep = userPicked ? sel.value : current;
-    const opts = [[AUTO, `Auto · find “${(t.auto !== false && t.name) || "HRM Raw RR"}” by name`, ""]];
+    const opts = [[AUTO, `Auto · find “${(t.auto !== false && t.name) || "Govinda"}” by name`, ""]];
     const listed = new Set();
     for (const d of devices) {
       listed.add(d.address);

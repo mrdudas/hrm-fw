@@ -18,7 +18,7 @@ import json
 import os
 import time
 
-from config import (DEVICE_NAME, KNOWN_ADDRESS, HR_UUID, ECG_UUID, ACCEL_UUID,
+from config import (DEVICE_NAME, LEGACY_NAMES, KNOWN_ADDRESS, HR_UUID, ECG_UUID, ACCEL_UUID,
                     ECTOPY_UUID, BATTERY_UUID, ECG_INFO_UUID, ECG_FS,
                     LINK_UUID)
 import parsers
@@ -144,7 +144,12 @@ class BLESource:
     def _matches(self, addr, name):
         if self.address:
             return addr.upper() == self.address.upper()
-        return name == self.name or addr.upper() == KNOWN_ADDRESS.upper()
+        return self._is_strap(addr, name)
+
+    def _is_strap(self, addr, name):
+        """The strap by its advertised name (current or pre-v1.0) or its known address."""
+        return (name == self.name or name in LEGACY_NAMES
+                or addr.upper() == KNOWN_ADDRESS.upper())
 
     async def _scan(self, want_target):
         """Scan up to SCAN_S, publishing the device list as it fills in.
@@ -178,7 +183,7 @@ class BLESource:
 
     def _publish_devices(self, seen, scanning):
         devs = [{"address": a, "name": n, "rssi": r,
-                 "strap": n == self.name or a.upper() == KNOWN_ADDRESS.upper()}
+                 "strap": self._is_strap(a, n)}
                 for a, (n, r) in seen.items()]
         devs.sort(key=lambda d: (not d["strap"], not d["name"], -(d["rssi"] or -999)))
         self.hub.publish_devices(devs, scanning)

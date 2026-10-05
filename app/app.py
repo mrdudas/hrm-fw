@@ -20,7 +20,7 @@ import sys
 import time
 import webbrowser
 
-from config import HOST, PORT, DEVICE_NAME
+from config import HOST, PORT, DEVICE_NAME, LEGACY_NAMES
 from recorder import CSVRecorder
 from hub import Hub
 from webserver import make_app, start_server
@@ -47,7 +47,7 @@ async def run_scan():
         return
     print(f"\n{'address':40}  rssi  name")
     for addr, name, rssi in devs:
-        mark = "  <-- looks like the strap" if name == DEVICE_NAME else ""
+        mark = "  <-- looks like the strap" if name in (DEVICE_NAME, *LEGACY_NAMES) else ""
         print(f"{addr:40}  {str(rssi):>4}  {name}{mark}")
 
 
@@ -110,9 +110,9 @@ def parse_args(argv):
     p = argparse.ArgumentParser(description="HRM Raw RR dashboard + recorder")
     p.add_argument("--demo", action="store_true",
                    help="stream synthetic data (no BLE hardware needed)")
-    p.add_argument("--demo-fs", type=int, default=250, choices=(250, 1024),
+    p.add_argument("--demo-fs", type=int, default=250, choices=(250, 500, 1024),
                    help="ECG sample rate simulated by --demo (default 250)")
-    p.add_argument("--demo-batch", type=int, default=20, choices=(20, 40),
+    p.add_argument("--demo-batch", type=int, default=20, choices=(20, 30, 40, 64),
                    help="ECG samples per packet simulated by --demo (default 20)")
     p.add_argument("--scan", action="store_true",
                    help="list nearby BLE devices and exit")
