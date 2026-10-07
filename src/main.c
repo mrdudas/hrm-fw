@@ -374,11 +374,29 @@ static void tx_work_fn(struct k_work *w)
 }
 
 /* ---- Advertising ----------------------------------------------------- */
-static const struct bt_data ad[] = {
+/* Device name gets a per-chip suffix at boot ("Govinda-XXXX", XXXX = last 4 hex
+ * of the nRF52805 factory DEVICEID) so several straps are told apart in the scan
+ * list. Built in dev_name_init(); ad[2] below starts at the base name and is
+ * updated in place (same buffer) before advertising. */
+static char dev_name[20] = CONFIG_BT_DEVICE_NAME;
+static struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
 	BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_16_ENCODE(BT_UUID_HRS_VAL)),
-	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
+	BT_DATA(BT_DATA_NAME_COMPLETE, dev_name, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
 };
+static void dev_name_init(void)
+{
+	static const char hx[] = "0123456789ABCDEF";
+	uint16_t id = (uint16_t)(NRF_FICR->DEVICEID[1] & 0xFFFF);   /* unique per chip, stable */
+	int n = strlen(dev_name);
+	dev_name[n++] = '-';
+	dev_name[n++] = hx[(id >> 12) & 0xF];
+	dev_name[n++] = hx[(id >> 8) & 0xF];
+	dev_name[n++] = hx[(id >> 4) & 0xF];
+	dev_name[n++] = hx[id & 0xF];
+	dev_name[n]   = '\0';
+	ad[2].data_len = n;   /* advertise the suffixed name (ad[2].data already = dev_name) */
+}
 static void adv_work_fn(struct k_work *w)
 {
 	int e = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), NULL, 0);
@@ -778,10 +796,12 @@ int main(void)
 	}
 	battery_update_mv(adc_read_vdd_mv());   /* one-shot VDD read per wake */
 
+	dev_name_init();   /* build "Govinda-XXXX" into dev_name + ad[2] before advertising */
 	if (bt_enable(bt_ready)) {
 		LOG_ERR("bt_enable failed");
 		return -1;
 	}
+	bt_set_name(dev_name);   /* keep the GAP Device Name characteristic consistent with adv */
 	k_work_init_delayable(&tx_dwork, tx_work_fn);
 
 	/* continuous ECG: single channel, advanced mode, internal 8 kHz timer -> DMA */
