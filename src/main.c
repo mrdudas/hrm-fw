@@ -521,17 +521,23 @@ static void detector_feed(int16_t sample)
 	uint32_t now  = sample_idx;   /* sample index = real time, jitter-immune */
 	uint32_t refr = REFRACTORY_MS * SAMPLE_HZ / 1000;   /* samples */
 
-	/* adaptive threshold; relax toward NPKI (search-back) if a beat is overdue */
+	/* adaptive threshold; relax toward NPKI (search-back) if a beat is overdue.
+	 * "Overdue" also covers COLD START (no beat yet): a put-on/motion artifact
+	 * during warm-up can seed SPKI *and* NPKI far above the real QRS, pinning the
+	 * threshold so high the detector is deaf forever. So when a beat is overdue --
+	 * either later than 1.66x the running RR, or (before any beat) not seen for
+	 * ~1.5 s -- slowly decay BOTH peaks downward (multiplicative). The whole
+	 * threshold then glides down until it re-acquires the QRS (the larger peak
+	 * crosses first); a real beat instantly re-seeds the peaks. The 50-count
+	 * energy floor below still blocks latching onto noise/flat off-body. */
 	float k = 0.25f;
-	bool overdue = have_last && rr_avg_cyc &&
-		       (now - last_cyc) > (uint64_t)rr_avg_cyc * 166 / 100;
+	uint32_t since = (uint32_t)(now - last_cyc);
+	bool overdue = rr_avg_cyc ? (since > (uint32_t)((uint64_t)rr_avg_cyc * 166 / 100))
+				  : (since > (uint32_t)(SAMPLE_HZ * 3 / 2));
 	if (overdue) {
 		k = 0.125f;
-		/* A transient artifact can spike SPKI; with no further detections SPKI
-		 * stays stuck high and masks the (lower) real beats -> the detector goes
-		 * deaf. Once a beat is overdue, bleed SPKI back toward NPKI so sensitivity
-		 * recovers (~halves per 0.7 s of overdue). Never runs during normal rhythm. */
-		spki += (npki - spki) * (1.0f / 256);
+		spki -= spki * (1.0f / 512);   /* ~slow glide-down (tau ~1 s); self-heals a */
+		npki -= npki * (1.0f / 512);   /* threshold pinned high by a warm-up artifact */
 	}
 	float thresh = npki + k * (spki - npki);
 
@@ -649,6 +655,19 @@ static uint8_t a_rdb(int ack){ uint8_t v=0;a_sda_hi();for(int i=0;i<8;i++){v<<=1
 static void acc_wr(uint8_t r,uint8_t v){ a_st();a_wrb((ACC_ADDR<<1)|0);a_wrb(r);a_wrb(v);a_sp(); }
 static uint8_t acc_rd(uint8_t r){ a_st();a_wrb((ACC_ADDR<<1)|0);a_wrb(r);a_st();a_wrb((ACC_ADDR<<1)|1);uint8_t v=a_rdb(0);a_sp();return v; }
 
+/* The accelerometer is optional (some HW variants omit it). Detect it by whether
+ * it ACKs its I2C address, so we can skip accel work and, crucially, pick a wake
+ * source that still works without it. */
+static bool accel_present;
+static bool acc_detect(void)
+{
+	a_scl_hi(); a_sda_hi(); k_busy_wait(50);
+	a_st();
+	int ack = a_wrb((ACC_ADDR << 1) | 0);   /* 1 = device ACKed its address */
+	a_sp();
+	return ack != 0;
+}
+
 static void accel_init_motion_int(void)
 {
 	a_scl_hi(); a_sda_hi(); k_msleep(5);
@@ -668,12 +687,19 @@ static void enter_deep_sleep(void)
 {
 	bt_le_adv_stop();
 	led_off();
-	/* no need to touch P0.12: off-body its contact line is already low, so the AFE
-	 * self-gates off (the front end powers down without us forcing anything). */
-	(void)acc_rd(0x31);   /* clear pending motion INT so P0.14 is low */
-	nrf_gpio_cfg_sense_input(ACC_INT_PIN, NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_SENSE_HIGH);
+	if (accel_present) {
+		/* motion wake: the SC7A20 INT1 on P0.14 goes high on movement. */
+		(void)acc_rd(0x31);   /* clear pending motion INT so P0.14 is low */
+		nrf_gpio_cfg_sense_input(ACC_INT_PIN, NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_SENSE_HIGH);
+	} else {
+		/* no accel -> no motion-INT wake source. Wake on WEAR instead: P0.12 (the
+		 * AFE on-body/contact line) goes high when the belt is put on. Pull the
+		 * floating accel-INT pin low so it cannot spuriously wake us. */
+		nrf_gpio_cfg_input(ACC_INT_PIN, NRF_GPIO_PIN_PULLDOWN);
+		nrf_gpio_cfg_sense_input(CONTACT_PIN, NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_SENSE_HIGH);
+	}
 	k_msleep(2);
-	sys_poweroff();       /* System OFF; P0.14 high (motion) wakes -> reboot */
+	sys_poweroff();       /* System OFF; motion (P0.14) or wear (P0.12) wakes -> reboot */
 }
 
 /* Read OUT_X/Y/Z (auto-increment) as three int16 (left-justified raw counts). */
@@ -724,6 +750,7 @@ static void accel_thread_fn(void *a, void *b, void *c)
 	static uint8_t acc_batch[1 + ACC_BATCH * 6 + 2];
 	uint8_t acc_n = 0;
 	while (!accel_ready) k_msleep(20);
+	if (!accel_present) return;   /* no accelerometer on this HW variant */
 	for (;;) {
 		int16_t xyz[3];
 		if (acc_read6(xyz)) {
@@ -774,8 +801,9 @@ int main(void)
 	nrf_gpio_cfg_input(CONTACT_PIN, NRF_GPIO_PIN_NOPULL);
 	for (int i = 0; i < 2; i++) { led_on(); k_msleep(60); led_off(); k_msleep(120); } /* wake blink */
 
-	accel_init_motion_int();   /* arm SC7A20 motion INT -> P0.14 for deep-sleep wake */
-	accel_ready = true;        /* release the accel thread now the sensor is configured */
+	accel_present = acc_detect();
+	if (accel_present) accel_init_motion_int();   /* arm SC7A20 motion INT -> P0.14 wake */
+	accel_ready = true;        /* release the accel thread (it exits if no accel) */
 
 	/* Keep HFXO (16 MHz crystal) running so the SAADC internal sample timer is
 	 * crystal-accurate: the BLE stack only requests HFXO around radio events,
