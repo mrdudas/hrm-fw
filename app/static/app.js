@@ -648,6 +648,14 @@
   const avgView = { ...AVG_VIEW };
   const avgMeas = { a: null, b: null };
   let avgHover = null;
+  // Per-beat equalisation before averaging: the strap's contact changes the gain
+  // (and offset) from beat to beat, and artifacts distort single beats. avgUse is
+  // what gets averaged / overlaid: each beat with its own baseline removed and
+  // its QRS amplitude scaled to the median, minus the beats rejected as outliers.
+  let avgNorm = true, avgUse = [], avgRejected = 0;
+  try { avgNorm = localStorage.getItem("hrm.avgNorm") !== "0"; } catch (e) {}
+  const AVG_CORR_MIN = 0.85;                // shape correlation with the mean, QRS..T window
+  const AVG_GAIN_MAX = 2.5;                 // amplitude more than this far off the median: artifact
   // automatic QRST analysis of the mean beat (qrst.js)
   let qrstOn = true, qrstHp = 0, qrstRes = null;
   try {
@@ -672,6 +680,7 @@
     AVG_LEN = Math.round((AVG_T1 - AVG_T0) * FS) + 1;
     avgX = Array.from({ length: AVG_LEN }, (_, i) => (i - AVG_PRE) / FS * 1000);
     segs.length = 0; pendingSegs.length = 0;
+    avgUse = []; avgRejected = 0;
     qrstRes = null;
     if (avgPlot) avgSetData([avgX, ...[0, 1, 2, 3].map(() => avgX.map(() => null))]);
     renderQrst();
@@ -724,7 +733,7 @@
   // second beat: every collected beat drawn individually, oldest first and faint,
   // the newest last and sharpest
   function drawAvgOverlay(u) {
-    const n = segs.length;
+    const n = avgUse.length;
     if (!n) return;
     const ctx = u.ctx, { left, top, width, height } = u.bbox, dpr = devicePixelRatio, seam = avgSeam();
     ctx.save();
@@ -734,7 +743,7 @@
     for (let i = seam; i < AVG_LEN; i++) xs[i - seam] = u.valToPos(avgX[i], "x", true);
     ctx.strokeStyle = COL.ecg; ctx.lineJoin = "round";
     for (let k = 0; k < n; k++) {
-      const seg = segs[k], newest = k === n - 1;
+      const seg = avgUse[k], newest = k === n - 1;
       const age = (k + 1) / n;                       // 1 = newest
       ctx.globalAlpha = newest ? 1 : 0.05 + 0.5 * age * age * age;
       ctx.lineWidth = (newest ? 2 : 1) * dpr;
@@ -782,8 +791,8 @@
     if (!el) return;
     if (!qrstOn) { el.textContent = ""; return; }
     if (!qrstRes) {
-      el.textContent = segs.length < QRST_MIN_BEATS
-        ? `QRST: collecting beats… ${segs.length} / ${QRST_MIN_BEATS}` : "QRST: no clear complex found";
+      el.textContent = avgUse.length < QRST_MIN_BEATS
+        ? `QRST: collecting beats… ${avgUse.length} / ${QRST_MIN_BEATS}` : "QRST: no clear complex found";
       return;
     }
     const m = qrstRes.m, a = qrstRes.amp, f = (v, u = " ms") => v == null ? "–" : Math.round(v) + u;
@@ -802,34 +811,79 @@
         : "front end not compensated: timings are reliable; QT and amplitudes are estimates"}</span>`;
   }
 
-  function avgStats() {                 // mean and SD per sample over the collected beats
-    const n = segs.length, mean = new Array(AVG_LEN).fill(0), sd = new Array(AVG_LEN).fill(0);
-    for (const seg of segs) for (let i = 0; i < AVG_LEN; i++) mean[i] += seg[i];
+  // Build avgUse from the collected raw segments.
+  //  1. baseline of each beat = median of its first 50 ms (before the P wave)
+  //  2. gain of each beat = median QRS peak-to-peak (R +/- 60 ms) / its own
+  //  3. reject beats whose amplitude is far off, then those whose shape does not
+  //     correlate with the mean of the rest (ectopic beats, motion artifacts)
+  function avgPrepare() {
+    avgRejected = 0;
+    if (!avgNorm || segs.length < 3) { avgUse = segs.slice(); return; }
+    const k50 = Math.max(4, Math.round(0.05 * FS)), q = Math.round(0.06 * FS);
+    const med = (a) => { const b = Array.from(a).sort((x, y) => x - y); return b[b.length >> 1]; };
+    const base = [], amp = [];
+    for (const seg of segs) {
+      base.push(med(seg.subarray(0, k50)));
+      let lo = Infinity, hi = -Infinity;
+      for (let i = AVG_PRE - q; i <= AVG_PRE + q; i++) { const v = seg[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+      amp.push(hi - lo);
+    }
+    const refAmp = med(amp), refBase = med(base);
+    let cand = [];
+    segs.forEach((seg, k) => {
+      const g = refAmp / amp[k];
+      if (!(amp[k] > 0) || g > AVG_GAIN_MAX || g < 1 / AVG_GAIN_MAX) return;      // amplitude outlier
+      const out = new Float32Array(AVG_LEN);
+      for (let i = 0; i < AVG_LEN; i++) out[i] = (seg[i] - base[k]) * g + refBase;
+      cand.push(out);
+    });
+    // shape check against the mean of the candidates, over -150 .. +350 ms
+    if (cand.length >= 5) {
+      const a = Math.max(0, AVG_PRE - Math.round(0.15 * FS)), b = Math.min(AVG_LEN, AVG_PRE + Math.round(0.35 * FS));
+      const m = new Float64Array(b - a);
+      for (const c of cand) for (let i = a; i < b; i++) m[i - a] += c[i] / cand.length;
+      let mm = 0; for (const v of m) mm += v / m.length;
+      let smm = 0; for (const v of m) smm += (v - mm) ** 2;
+      const keep = cand.filter((c) => {
+        let cm = 0; for (let i = a; i < b; i++) cm += c[i] / (b - a);
+        let sxy = 0, scc = 0;
+        for (let i = a; i < b; i++) { sxy += (c[i] - cm) * (m[i - a] - mm); scc += (c[i] - cm) ** 2; }
+        return sxy / Math.sqrt(scc * smm || 1) >= AVG_CORR_MIN;
+      });
+      if (keep.length >= 3) cand = keep;
+    }
+    avgUse = cand;
+    avgRejected = segs.length - cand.length;
+  }
+  function avgStats() {                 // mean and SD per sample over the beats in use
+    const n = avgUse.length, mean = new Array(AVG_LEN).fill(0), sd = new Array(AVG_LEN).fill(0);
+    for (const seg of avgUse) for (let i = 0; i < AVG_LEN; i++) mean[i] += seg[i];
     for (let i = 0; i < AVG_LEN; i++) mean[i] /= n;
     if (n > 1) {
-      for (const seg of segs) for (let i = 0; i < AVG_LEN; i++) sd[i] += (seg[i] - mean[i]) ** 2;
+      for (const seg of avgUse) for (let i = 0; i < AVG_LEN; i++) sd[i] += (seg[i] - mean[i]) ** 2;
       for (let i = 0; i < AVG_LEN; i++) sd[i] = Math.sqrt(sd[i] / (n - 1));
     }
     return { n, mean, sd };
   }
   function drawAvg() {
     while (segs.length > avgN()) segs.shift();
-    setText("avg-count", segs.length);
-    $("avg-csv").disabled = !segs.length;
-    if (!segs.length) return;
+    avgPrepare();
+    setText("avg-count", segs.length + (avgRejected ? ` (${avgRejected} rejected)` : ""));
+    $("avg-csv").disabled = !avgUse.length;
+    if (!avgUse.length) return;
     // first beat: mean; second beat: no averaging -- only the envelope of the
     // individual beats goes in as invisible series, so the y axis fits them
     const { mean } = avgStats(), seam = avgSeam();
     const hi = new Array(AVG_LEN).fill(null), lo = new Array(AVG_LEN).fill(null);
     for (let i = seam; i < AVG_LEN; i++) {
       let a = Infinity, b = -Infinity;
-      for (const seg of segs) { const v = seg[i]; if (v < a) a = v; if (v > b) b = v; }
+      for (const seg of avgUse) { const v = seg[i]; if (v < a) a = v; if (v > b) b = v; }
       lo[i] = a; hi[i] = b;
     }
     // QRST analysis on the whole mean (not only up to the seam)
     const comp = new Array(AVG_LEN).fill(null);
     qrstRes = null;
-    if (qrstOn && segs.length >= QRST_MIN_BEATS && rrRecent.length) {
+    if (qrstOn && avgUse.length >= QRST_MIN_BEATS && rrRecent.length) {
       qrstRes = QRST.analyze(avgX, mean, FS, avgPeriod() / FS * 1000, { hpHz: qrstHp });
       if (qrstRes && qrstRes.comp) for (let i = 0; i < qrstRes.sig.length; i++) comp[i] = qrstRes.sig[i] + qrstRes.base;
     }
@@ -838,7 +892,7 @@
   }
   function clearAvg() { resetAvg(); }
   function downloadAvg() {
-    if (!segs.length) return;
+    if (!avgUse.length) return;
     const { n, mean, sd } = avgStats();
     const stamp = new Date();
     const lines = [
@@ -848,6 +902,9 @@
       ...(qrstRes ? [`# QRST (${qrstRes.comp ? "high-pass compensated at " + qrstRes.comp + " Hz" : "uncompensated"}): ` +
         Object.entries(qrstRes.m).map(([k, v]) => `${k}=${Math.round(v)}`).join(" ") + " | fiducials ms: " +
         Object.entries(qrstRes.fid).map(([k, v]) => `${k}=${Math.round(v)}`).join(" ")] : []),
+      `# beats: ${avgUse.length} averaged of ${segs.length} collected` + (avgNorm
+        ? `; each beat baseline-corrected and scaled to the median QRS amplitude, ${avgRejected} rejected (amplitude or shape outliers)`
+        : "; raw (no per-beat equalisation)"),
       "t_ms,mean_adc,sd_adc",
     ];
     for (let i = 0; i < AVG_LEN; i++)
@@ -1056,6 +1113,14 @@
     });
     host.addEventListener("mouseleave", () => { avgHover = null; });
     $("avg-measure-btn").addEventListener("click", () => setMeasureMode(!measureMode));
+    const nb = $("avg-norm-btn");
+    nb.classList.toggle("active", avgNorm);
+    nb.addEventListener("click", () => {
+      avgNorm = !avgNorm;
+      nb.classList.toggle("active", avgNorm);
+      try { localStorage.setItem("hrm.avgNorm", avgNorm ? "1" : "0"); } catch (e) {}
+      drawAvg();
+    });
     const qb = $("qrst-btn"), qh = $("qrst-hp");
     qb.classList.toggle("active", qrstOn);
     qh.value = qrstHp || "";
