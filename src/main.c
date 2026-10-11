@@ -58,15 +58,31 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 #define MOTION_FRAC    5.0f           /* energy > this*normal QRS = contact spike (real PVC is ~2-3x) */
 #define TWAVE_LO_FRAC  0.4f           /* energy < this*normal QRS = T-wave/low (drop)      */
 
+/* HW_DIFF: the "special" front-end variant. P0.04 (AIN2) is wired to the op-amp
+ * common point (half-supply), so ECG is read DIFFERENTIALLY (AIN3 - AIN2) with
+ * common-mode rejection; the LED moves to P0.12; and on-body is sensed from the
+ * AIN2 half-supply being present (AFE powered) rather than from a contact pin.
+ * HW_DIFF=0 is the standard board (single-ended AIN3, LED on P0.04, P0.12 sense). */
+#ifndef HW_DIFF
+#define HW_DIFF 1
+#endif
+
 /* Power / status LED */
+#if HW_DIFF
+#define LED_PIN        12                 /* P0.12, active-high status LED (special HW) */
+#else
 #define LED_PIN        4                  /* P0.04, active-high status LED     */
 #define CONTACT_PIN    12                 /* P0.12: AFE lead-off/CONTACT status output
                                            * (high = on-body, low = off-body). It self-
                                            * gates the AFE -> READ ONLY, never drive it. */
+#endif
 #define OFFBODY_MS     60000              /* off-body + no motion this long -> sleep */
 #define MAX_ACTIVE_MS  (3LL*60*60*1000)   /* 3 h max session -> sleep           */
 #define PROBATION_MS   60000              /* advertise this long after wake; not worn -> sleep */
 #define ASSIST_MS      5000               /* P0.12 pull-up assist window while the AFE latches on */
+#if HW_DIFF
+#define OB_FLOOR       150                /* peak-hold AC-envelope below this = off-body. Worn env >=430, off-body ~20. */
+#endif
 #define CONTACT_DEB    (SAMPLE_HZ/2)      /* P0.12 contact debounce samples (~0.5 s, fs-relative) */
 #define MOTION_THR     1200               /* accel high-pass magnitude that counts as "moving" */
 #define LED_PULSE_N    (SAMPLE_HZ*12/1000) /* ~12 ms LED pulse per beat (fs-relative) */
@@ -92,8 +108,13 @@ static const float BP_a[] = {1.0f, -3.70011109f, 5.18676736f, -3.26571330f, 0.77
 static nrf_saadc_value_t adc_bufs[ADC_BUF_CNT][ADC_BUF_SMP];
 K_MSGQ_DEFINE(adc_doneq, sizeof(nrf_saadc_value_t *), ADC_BUF_CNT, sizeof(void *));
 static volatile uint32_t adc_overrun;   /* filled buffers dropped because processing lagged */
+static volatile int32_t  dbg_obenv;     /* HW_DIFF: live |ECG| envelope, for tuning OB_FLOOR */
 
-/* ECG input channel: AIN3 (P0.05), gain 1/4, ref VDD/4 -> full-scale = VDD. */
+/* ECG input channel. Standard: single-ended AIN3 (P0.05) vs chip GND, gain 1/4,
+ * ref VDD/4 -> 0..4095 around a ~mid-rail bias. HW_DIFF: differential AIN3 - AIN2,
+ * where AIN2 (P0.04) is the op-amp half-supply -> a SIGNED result centred on 0 with
+ * the supply/ground common-mode rejected. (nrfx 4.0 wants nrfx_analog_input_t, not
+ * the raw PSELP value.) */
 static const nrfx_saadc_channel_t ecg_channel = {
 	.channel_config = {
 		.resistor_p = NRF_SAADC_RESISTOR_DISABLED,
@@ -101,11 +122,19 @@ static const nrfx_saadc_channel_t ecg_channel = {
 		.gain       = NRF_SAADC_GAIN1_4,
 		.reference  = NRF_SAADC_REFERENCE_VDD4,
 		.acq_time   = NRF_SAADC_ACQTIME_10US,
+#if HW_DIFF
+		.mode       = NRF_SAADC_MODE_DIFFERENTIAL,
+#else
 		.mode       = NRF_SAADC_MODE_SINGLE_ENDED,
+#endif
 		.burst      = NRF_SAADC_BURST_DISABLED,
 	},
-	.pin_p = NRFX_ANALOG_EXTERNAL_AIN3,   /* AIN3 = P0.05 (nrfx 4.0 uses nrfx_analog_input_t, NOT the raw PSELP value) */
+	.pin_p = NRFX_ANALOG_EXTERNAL_AIN3,   /* AIN3 = P0.05 (ECG signal) */
+#if HW_DIFF
+	.pin_n = NRFX_ANALOG_EXTERNAL_AIN2,   /* AIN2 = P0.04 (op-amp half-supply) */
+#else
 	.pin_n = NRFX_ANALOG_INPUT_DISABLED,
+#endif
 	.channel_index = 0,
 };
 
@@ -158,6 +187,38 @@ static int32_t adc_read_vdd_mv(void)
 	nrfx_saadc_mode_trigger();   /* blocking (no handler) */
 	return (int32_t)s * 3600 / 4096;
 }
+
+#if HW_DIFF
+/* One blocking single-ended read of AIN2 (P0.04 = op-amp half-supply), gain 1/4,
+ * ref VDD/4 -> 0..4095 of VDD. On-body the AFE is powered and the half-supply
+ * (~VDD/2) sits near 2048; off-body it collapses toward 0. Used to gate startup.
+ * Only valid before continuous (differential) sampling is running. */
+#define ONBODY_THR 500   /* half-supply counts above this = AFE powered = on-body */
+static int32_t adc_read_ain2(void)
+{
+	static const nrfx_saadc_channel_t ain2_channel = {
+		.channel_config = {
+			.resistor_p = NRF_SAADC_RESISTOR_DISABLED,
+			.resistor_n = NRF_SAADC_RESISTOR_DISABLED,
+			.gain       = NRF_SAADC_GAIN1_4,
+			.reference  = NRF_SAADC_REFERENCE_VDD4,
+			.acq_time   = NRF_SAADC_ACQTIME_10US,
+			.mode       = NRF_SAADC_MODE_SINGLE_ENDED,
+			.burst      = NRF_SAADC_BURST_DISABLED,
+		},
+		.pin_p = NRFX_ANALOG_EXTERNAL_AIN2,
+		.pin_n = NRFX_ANALOG_INPUT_DISABLED,
+		.channel_index = 0,
+	};
+	nrf_saadc_value_t s = 0;
+	if (nrfx_saadc_channel_config(&ain2_channel) != 0) return -1;
+	if (nrfx_saadc_simple_mode_set(BIT(0), NRF_SAADC_RESOLUTION_12BIT,
+				       NRF_SAADC_OVERSAMPLE_DISABLED, NULL) != 0) return -1;
+	nrfx_saadc_buffer_set(&s, 1);
+	nrfx_saadc_mode_trigger();   /* blocking */
+	return (int32_t)s;
+}
+#endif
 
 /* Map a CR2032 (~2.4 V empty .. 3.0 V full) to % and publish via BAS. */
 static void battery_update_mv(int32_t mv)
@@ -270,6 +331,7 @@ static ssize_t read_cap_link(struct bt_conn *c, const struct bt_gatt_attr *a,
 	sys_put_le16(bt_gatt_get_mtu(c), &out[6]);
 	out[8] = (uint8_t)conn_count;
 	sys_put_le32(adc_overrun, &out[9]);   /* DMA buffers dropped if processing ever lagged */
+	sys_put_le16((uint16_t)dbg_obenv, &out[13]);   /* HW_DIFF |ECG| envelope (OB_FLOOR tuning) */
 	return bt_gatt_attr_read(c, a, buf, len, off, out, sizeof(out));
 }
 
@@ -692,11 +754,15 @@ static void enter_deep_sleep(void)
 		(void)acc_rd(0x31);   /* clear pending motion INT so P0.14 is low */
 		nrf_gpio_cfg_sense_input(ACC_INT_PIN, NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_SENSE_HIGH);
 	} else {
-		/* no accel -> no motion-INT wake source. Wake on WEAR instead: P0.12 (the
-		 * AFE on-body/contact line) goes high when the belt is put on. Pull the
-		 * floating accel-INT pin low so it cannot spuriously wake us. */
+		/* no accel -> no motion-INT wake source. Pull the floating accel-INT pin low
+		 * so it cannot spuriously wake us. On the standard board, wake on WEAR
+		 * instead: P0.12 (AFE on-body/contact) goes high when the belt is put on.
+		 * (On HW_DIFF, P0.12 is the LED and the accel is always present, so this
+		 * branch isn't taken; there is no contact-pin wake source.) */
 		nrf_gpio_cfg_input(ACC_INT_PIN, NRF_GPIO_PIN_PULLDOWN);
+#if !HW_DIFF
 		nrf_gpio_cfg_sense_input(CONTACT_PIN, NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_SENSE_HIGH);
+#endif
 	}
 	k_msleep(2);
 	sys_poweroff();       /* System OFF; motion (P0.14) or wear (P0.12) wakes -> reboot */
@@ -778,6 +844,7 @@ static void accel_thread_fn(void *a, void *b, void *c)
 }
 K_THREAD_DEFINE(accel_tid, 640, accel_thread_fn, NULL, NULL, NULL, 5, 0, 0);
 
+#if !HW_DIFF
 /* True if P0.12 reads on-body for >75% of a ~win_ms window (read-only, no ADC). */
 static bool onbody_held(int win_ms)
 {
@@ -786,6 +853,7 @@ static bool onbody_held(int win_ms)
 	for (int i = 0; i < n; i++) { if (nrf_gpio_pin_read(CONTACT_PIN)) hi++; k_msleep(10); }
 	return hi * 4 > n * 3;
 }
+#endif
 
 int main(void)
 {
@@ -795,10 +863,13 @@ int main(void)
 	LOG_INF("HRM raw-RR+ECG firmware boot");
 
 	nrf_gpio_cfg_output(LED_PIN);
+#if !HW_DIFF
 	/* P0.12 is the AFE's lead-off/contact status (high=on-body); it self-gates the
 	 * AFE. READ it, never drive it — driving it high forced the AFE on off-body and
-	 * made the front end oscillate. Off-body it goes low -> AFE off -> no oscillation. */
+	 * made the front end oscillate. Off-body it goes low -> AFE off -> no oscillation.
+	 * (On HW_DIFF, P0.12 is the LED output configured just above.) */
 	nrf_gpio_cfg_input(CONTACT_PIN, NRF_GPIO_PIN_NOPULL);
+#endif
 	for (int i = 0; i < 2; i++) { led_on(); k_msleep(60); led_off(); k_msleep(120); } /* wake blink */
 
 	accel_present = acc_detect();
@@ -832,32 +903,25 @@ int main(void)
 	bt_set_name(dev_name);   /* keep the GAP Device Name characteristic consistent with adv */
 	k_work_init_delayable(&tx_dwork, tx_work_fn);
 
-	/* continuous ECG: single channel, advanced mode, internal 8 kHz timer -> DMA */
-	nrfx_saadc_adv_config_t adv = NRFX_SAADC_DEFAULT_ADV_CONFIG;
-	adv.internal_timer_cc = ADC_TIMER_CC;   /* 16 MHz / 8 kHz = 2000 */
-	adv.start_on_end      = true;           /* HW re-arms DMA into the next buffer */
-	if (nrfx_saadc_channel_config(&ecg_channel) != 0 ||
-	    nrfx_saadc_advanced_mode_set(BIT(0), NRF_SAADC_RESOLUTION_12BIT, &adv,
-					 saadc_handler) != 0) {
-		LOG_ERR("saadc ECG mode failed");
-		return -1;
-	}
-	/* ---- AFE-friendly startup --------------------------------------------
-	 * The AFE wakes slowly and is sensitive to supply noise; running the ADC +
-	 * DSP while it is still settling injects CPU/supply noise that disturbs it,
-	 * which makes more noise -- a feedback loop. So after wake we ONLY advertise
-	 * and READ P0.12 (on-body); the ADC/DSP stay off until the AFE reports a held
-	 * on-body contact (someone put the belt on). Then a 5 s weak pull-up assists
-	 * the AFE to latch on (LED blinks 2 Hz), we release the pin back to read-only,
-	 * confirm the contact persists, and only then start sampling. Nobody wears it
-	 * within PROBATION_MS -> back to sleep. */
+	/* ---- AFE-friendly startup: gate the ADC/DSP on on-body ----------------
+	 * Running the ADC + DSP while the AFE is still settling injects CPU/supply
+	 * noise into the front end (a feedback loop). So after wake we only advertise
+	 * and watch for on-body; continuous sampling starts only once the AFE is up.
+	 * Nobody wears it within PROBATION_MS -> back to sleep. */
 	int64_t wake = k_uptime_get();
+#if HW_DIFF
+	/* on-body = the AFE half-supply has appeared on AIN2 (P0.04). Poll it with
+	 * one-shot single-ended reads (differential ECG isn't running yet); blink the
+	 * LED ~2 Hz while waiting. */
+	while (adc_read_ain2() < ONBODY_THR) {
+		if (k_uptime_get() - wake > PROBATION_MS) enter_deep_sleep();
+		led_on(); k_msleep(100); led_off(); k_msleep(400);
+	}
+#else
 	bool running = false;
 	while (!running) {
-		/* phase 1: wait until the AFE's on-body line (P0.12) looks like it's coming
-		 * up -- a light ~200 ms debounce, since the AFE wakes slowly/weakly and we
-		 * only need "someone put it on"; the real confirmation is the post-assist
-		 * persistence check. Off-body P0.12 sits solidly low, so no false trigger. */
+		/* phase 1: P0.12 on-body comes up (light ~200 ms debounce; off-body it sits
+		 * solidly low). The real confirmation is the post-assist persistence check. */
 		led_off();
 		int lp = 0;
 		const int ONBODY_DETECT = 50;   /* ~200 ms at the 4 ms poll */
@@ -873,9 +937,20 @@ int main(void)
 			led_on(); k_msleep(100); led_off(); k_msleep(400);
 		}
 		nrf_gpio_cfg_input(CONTACT_PIN, NRF_GPIO_PIN_NOPULL);   /* back to read-only for normal op */
-		/* phase 3 gate: did on-body persist after releasing the pull-up? */
-		running = onbody_held(500);
-		wake = k_uptime_get();   /* restart the probation window if it fell off */
+		running = onbody_held(500);   /* phase 3: did on-body persist? */
+		wake = k_uptime_get();        /* restart the probation window if it fell off */
+	}
+#endif
+
+	/* now start continuous ECG (advanced mode, internal 8 kHz timer -> DMA) */
+	nrfx_saadc_adv_config_t adv = NRFX_SAADC_DEFAULT_ADV_CONFIG;
+	adv.internal_timer_cc = ADC_TIMER_CC;   /* 16 MHz / 8 kHz = 2000 */
+	adv.start_on_end      = true;           /* HW re-arms DMA into the next buffer */
+	if (nrfx_saadc_channel_config(&ecg_channel) != 0 ||
+	    nrfx_saadc_advanced_mode_set(BIT(0), NRF_SAADC_RESOLUTION_12BIT, &adv,
+					 saadc_handler) != 0) {
+		LOG_ERR("saadc ECG mode failed");
+		return -1;
 	}
 	nrfx_saadc_buffer_set(adc_bufs[0], ADC_BUF_SMP);
 	nrfx_saadc_offset_calibrate(saadc_handler);   /* -> CALIBRATEDONE -> mode_trigger: sampling starts */
@@ -883,7 +958,13 @@ int main(void)
 	int64_t session_start = k_uptime_get();
 	last_beat_ms = session_start;
 	last_motion_ms = session_start;
+#if HW_DIFF
+	float   slow_mean = 0.0f;     /* slow DC baseline of the differential ECG (off-body sits ~-188) */
+	float   ob_env = 1000.0f;     /* peak-hold AC envelope of |ECG - slow_mean|; worn >=430, off-body ~20 */
+	int64_t ob_flat_since = 0;    /* when the AC envelope first fell below the off-body floor */
+#else
 	int  contact_lp = CONTACT_DEB;   /* we entered RUN on a held on-body contact */
+#endif
 
 	/* Processing loop: the SAADC fills buffers via DMA in hardware; here we just
 	 * drain filled buffers, average OVERSAMPLE raw samples -> one 500 Hz sample,
@@ -922,17 +1003,38 @@ int main(void)
 			}
 
 			/* ---- power state machine (running = already on-body) ----
-			 * Sleep when the 3 h session cap elapses, OR the belt is taken off
-			 * (P0.12 off-body) and there's no motion for 1 min. Motion INT on
-			 * P0.14 wakes from System OFF. (Startup/on-body gating is handled
-			 * before this loop; accel runs in its own thread, battery at boot.) */
+			 * Sleep when the 3 h session cap elapses, OR the belt is off-body with
+			 * no motion for 1 min. Motion INT on P0.14 wakes from System OFF. */
 			int64_t now = k_uptime_get();
+#if HW_DIFF
+			/* No contact pin here (it's the LED). On-body is read from the signal.
+			 * The AFE stays powered off-body, so the differential does NOT collapse
+			 * to zero -- it sits on a flat DC offset (~-188). So track AC activity,
+			 * not |ECG|: a slow mean removes the DC baseline, and the envelope of
+			 * |ECG - mean| is large when worn (QRS) and ~noise floor (6) off-body. */
+			slow_mean += ((float)ns - slow_mean) * (1.0f / 1024);
+			float ac = (float)ns - slow_mean;
+			if (ac < 0.0f) ac = -ac;
+			/* peak-hold: jump up to each QRS peak, then decay slowly (~2 s). The
+			 * envelope stays high between beats when worn (>=430) and only decays
+			 * to the flat-baseline floor (~20) a few seconds after removal. A plain
+			 * EMA was too fast -- it dipped below the floor between beats. */
+			if (ac > ob_env) ob_env = ac;
+			else              ob_env -= ob_env * (1.0f / 1024);
+			dbg_obenv = (int32_t)ob_env;
+			bool contact = ob_env > OB_FLOOR;
+			if (contact) ob_flat_since = 0;
+			else if (ob_flat_since == 0) ob_flat_since = now;
+			bool offbody = !contact && ob_flat_since && (now - ob_flat_since > OFFBODY_MS);
+			bool go_sleep = (now - session_start > MAX_ACTIVE_MS) ||
+					(offbody && (now - last_motion_ms > OFFBODY_MS));
+#else
 			if (nrf_gpio_pin_read(CONTACT_PIN)) { if (contact_lp < CONTACT_DEB) contact_lp++; }
 			else                                { if (contact_lp > 0) contact_lp--; }
 			bool contact = contact_lp > (CONTACT_DEB / 2);
-
 			bool go_sleep = (now - session_start > MAX_ACTIVE_MS) ||        /* 3 h cap */
 					(!contact && (now - last_motion_ms > OFFBODY_MS)); /* off-body + still */
+#endif
 			if (go_sleep) enter_deep_sleep();   /* drops connections, System OFF; does not return */
 		}
 	}
