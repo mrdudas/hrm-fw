@@ -57,7 +57,7 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
   PR, QRS, QT, QTc; optional compensation of the front end's high-pass), live HRV (RMSSD, SDNN, pNN50 over a rolling
   5 min window, ectopic/artifact beats excluded, shown as a ~1 min moving average),
   an HRV trend card (per beat, last 2 min, fills from the left then scrolls:
-  RMSSD over the trailing 30 s, |ΔRR| per beat and beat-to-beat HR in bpm), RR/HRV tachogram, accelerometer + step count,
+  RMSSD over the trailing 30 s, |ΔRR| per beat and beat-to-beat HR in bpm), RR/HRV tachogram, accelerometer (X/Y/Z in g, tilt rate in °/s estimated from the turning of the acceleration vector, direction-independent magnitude) + step count,
   ectopy counts / burden / event log, and battery. Dark theme. The page
   reconnects its WebSocket by itself if you reload it.
 
