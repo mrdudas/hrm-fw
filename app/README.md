@@ -50,7 +50,9 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
   stay raw), big HR number + latest R-R interval (the strip's HR lane shows 60000/RR in bpm),
   a signal-averaged beat from −300 to +1200 ms around the R peak (the first
   beat is the mean, the next beat is the individual beats overlaid, newest sharpest),
-  zoomable and measurable like the strip, with Clear and CSV download, live HRV (RMSSD, SDNN, pNN50 over a rolling
+  zoomable and measurable like the strip, with Clear and CSV download, and an
+  automatic QRST analysis of the mean beat (`static/qrst.js`: P / QRS / T markers,
+  PR, QRS, QT, QTc; optional compensation of the front end's high-pass), live HRV (RMSSD, SDNN, pNN50 over a rolling
   5 min window, ectopic/artifact beats excluded, shown as a ~1 min moving average),
   an HRV trend card (per beat, last 2 min, fills from the left then scrolls:
   RMSSD over the trailing 30 s, |ΔRR| per beat and beat-to-beat HR in bpm), RR/HRV tachogram, accelerometer + step count,

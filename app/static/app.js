@@ -648,6 +648,13 @@
   const avgView = { ...AVG_VIEW };
   const avgMeas = { a: null, b: null };
   let avgHover = null;
+  // automatic QRST analysis of the mean beat (qrst.js)
+  let qrstOn = true, qrstHp = 0, qrstRes = null;
+  try {
+    qrstOn = localStorage.getItem("hrm.qrst") !== "0";
+    qrstHp = Math.max(0, parseFloat(localStorage.getItem("hrm.qrstHp")) || 0);
+  } catch (e) {}
+  const QRST_MIN_BEATS = 8;
   function avgSetData(data) {
     avgPlot.batch(() => { avgPlot.setData(data, false); avgPlot.setScale("x", avgView); });
   }
@@ -665,7 +672,9 @@
     AVG_LEN = Math.round((AVG_T1 - AVG_T0) * FS) + 1;
     avgX = Array.from({ length: AVG_LEN }, (_, i) => (i - AVG_PRE) / FS * 1000);
     segs.length = 0; pendingSegs.length = 0;
-    if (avgPlot) avgSetData([avgX, avgX.map(() => null), avgX.map(() => null), avgX.map(() => null)]);
+    qrstRes = null;
+    if (avgPlot) avgSetData([avgX, ...[0, 1, 2, 3].map(() => avgX.map(() => null))]);
+    renderQrst();
     setText("avg-count", 0);
     if ($("avg-csv")) $("avg-csv").disabled = true;
   }
@@ -703,9 +712,10 @@
       ],
       series: [{}, { stroke: COL.ecg, width: 2, points: { show: false } },      // mean, first beat
                { stroke: "transparent", points: { show: false } },      // envelope of the
-               { stroke: "transparent", points: { show: false } }],     // overlaid beats (y range)
-      hooks: { draw: [drawAvgOverlay, (u) => drawMeasure(u, true, avgMeas, avgHover, 0.001)] },
-    }, [avgX, avgX.map(() => null), avgX.map(() => null), avgX.map(() => null)], host);
+               { stroke: "transparent", points: { show: false } },      // overlaid beats (y range)
+               { stroke: COL.y, width: 1.5, points: { show: false } }], // high-pass compensated mean
+      hooks: { draw: [drawAvgOverlay, drawQrst, (u) => drawMeasure(u, true, avgMeas, avgHover, 0.001)] },
+    }, [avgX, ...[0, 1, 2, 3].map(() => avgX.map(() => null))], host);
     avgPlot.setScale("x", avgView);
   }
   // first sample of the "second beat" part: half a beat period after R
@@ -740,6 +750,58 @@
     ctx.beginPath(); ctx.moveTo(xs[0], top); ctx.lineTo(xs[0], top + height); ctx.stroke();
     ctx.restore();
   }
+  // QRST fiducials on the averaged-beat chart: wave peaks as solid lines with a
+  // letter, onsets / offsets / T end dashed
+  const QRST_MARKS = [
+    ["pOn", "", "#c792ea", true], ["P", "P", "#c792ea", false], ["pOff", "", "#c792ea", true],
+    ["qrsOn", "", "#ff5470", true], ["Q", "Q", "#8b96a5", false], ["R", "R", "#e6edf3", false],
+    ["S", "S", "#8b96a5", false], ["qrsOff", "J", "#ff5470", true],
+    ["T", "T", "#ffb454", false], ["tEnd", "Te", "#ffb454", true],
+  ];
+  function drawQrst(u) {
+    if (!qrstRes) return;
+    const ctx = u.ctx, { left, top, width, height } = u.bbox, dpr = devicePixelRatio;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(left, top, width, height); ctx.clip();
+    ctx.font = `600 ${11 * dpr}px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif`;
+    ctx.textAlign = "center"; ctx.textBaseline = "bottom"; ctx.lineWidth = dpr;
+    for (const [key, label, color, dashed] of QRST_MARKS) {
+      const v = qrstRes.fid[key];
+      if (v == null) continue;
+      const x = u.valToPos(v, "x", true);
+      ctx.strokeStyle = color; ctx.fillStyle = color;
+      ctx.globalAlpha = dashed ? 0.75 : 0.9;
+      ctx.setLineDash(dashed ? [3 * dpr, 3 * dpr] : []);
+      ctx.beginPath(); ctx.moveTo(x, top + (dashed ? 0.45 : 0.3) * height); ctx.lineTo(x, top + height); ctx.stroke();
+      if (label) { ctx.globalAlpha = 1; ctx.fillText(label, x, top + (dashed ? 0.45 : 0.3) * height - 2 * dpr); }
+    }
+    ctx.restore();
+  }
+  function renderQrst() {
+    const el = $("qrst-out");
+    if (!el) return;
+    if (!qrstOn) { el.textContent = ""; return; }
+    if (!qrstRes) {
+      el.textContent = segs.length < QRST_MIN_BEATS
+        ? `QRST: collecting beats… ${segs.length} / ${QRST_MIN_BEATS}` : "QRST: no clear complex found";
+      return;
+    }
+    const m = qrstRes.m, a = qrstRes.amp, f = (v, u = " ms") => v == null ? "–" : Math.round(v) + u;
+    const item = (k, v, tip) => `<span class="q-item" title="${tip}"><span class="q-k">${k}</span> ${v}</span>`;
+    el.innerHTML =
+      item("PR", f(m.pr), "P onset to QRS onset") +
+      item("QRS", f(m.qrs), "QRS onset to J point") +
+      item("QT", f(m.qt), "QRS onset to T end (tangent method)") +
+      item("QTc", m.qt == null ? "–" : `${Math.round(m.qtcF)} / ${Math.round(m.qtcB)} ms`, "Fridericia / Bazett, RR " + Math.round(m.rr) + " ms") +
+      item("P–R", f(m.pPeakR), "P peak to R peak") +
+      item("R–T", f(m.rtPeak), "R peak to T peak") +
+      item("HR", f(m.hr, " bpm"), "from the median RR") +
+      item("amp", ["P", "Q", "R", "S", "T"].map((k) => `${k} ${a[k] == null ? "–" : Math.round(a[k])}`).join(" · "), "wave amplitudes, ADC counts") +
+      `<span class="q-note">${qrstRes.comp
+        ? `front-end high-pass compensated at ${qrstRes.comp} Hz (orange curve) — amplitudes and QT depend on this value`
+        : "front end not compensated: timings are reliable; QT and amplitudes are estimates"}</span>`;
+  }
+
   function avgStats() {                 // mean and SD per sample over the collected beats
     const n = segs.length, mean = new Array(AVG_LEN).fill(0), sd = new Array(AVG_LEN).fill(0);
     for (const seg of segs) for (let i = 0; i < AVG_LEN; i++) mean[i] += seg[i];
@@ -764,7 +826,15 @@
       for (const seg of segs) { const v = seg[i]; if (v < a) a = v; if (v > b) b = v; }
       lo[i] = a; hi[i] = b;
     }
-    avgSetData([avgX, mean.map((v, i) => (i <= seam ? v : null)), hi, lo]);
+    // QRST analysis on the whole mean (not only up to the seam)
+    const comp = new Array(AVG_LEN).fill(null);
+    qrstRes = null;
+    if (qrstOn && segs.length >= QRST_MIN_BEATS && rrRecent.length) {
+      qrstRes = QRST.analyze(avgX, mean, FS, avgPeriod() / FS * 1000, { hpHz: qrstHp });
+      if (qrstRes && qrstRes.comp) for (let i = 0; i < qrstRes.sig.length; i++) comp[i] = qrstRes.sig[i] + qrstRes.base;
+    }
+    avgSetData([avgX, mean.map((v, i) => (i <= seam ? v : null)), hi, lo, comp]);
+    renderQrst();
   }
   function clearAvg() { resetAvg(); }
   function downloadAvg() {
@@ -775,6 +845,9 @@
       `# Govinda / HRM Raw RR signal-averaged beat, ${AVG_T0 * 1000} .. ${AVG_T1 * 1000} ms around the R peak (t_ms = 0); ` +
         `later beats in the window are not re-aligned -- sd shows their spread`,
       `# exported ${stamp.toISOString()}, ${n} beats, ECG ${FS} Hz, display notch ${notch.f0 ? notch.f0 + " Hz" : (strapNotchHz ? "in strap " + strapNotchHz + " Hz" : "off")}`,
+      ...(qrstRes ? [`# QRST (${qrstRes.comp ? "high-pass compensated at " + qrstRes.comp + " Hz" : "uncompensated"}): ` +
+        Object.entries(qrstRes.m).map(([k, v]) => `${k}=${Math.round(v)}`).join(" ") + " | fiducials ms: " +
+        Object.entries(qrstRes.fid).map(([k, v]) => `${k}=${Math.round(v)}`).join(" ")] : []),
       "t_ms,mean_adc,sd_adc",
     ];
     for (let i = 0; i < AVG_LEN; i++)
@@ -983,6 +1056,21 @@
     });
     host.addEventListener("mouseleave", () => { avgHover = null; });
     $("avg-measure-btn").addEventListener("click", () => setMeasureMode(!measureMode));
+    const qb = $("qrst-btn"), qh = $("qrst-hp");
+    qb.classList.toggle("active", qrstOn);
+    qh.value = qrstHp || "";
+    qb.addEventListener("click", () => {
+      qrstOn = !qrstOn;
+      qb.classList.toggle("active", qrstOn);
+      try { localStorage.setItem("hrm.qrst", qrstOn ? "1" : "0"); } catch (e) {}
+      drawAvg(); if (!qrstOn) { qrstRes = null; avgPlot.redraw(false); renderQrst(); }
+    });
+    qh.addEventListener("change", () => {
+      qrstHp = Math.min(100, Math.max(0, parseFloat(qh.value) || 0));
+      qh.value = qrstHp || "";
+      try { localStorage.setItem("hrm.qrstHp", String(qrstHp)); } catch (e) {}
+      drawAvg();
+    });
     updateCursor();
   }
 

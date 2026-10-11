@@ -111,12 +111,15 @@
         <span class="nowrap">last <input id="avg-n" type="number" min="5" max="300" step="5" value="50" class="avg-n"> beats</span>
         <span class="nowrap">· <span id="avg-count">0</span> collected · RR <span id="avg-rr">–</span></span>
         <span class="sep"></span>
+        <button id="qrst-btn" class="tool-btn" title="Automatic QRST analysis of the mean beat: P, QRS and T markers with PR / QRS / QT">QRST</button>
+        <span class="nowrap" title="Front-end high-pass corner to compensate, in Hz (empty = off). The strap's input stage flattens the T wave; with the right corner the analysis restores it (orange curve).">HP comp <input id="qrst-hp" type="number" min="0" max="100" step="0.5" placeholder="off" class="avg-n"> Hz</span>
         <button id="avg-measure-btn" class="tool-btn" title="Measure time (M): click start, click end. Esc clears. Scroll: zoom · drag: pan · double-click: whole window">📏 Measure</button>
         <button id="avg-clear" class="tool-btn" title="Discard the collected beats and start a new average">Clear</button>
         <button id="avg-csv" class="tool-btn" title="Download the averaged beat (mean and SD per sample) as CSV" disabled>Download CSV</button>
       </span>
     </div>
     <div id="avg-chart" class="chart-avg"></div>
+    <div id="qrst-out" class="qrst-out"></div>
   </section>
 
   <!-- ectopy -->
@@ -142,6 +145,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
 <script src="/static/clock.js"></script>
+<script src="/static/qrst.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
