@@ -50,8 +50,8 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
   stay raw), big HR number + latest R-R interval (the strip's HR lane shows 60000/RR in bpm),
   a signal-averaged beat with Clear and CSV download (mean + SD per sample), live HRV (RMSSD, SDNN, pNN50 over a rolling
   5 min window, ectopic/artifact beats excluded, shown as a ~1 min moving average),
-  an HRV trend card (RMSSD per minute, 5 min moving average and the live smoothed
-  value over the whole session), RR/HRV tachogram, accelerometer + step count,
+  an HRV trend card (per beat, last 2 min, fills from the left then scrolls:
+  RMSSD over the trailing 30 s, |ΔRR| per beat and beat-to-beat HR in bpm), RR/HRV tachogram, accelerometer + step count,
   ectopy counts / burden / event log, and battery. Dark theme. The page
   reconnects its WebSocket by itself if you reload it.
 
