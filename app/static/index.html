@@ -107,9 +107,9 @@
     <div class="card-head">
       <h2>Signal-averaged beat</h2>
       <span class="hint avg-tools">
-        R-aligned average of last
+        two beats, aligned on the first R · mean ± SD of last
         <input id="avg-n" type="number" min="5" max="300" step="5" value="50" class="avg-n">
-        beats · <span id="avg-count">0</span> collected
+        beats · <span id="avg-count">0</span> collected · RR <span id="avg-rr">–</span>
         <span class="sep"></span>
         <button id="avg-clear" class="tool-btn" title="Discard the collected beats and start a new average">Clear</button>
         <button id="avg-csv" class="tool-btn" title="Download the averaged beat (mean and SD per sample) as CSV" disabled>Download CSV</button>
