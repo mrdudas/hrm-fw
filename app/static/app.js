@@ -1,6 +1,7 @@
 /* HRM Raw RR dashboard client.
  * Connects to /ws, keeps rolling ring buffers, and drives (all uPlot / canvas):
- *   - the live strip: ECG + Accel X/Y/Z + RR as stacked lanes on one time axis
+ *   - the live strip: ECG + accelerometer (X/Y/Z, rotation rate, |a|) as stacked
+ *     lanes on one time axis
  *   - the signal-averaged (R-aligned) beat
  *   - plain DOM for HR, steps, ectopy counts/log and battery.
  *
@@ -15,7 +16,7 @@
 (() => {
   "use strict";
 
-  const COL = { ecg:"#4bd1a0", beat:"#ff2d2d", rr:"#ff5470", x:"#5aa2ff", y:"#ffb454", z:"#c792ea",
+  const COL = { ecg:"#4bd1a0", beat:"#ff2d2d", rr:"#ff5470", x:"#5aa2ff", y:"#ffb454", z:"#c792ea", rot:"#f78c6c", mag:"#7fdbca",
                 grid:"#232936", gridMinor:"#1b2029", text:"#8b96a5",
                 meas:"#f2f5f8", measFill:"rgba(242,245,248,0.07)", measBox:"rgba(14,17,22,0.85)" };
   const FONT = "11px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif";
@@ -152,8 +153,30 @@
   const accI = new Float64Array(ACC_RING), accX = new Float32Array(ACC_RING),
         accY = new Float32Array(ACC_RING), accZ = new Float32Array(ACC_RING);
   const accFit = new StreamClock(1 / ACC_FS, 0.25);
+  // derived per sample: tilt rate (deg/s) and magnitude (g). There is no gyro:
+  // the rotation rate is how fast the direction of the measured acceleration
+  // (mostly gravity) turns, so a turn about the vertical axis is invisible and
+  // strong linear acceleration leaks into it.
+  const accW = new Float32Array(ACC_RING).fill(NaN), accM = new Float32Array(ACC_RING);
+  const ACC_G = 16384;        // LSB per g (SC7A20, +-2 g, left-justified int16)
   const ACC_CH = [["x", accX], ["y", accY], ["z", accZ]];
+  const accDir = { n: 0, k: -1, h: [], p: null };   // 3-sample mean direction, previous one
   let accN = 0, accK = 0;     // stored count, packet counter (no seq in the packet)
+  // angle between consecutive 3-sample mean vectors, per second (NaN across a gap)
+  function accRot(x, y, z) {
+    const d = accDir;
+    if (accK !== d.k + 1) { d.h.length = 0; d.p = null; }
+    d.k = accK;
+    d.h.push([x, y, z]); if (d.h.length > 3) d.h.shift();
+    if (d.h.length < 3) return NaN;
+    const s = [0, 0, 0];
+    for (const v of d.h) { s[0] += v[0]; s[1] += v[1]; s[2] += v[2]; }
+    const p = d.p; d.p = s;
+    if (!p) return NaN;
+    const cx = p[1] * s[2] - p[2] * s[1], cy = p[2] * s[0] - p[0] * s[2], cz = p[0] * s[1] - p[1] * s[0];
+    const dot = p[0] * s[0] + p[1] * s[1] + p[2] * s[2];
+    return Math.atan2(Math.hypot(cx, cy, cz), dot) * 180 / Math.PI * ACC_FS;
+  }
   let accLastArrival = 0, accLinkBroken = false;
   function pushAccel(m, ta) {
     if (accLinkBroken && accN > 0) {   // after a real link break, skip the counter by the gap
@@ -162,7 +185,10 @@
     accLinkBroken = false;
     accFit.add(accK, ta);
     const j = accN % ACC_RING;
-    accI[j] = accK; accX[j] = m.x; accY[j] = m.y; accZ[j] = m.z;
+    const x = m.x / ACC_G, y = m.y / ACC_G, z = m.z / ACC_G;
+    accI[j] = accK; accX[j] = x; accY[j] = y; accZ[j] = z;
+    accM[j] = Math.hypot(x, y, z);
+    accW[j] = accRot(x, y, z);
     accE[j] = m.ecg_index != null ? hubToClientEcg(m.ecg_index) : NaN;
     accN++; accK++; accLastArrival = ta;
   }
@@ -458,9 +484,10 @@
 
   const LANES = [
     { key: "ecg", label: "ECG", h: 240, color: COL.ecg, width: 1.2, minSpan: 200, paper: true },
-    { key: "x",   label: "X",   h: 66,  color: COL.x,   width: 1,   minSpan: 400 },
-    { key: "y",   label: "Y",   h: 66,  color: COL.y,   width: 1,   minSpan: 400 },
-    { key: "z",   label: "Z",   h: 92,  color: COL.z,   width: 1,   minSpan: 400, bottom: true },
+    { key: "acc", label: "XYZ g",    h: 96, color: [COL.x, COL.y, COL.z], width: 1, minSpan: 0.1,
+      legend: ["X", "Y", "Z"] },
+    { key: "rot", label: "Rot °/s",  h: 66, color: COL.rot, width: 1, minSpan: 20, floor: 0 },
+    { key: "mag", label: "|a| g",    h: 92, color: COL.mag, width: 1, minSpan: 0.1, bottom: true },
   ];
 
   function laneOpts(L, width) {
@@ -477,8 +504,10 @@
       axes.unshift({ scale: "x", side: 2, size: 0, incrs: [0.04, 0.2, 1, 5], space: 8,
                      grid: { stroke: COL.gridMinor, width: 1 }, ticks: { show: false }, values: () => [] });
     }
-    const series = [{}, { stroke: L.color, width: L.width, spanGaps: false, points: { show: false } }];
+    const series = [{}];
+    for (const c of [].concat(L.color)) series.push({ stroke: c, width: L.width, spanGaps: false, points: { show: false } });
     const hooks = { draw: [(u) => drawMeasure(u, L.key === "ecg")] };
+    if (L.legend) hooks.draw.unshift((u) => drawLaneLegend(u, L));
     if (L.key === "ecg") hooks.draw.unshift(drawBeatDots);
     return {
       width, height: L.h, legend: { show: false }, pxAlign: 0,
@@ -488,6 +517,23 @@
       scales: { x: { time: false, auto: false }, y: { auto: false } },
       axes, series, hooks,
     };
+  }
+
+  // colour key of a multi-trace lane, top left inside the plot
+  function drawLaneLegend(u, L) {
+    const ctx = u.ctx, dpr = devicePixelRatio;
+    ctx.save();
+    ctx.font = `600 ${11 * dpr}px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif`;
+    ctx.textBaseline = "top"; ctx.textAlign = "left";
+    let x = u.bbox.left + 6 * dpr;
+    const tw = L.legend.reduce((w, name) => w + ctx.measureText(name).width + 8 * dpr, 0);
+    ctx.fillStyle = COL.measBox; ctx.fillRect(x - 4 * dpr, u.bbox.top + dpr, tw, 15 * dpr);
+    L.legend.forEach((name, i) => {
+      ctx.fillStyle = L.color[i];
+      ctx.fillText(name, x, u.bbox.top + 3 * dpr);
+      x += ctx.measureText(name).width + 8 * dpr;
+    });
+    ctx.restore();
   }
 
   function drawBeatDots(u) {
@@ -554,12 +600,16 @@
       const div = document.createElement("div");
       div.className = "lane";
       host.appendChild(div);
-      lanes[L.key] = { u: new uPlot(laneOpts(L, w), [[], []], div), range: autoRange(L.minSpan) };
+      const range = autoRange(L.minSpan);
+      lanes[L.key] = { u: new uPlot(laneOpts(L, w), [[], ...[].concat(L.color).map(() => [])], div),
+                       range: L.floor == null ? range : (a, b) => {   // lane pinned to a floor (rate >= 0)
+                         const r = range(L.floor, b); return { min: L.floor, max: r.max }; } };
     }
   }
 
   // reusable plain arrays (uPlot needs null for gaps, typed arrays can't hold it)
-  const ecgXs = [], ecgYs = [], accXs = [], accVs = { x: [], y: [], z: [] };
+  const ecgXs = [], ecgYs = [], accXs = [], accVs = { x: [], y: [], z: [], rot: [], mag: [] };
+  const ACC_KEYS = ["x", "y", "z", "rot", "mag"];
   function update(key, data, xr, dmin, dmax) {
     const lane = lanes[key];
     lane.u.batch(() => {
@@ -612,8 +662,10 @@
     update("ecg", [ecgXs, ecgYs], xr, emin, emax);
 
     // accelerometer: walk back from the newest sample
-    accXs.length = 0; accVs.x.length = 0; accVs.y.length = 0; accVs.z.length = 0;
-    const mm = { x: [Infinity, -Infinity], y: [Infinity, -Infinity], z: [Infinity, -Infinity] };
+    accXs.length = 0;
+    for (const c of ACC_KEYS) accVs[c].length = 0;
+    const mm = { acc: [Infinity, -Infinity], rot: [Infinity, -Infinity], mag: [Infinity, -Infinity] };
+    const span = (r, v) => { if (v < r[0]) r[0] = v; if (v > r[1]) r[1] = v; };
     const accT = (k) => {
       const j = k % ACC_RING, e = accE[j];
       return e === e ? ecgFit.t(e) : accFit.t(accI[j]);
@@ -628,15 +680,17 @@
       // break the line instead of drawing a straight segment across the gap
       if (accXs.length && x - accXs[accXs.length - 1] > 3 / ACC_FS) {
         accXs.push((x + accXs[accXs.length - 1]) / 2);
-        for (const c of ["x", "y", "z"]) accVs[c].push(null);
+        for (const c of ACC_KEYS) accVs[c].push(null);
       }
       accXs.push(x);
-      for (const [c, arr] of ACC_CH) {
-        const v = arr[j]; accVs[c].push(v);
-        if (v < mm[c][0]) mm[c][0] = v; if (v > mm[c][1]) mm[c][1] = v;
-      }
+      for (const [c, arr] of ACC_CH) { accVs[c].push(arr[j]); span(mm.acc, arr[j]); }
+      const w = accW[j];
+      accVs.rot.push(w === w ? w : null); if (w === w) span(mm.rot, w);
+      accVs.mag.push(accM[j]); span(mm.mag, accM[j]);
     }
-    for (const c of ["x", "y", "z"]) update(c, [accXs, accVs[c]], xr, mm[c][0], mm[c][1]);
+    update("acc", [accXs, accVs.x, accVs.y, accVs.z], xr, mm.acc[0], mm.acc[1]);
+    update("rot", [accXs, accVs.rot], xr, mm.rot[0], mm.rot[1]);
+    update("mag", [accXs, accVs.mag], xr, mm.mag[0], mm.mag[1]);
 
   }
 
