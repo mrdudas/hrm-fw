@@ -979,6 +979,13 @@ int main(void)
 			int32_t acc = 0;
 			for (int j = 0; j < OVERSAMPLE; j++) acc += buf[i + j];
 			int16_t raw = (int16_t)(acc / OVERSAMPLE);   /* 12-bit range preserved */
+#if HW_DIFF
+			/* The differential AFE output is inverted (R-wave points down). Flip
+			 * polarity at the source so the whole pipeline -- stream, detector,
+			 * envelope -- sees an upright ECG. Safe: the signed differential sits
+			 * near 0 (range ~+-2048), well clear of INT16_MIN. */
+			raw = (int16_t)(-raw);
+#endif
 
 			/* Levkov 50 Hz subtraction (deterministic, no ring); output is
 			 * delayed LV_M samples, both streamed and fed to the detector
