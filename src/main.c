@@ -87,6 +87,21 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 #define MOTION_THR     1200               /* accel high-pass magnitude that counts as "moving" */
 #define LED_PULSE_N    (SAMPLE_HZ*12/1000) /* ~12 ms LED pulse per beat (fs-relative) */
 
+/* HP (high-pass) compensation of the STREAM. The AFE still has a residual
+ * high-pass (~fc) that flattens P/T and tilts the baseline; a first-order
+ * shelving filter undoes it -- unity gain above fc, boosted below (DC gain
+ * (1-b)/(1-a) ~= 9.7), with a safety corner f0 so a continuous stream's
+ * baseline can't run away. Applied to the streamed sample ONLY; the detector
+ * and off-body envelope stay on the uncompensated signal (cleanest baseline).
+ * fc is Zsolt's by-eye value from the app, NOT measured, so keep it retunable.
+ * The host is told via the GATT info char (flags bit2 + fc byte) so it disables
+ * its own HP comp and doesn't double-compensate. */
+#ifndef HP_COMP
+#define HP_COMP        HW_DIFF
+#endif
+#define HP_COMP_FC_X10 50     /* fc = 5.0 Hz (0.1 Hz units; reported in GATT info) */
+#define HP_COMP_F0_X10 5      /* f0 = 0.5 Hz safety corner */
+
 /* 8-22 Hz band-pass (Butterworth order 2 -> 4th order section) @500 Hz */
 static const float BP_b[] = {0.00686787f, 0.0f, -0.01373573f, 0.0f, 0.00686787f};
 static const float BP_a[] = {1.0f, -3.70011109f, 5.18676736f, -3.26571330f, 0.77973946f};
@@ -300,17 +315,25 @@ static void cap_ccc_changed(const struct bt_gatt_attr *a, uint16_t v) { cap_ccc 
 
 /* Stream descriptor so the host sets its time axis from the strap, not a hard-coded
  * rate. LE: u16 sample_hz, u16 raw_batch, u8 sample_bytes, u8 fmt_ver, u16 acc_div,
- * u8 flags (bit0 = stream is mains-filtered in firmware; bit1 = 60 Hz, 0 = 50). */
+ * u8 flags (bit0 = stream mains-filtered in firmware; bit1 = 60 Hz, 0 = 50;
+ * bit2 = stream HP-compensated in firmware), u8 hp_comp_fc (0.1 Hz units; 0 = none).
+ * The host reads bit2 to disable its own HP comp (no double compensation). */
 static ssize_t read_cap_info(struct bt_conn *c, const struct bt_gatt_attr *a,
 			     void *buf, uint16_t len, uint16_t off)
 {
-	uint8_t info[9];
+	uint8_t info[10];
 	sys_put_le16(SAMPLE_HZ, &info[0]);
 	sys_put_le16(RAW_BATCH, &info[2]);
 	info[4] = 2;
 	info[5] = 1;
 	sys_put_le16(SAMPLE_HZ / 25, &info[6]);
 	info[8] = 0x01;   /* mains-filtered (Levkov) @ 50 Hz */
+#if HP_COMP
+	info[8] |= 0x04;                 /* stream is HP-compensated in firmware */
+	info[9] = HP_COMP_FC_X10;        /* comp corner, 0.1 Hz units (50 = 5.0 Hz) */
+#else
+	info[9] = 0;                     /* no firmware HP comp */
+#endif
 	return bt_gatt_attr_read(c, a, buf, len, off, info, sizeof(info));
 }
 
@@ -965,6 +988,14 @@ int main(void)
 #else
 	int  contact_lp = CONTACT_DEB;   /* we entered RUN on a held on-body contact */
 #endif
+#if HP_COMP
+	/* First-order shelving HP-compensation: y = a*y1 + x - b*x1.
+	 * b = exp(-2*pi*fc/fs), a = exp(-2*pi*f0/fs); fc=5 Hz, f0=0.5 Hz, fs=500 Hz.
+	 * DC gain (1-b)/(1-a) ~= 9.7. If HP_COMP_FC_X10/F0_X10 change, recompute these. */
+	const float hp_b = 0.939101f;   /* exp(-2*pi*5/500)   */
+	const float hp_a = 0.993737f;   /* exp(-2*pi*0.5/500) */
+	float hp_y = 0.0f, hp_xp = 0.0f;
+#endif
 
 	/* Processing loop: the SAADC fills buffers via DMA in hardware; here we just
 	 * drain filled buffers, average OVERSAMPLE raw samples -> one 500 Hz sample,
@@ -994,13 +1025,26 @@ int main(void)
 			lv = CLAMP(lv + (lv >= 0 ? 0.5f : -0.5f), -32768.0f, 32767.0f);
 			int16_t ns = (int16_t)lv;
 
-			detector_feed(ns);
+			detector_feed(ns);   /* detector runs on the uncompensated signal */
 
 			sample_idx++;
 			if (led_off_idx && sample_idx >= led_off_idx) { led_off(); led_off_idx = 0; }
 
-			/* raw (mains-subtracted) ECG streaming (only when a client subscribes) */
-			sys_put_le16((uint16_t)ns, &raw_buf[2 + rn * 2]);
+#if HP_COMP
+			/* shelving filter restores the lows the AFE high-pass removed; the
+			 * stream carries the compensated value (the detector/envelope above
+			 * already saw the raw ns). */
+			float hp_x = (float)ns;
+			hp_y = hp_a * hp_y + hp_x - hp_b * hp_xp;
+			hp_xp = hp_x;
+			int16_t out = (int16_t)CLAMP(hp_y + (hp_y >= 0 ? 0.5f : -0.5f),
+						     -32768.0f, 32767.0f);
+#else
+			int16_t out = ns;
+#endif
+
+			/* raw ECG streaming (only when a client subscribes) */
+			sys_put_le16((uint16_t)out, &raw_buf[2 + rn * 2]);
 			if (++rn >= RAW_BATCH) {
 				sys_put_le16(seq++, &raw_buf[0]);
 				if (cap_ccc) {
