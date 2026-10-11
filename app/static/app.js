@@ -824,9 +824,18 @@
 
   // second beat: every collected beat drawn individually, oldest first and faint,
   // the newest last and sharpest
+  // y shift of each overlaid beat so that it starts where the mean ends: a beat's
+  // own baseline offset would otherwise show as a step at the seam
+  let avgOff = new Float32Array(0);
+  function avgSeamOffsets(mean, seam) {
+    const h = Math.max(1, Math.round(0.004 * FS)), a = Math.max(0, seam - h), b = Math.min(AVG_LEN - 1, seam + h);
+    const lvl = (v) => { let t = 0; for (let i = a; i <= b; i++) t += v[i]; return t / (b - a + 1); };
+    const m = lvl(mean);
+    avgOff = Float32Array.from(avgUse, (seg) => m - lvl(seg));
+  }
   function drawAvgOverlay(u) {
     const n = avgUse.length;
-    if (!n) return;
+    if (!n || avgOff.length !== n) return;
     const ctx = u.ctx, { left, top, width, height } = u.bbox, dpr = devicePixelRatio, seam = avgSeam();
     ctx.save();
     ctx.beginPath(); ctx.rect(left, top, width, height); ctx.clip();
@@ -835,13 +844,13 @@
     for (let i = seam; i < AVG_LEN; i++) xs[i - seam] = u.valToPos(avgX[i], "x", true);
     ctx.strokeStyle = COL.ecg; ctx.lineJoin = "round";
     for (let k = 0; k < n; k++) {
-      const seg = avgUse[k], newest = k === n - 1;
+      const seg = avgUse[k], off = avgOff[k], newest = k === n - 1;
       const age = (k + 1) / n;                       // 1 = newest
       ctx.globalAlpha = newest ? 1 : 0.05 + 0.5 * age * age * age;
       ctx.lineWidth = (newest ? 2 : 1) * dpr;
       ctx.beginPath();
       for (let i = seam; i < AVG_LEN; i++) {
-        const y = u.valToPos(seg[i], "y", true);
+        const y = u.valToPos(seg[i] + off, "y", true);
         if (i === seam) ctx.moveTo(xs[0], y); else ctx.lineTo(xs[i - seam], y);
       }
       ctx.stroke();
@@ -973,10 +982,11 @@
     // first beat: mean; second beat: no averaging -- only the envelope of the
     // individual beats goes in as invisible series, so the y axis fits them
     const { mean } = avgStats(), seam = avgSeam();
+    avgSeamOffsets(mean, seam);
     const hi = new Array(AVG_LEN).fill(null), lo = new Array(AVG_LEN).fill(null);
     for (let i = seam; i < AVG_LEN; i++) {
       let a = Infinity, b = -Infinity;
-      for (const seg of avgUse) { const v = seg[i]; if (v < a) a = v; if (v > b) b = v; }
+      avgUse.forEach((seg, k) => { const v = seg[i] + avgOff[k]; if (v < a) a = v; if (v > b) b = v; });
       lo[i] = a; hi[i] = b;
     }
     // QRST analysis on the whole mean (not only up to the seam)
