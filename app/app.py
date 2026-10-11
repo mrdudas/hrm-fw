@@ -56,7 +56,7 @@ async def run_dashboard(args):
     recorder = CSVRecorder(RECORDINGS_DIR, session)
     hub = Hub(recorder)
 
-    app = make_app(hub)
+    app = make_app(hub, log=log)
     runner = await start_server(app, args.host, args.port)
     url = f"http://{args.host}:{args.port}"
     log(f"dashboard at {url}")
