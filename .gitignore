@@ -23,3 +23,5 @@ host/hrlog.json
 # local firmware restore points
 restore-*.hex
 app/device.json
+resume-firmware.sh
+resume-app.sh
