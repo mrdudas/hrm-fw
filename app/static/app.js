@@ -173,10 +173,12 @@
   let SNAP_BACK = Math.round(0.35 * FS), SNAP_FWD = Math.round(0.12 * FS);
   // Signal-averaged beat, two beats long: every segment is one continuous piece
   // of ECG aligned on its FIRST R peak only (R at 0 ms) and two beat periods
-  // long. The second beat is deliberately not re-aligned: RR varies, so its QRS
-  // lands at slightly different times and the mean smears there -- the +/- SD
-  // band drawn around the mean shows exactly that spread. avgM (the period, in
-  // samples) is the median RR when collection starts; Clear picks a new one.
+  // long. The first beat (up to half a period after R) is shown as the mean.
+  // The second beat is deliberately neither re-aligned nor averaged: RR varies,
+  // so its QRS lands at slightly different times -- there the individual beats
+  // are drawn on top of each other, the newest sharpest and older ones fading
+  // out. avgM (the period, in samples) is the median RR when collection starts;
+  // Clear picks a new one.
   let AVG_PRE = Math.round(0.20 * FS);      // -200 ms before R1
   let avgM = null;                          // beat period in samples; null = not set yet
   let AVG_LEN = 0;                          // 2 * avgM
@@ -686,11 +688,42 @@
         { stroke: COL.text, font: FONT, grid: { stroke: COL.grid }, ticks: { show: false },
           label: "ECG (avg)", labelSize: 14, labelFont: FONT, size: 50 },
       ],
-      series: [{}, { stroke: COL.ecg, width: 2, points: { show: false } },
-               { stroke: "transparent", points: { show: false } },      // mean + SD
-               { stroke: "transparent", points: { show: false } }],     // mean - SD
-      bands: [{ series: [2, 3], fill: "rgba(75,209,160,0.22)" }],
+      series: [{}, { stroke: COL.ecg, width: 2, points: { show: false } },      // mean, first beat
+               { stroke: "transparent", points: { show: false } },      // envelope of the
+               { stroke: "transparent", points: { show: false } }],     // overlaid beats (y range)
+      hooks: { draw: [drawAvgOverlay] },
     }, [avgX, [], [], []], host);
+  }
+  const avgSeam = () => AVG_PRE + (avgM >> 1);      // first sample of the "second beat" part
+
+  // second beat: every collected beat drawn individually, oldest first and faint,
+  // the newest last and sharpest
+  function drawAvgOverlay(u) {
+    const n = segs.length;
+    if (!n || !avgM) return;
+    const ctx = u.ctx, { left, top, width, height } = u.bbox, dpr = devicePixelRatio, seam = avgSeam();
+    ctx.save();
+    ctx.beginPath(); ctx.rect(left, top, width, height); ctx.clip();
+    // x pixel of every sample once, shared by all traces
+    const xs = new Float32Array(AVG_LEN - seam);
+    for (let i = seam; i < AVG_LEN; i++) xs[i - seam] = u.valToPos(avgX[i], "x", true);
+    ctx.strokeStyle = COL.ecg; ctx.lineJoin = "round";
+    for (let k = 0; k < n; k++) {
+      const seg = segs[k], newest = k === n - 1;
+      const age = (k + 1) / n;                       // 1 = newest
+      ctx.globalAlpha = newest ? 1 : 0.05 + 0.5 * age * age * age;
+      ctx.lineWidth = (newest ? 2 : 1) * dpr;
+      ctx.beginPath();
+      for (let i = seam; i < AVG_LEN; i++) {
+        const y = u.valToPos(seg[i], "y", true);
+        if (i === seam) ctx.moveTo(xs[0], y); else ctx.lineTo(xs[i - seam], y);
+      }
+      ctx.stroke();
+    }
+    // where the mean ends and the overlay begins
+    ctx.globalAlpha = 1; ctx.strokeStyle = COL.grid; ctx.lineWidth = dpr; ctx.setLineDash([4 * dpr, 4 * dpr]);
+    ctx.beginPath(); ctx.moveTo(xs[0], top); ctx.lineTo(xs[0], top + height); ctx.stroke();
+    ctx.restore();
   }
   function avgStats() {                 // mean and SD per sample over the collected beats
     const n = segs.length, mean = new Array(AVG_LEN).fill(0), sd = new Array(AVG_LEN).fill(0);
@@ -707,8 +740,16 @@
     setText("avg-count", segs.length);
     $("avg-csv").disabled = !segs.length;
     if (!segs.length) return;
-    const { mean, sd } = avgStats();
-    avgPlot.setData([avgX, mean, mean.map((v, i) => v + sd[i]), mean.map((v, i) => v - sd[i])]);
+    // first beat: mean; second beat: no averaging -- only the envelope of the
+    // individual beats goes in as invisible series, so the y axis fits them
+    const { mean } = avgStats(), seam = avgSeam();
+    const hi = new Array(AVG_LEN).fill(null), lo = new Array(AVG_LEN).fill(null);
+    for (let i = seam; i < AVG_LEN; i++) {
+      let a = Infinity, b = -Infinity;
+      for (const seg of segs) { const v = seg[i]; if (v < a) a = v; if (v > b) b = v; }
+      lo[i] = a; hi[i] = b;
+    }
+    avgPlot.setData([avgX, mean.map((v, i) => (i <= seam ? v : null)), hi, lo]);
   }
   function clearAvg() {      // also picks a new beat period from the current heart rate
     setAvgPeriod(null);
