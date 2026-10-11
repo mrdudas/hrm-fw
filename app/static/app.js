@@ -135,6 +135,7 @@
   // only notch twice -> force it off and say so; otherwise honour the user's choice
   function onEcgInfo(msg) {
     strapNotchHz = msg.notched_hz || 0;
+    setStrapHpComp(!!msg.hp_comp, msg.hp_comp_hz || 0);
     const ns = $("notch-sel");
     const strapOpt = ns.querySelector('option[value="strap"]');
     if (strapNotchHz) {
@@ -732,6 +733,23 @@
   const AVG_GAIN_MAX = 2.5;                 // amplitude more than this far off the median: artifact
   // automatic QRST analysis of the mean beat (qrst.js)
   let qrstOn = true, qrstHp = 0, qrstRes = null;
+  // the strap may already undo its front-end high-pass in the stream (a1b20003
+  // flag): then the compensation here would be applied twice, so it is disabled
+  let strapHpComp = false, strapHpHz = 0;
+  function setStrapHpComp(on, hz) {
+    if (on === strapHpComp && hz === strapHpHz) return;
+    strapHpComp = on; strapHpHz = hz;
+    const qh = $("qrst-hp");
+    if (qh) {
+      qh.disabled = on;
+      qh.value = on ? "" : (qrstHp || "");
+      qh.placeholder = on ? "strap" : "off";
+      qh.parentElement.title = on
+        ? `The strap already compensates its front-end high-pass in the ECG stream${hz ? " (" + hz + " Hz)" : ""}; nothing is added here`
+        : qh.parentElement.dataset.tip;
+    }
+    if (avgPlot) drawAvg();
+  }
   try {
     qrstOn = localStorage.getItem("hrm.qrst") !== "0";
     qrstHp = Math.max(0, parseFloat(localStorage.getItem("hrm.qrstHp")) || 0);
@@ -887,7 +905,9 @@
       item("amp", ["P", "Q", "R", "S", "T"].map((k) => `${k} ${a[k] == null ? "–" : Math.round(a[k])}`).join(" · "), "wave amplitudes, ADC counts") +
       `<span class="q-note">${qrstRes.comp
         ? `front-end high-pass compensated at ${qrstRes.comp} Hz (orange curve) — amplitudes and QT depend on this value`
-        : "front end not compensated: timings are reliable; QT and amplitudes are estimates"}</span>`;
+        : strapHpComp
+          ? `front-end high-pass compensated in the strap${strapHpHz ? " at " + strapHpHz + " Hz" : ""} — amplitudes and QT depend on that corner`
+          : "front end not compensated: timings are reliable; QT and amplitudes are estimates"}</span>`;
   }
 
   // Build avgUse from the collected raw segments.
@@ -963,7 +983,7 @@
     const comp = new Array(AVG_LEN).fill(null);
     qrstRes = null;
     if (qrstOn && avgUse.length >= QRST_MIN_BEATS && rrRecent.length) {
-      qrstRes = QRST.analyze(avgX, mean, FS, avgPeriod() / FS * 1000, { hpHz: qrstHp });
+      qrstRes = QRST.analyze(avgX, mean, FS, avgPeriod() / FS * 1000, { hpHz: strapHpComp ? 0 : qrstHp });
       if (qrstRes && qrstRes.comp) for (let i = 0; i < qrstRes.sig.length; i++) comp[i] = qrstRes.sig[i] + qrstRes.base;
     }
     avgSetData([avgX, mean.map((v, i) => (i <= seam ? v : null)), hi, lo, comp]);
@@ -978,7 +998,8 @@
       `# Govinda / HRM Raw RR signal-averaged beat, ${AVG_T0 * 1000} .. ${AVG_T1 * 1000} ms around the R peak (t_ms = 0); ` +
         `later beats in the window are not re-aligned -- sd shows their spread`,
       `# exported ${stamp.toISOString()}, ${n} beats, ECG ${FS} Hz, display notch ${notch.f0 ? notch.f0 + " Hz" : (strapNotchHz ? "in strap " + strapNotchHz + " Hz" : "off")}`,
-      ...(qrstRes ? [`# QRST (${qrstRes.comp ? "high-pass compensated at " + qrstRes.comp + " Hz" : "uncompensated"}): ` +
+      ...(qrstRes ? [`# QRST (${qrstRes.comp ? "high-pass compensated at " + qrstRes.comp + " Hz"
+        : strapHpComp ? "high-pass compensated in the strap" + (strapHpHz ? " at " + strapHpHz + " Hz" : "") : "uncompensated"}): ` +
         Object.entries(qrstRes.m).map(([k, v]) => `${k}=${Math.round(v)}`).join(" ") + " | fiducials ms: " +
         Object.entries(qrstRes.fid).map(([k, v]) => `${k}=${Math.round(v)}`).join(" ")] : []),
       `# beats: ${avgUse.length} averaged of ${segs.length} collected` + (avgNorm
@@ -1204,7 +1225,9 @@
     });
     const qb = $("qrst-btn"), qh = $("qrst-hp");
     qb.classList.toggle("active", qrstOn);
-    qh.value = qrstHp || "";
+    qh.parentElement.dataset.tip = qh.parentElement.title;
+    if (!strapHpComp) qh.value = qrstHp || "";
+    else { const on = strapHpComp, hz = strapHpHz; strapHpComp = !on; setStrapHpComp(on, hz); }
     qb.addEventListener("click", () => {
       qrstOn = !qrstOn;
       qb.classList.toggle("active", qrstOn);

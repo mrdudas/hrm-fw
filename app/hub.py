@@ -101,8 +101,10 @@ class Hub:
         self._ecg_last_seq = None     # new connection: a seq repeat across it is not a duplicate
         self.ecg_fs = fs
         self.recorder.set_ecg_fs(fs, info)
-        # tell the dashboard whether the strap already notches mains hum
-        self._emit({"type": "ecg_info", "fs": fs, "notched_hz": info.get("notched_hz", 0)},
+        # tell the dashboard what the strap already did to the stream (mains notch,
+        # front-end high-pass compensation), so it is not done a second time
+        self._emit({"type": "ecg_info", "fs": fs, "notched_hz": info.get("notched_hz", 0),
+                    "hp_comp": bool(info.get("hp_comp")), "hp_comp_hz": info.get("hp_comp_hz", 0)},
                    snapshot_key="ecg_info")
 
     def publish_ecg(self, seq: int, samples: list):
