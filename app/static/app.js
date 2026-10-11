@@ -29,7 +29,27 @@
 
   const now = () => (performance.timeOrigin + performance.now()) / 1000;
   const $ = (id) => document.getElementById(id);
-  function setText(id, v) { const e = $(id); if (e) e.textContent = v; }
+  // DOM text is written only when it changes: an unchanged value costs nothing
+  // (no style recalculation, layout or repaint of the surrounding card)
+  const textShown = new Map();
+  function setText(id, v) {
+    v = String(v);
+    if (textShown.get(id) === v) return;
+    const e = $(id);
+    if (e) { e.textContent = v; textShown.set(id, v); }
+  }
+
+  // troubleshooting switches in the page URL:
+  //   ?fps=30  cap the chart redraw rate (default 60, also on 120 Hz displays)
+  //   ?sw=1    software-rendered canvases (rules out GPU canvas glitches)
+  const URL_OPT = new URLSearchParams(location.search);
+  const FRAME_MIN = 1 / Math.min(240, Math.max(5, +URL_OPT.get("fps") || 60)) - 0.003;
+  if (URL_OPT.get("sw") === "1") {
+    const getContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, opts) {
+      return getContext.call(this, type, type === "2d" ? { ...opts, willReadFrequently: true } : opts);
+    };
+  }
 
   // ---------- ECG ring buffer (continuous client-side sample index) ----------
   // ecgRaw: samples as received (the CSV is written server-side, always raw).
@@ -842,19 +862,22 @@
     }
     ctx.restore();
   }
+  let qrstHtml = "";
   function renderQrst() {
+    const html = qrstMarkup();
+    if (html === qrstHtml) return;          // rebuilt only when a value changed
     const el = $("qrst-out");
-    if (!el) return;
-    if (!qrstOn) { el.textContent = ""; return; }
+    if (el) { el.innerHTML = html; qrstHtml = html; }
+  }
+  function qrstMarkup() {
+    if (!qrstOn) return "";
     if (!qrstRes) {
-      el.textContent = avgUse.length < QRST_MIN_BEATS
+      return avgUse.length < QRST_MIN_BEATS
         ? `QRST: collecting beats… ${avgUse.length} / ${QRST_MIN_BEATS}` : "QRST: no clear complex found";
-      return;
     }
     const m = qrstRes.m, a = qrstRes.amp, f = (v, u = " ms") => v == null ? "–" : Math.round(v) + u;
     const item = (k, v, tip) => `<span class="q-item" title="${tip}"><span class="q-k">${k}</span> ${v}</span>`;
-    el.innerHTML =
-      item("PR", f(m.pr), "P onset to QRS onset") +
+    return item("PR", f(m.pr), "P onset to QRS onset") +
       item("QRS", f(m.qrs), "QRS onset to J point") +
       item("QT", f(m.qt), "QRS onset to T end (tangent method)") +
       item("QTc", m.qt == null ? "–" : `${Math.round(m.qtcF)} / ${Math.round(m.qtcB)} ms`, "Fridericia / Bazett, RR " + Math.round(m.rr) + " ms") +
@@ -979,7 +1002,10 @@
   // playout delay: the larger of the streams' adaptive delays (slewed, never jumps)
   let delayNow = 0.35, lastFrame = null;
   function frame() {
-    const t = now(), dt = lastFrame == null ? 0 : Math.min(0.1, t - lastFrame);
+    requestAnimationFrame(frame);
+    const t = now();
+    if (lastFrame != null && t - lastFrame < FRAME_MIN) return;   // 120 Hz display: every other frame
+    const dt = lastFrame == null ? 0 : Math.min(0.1, t - lastFrame);
     lastFrame = t;
     if (!paused) {
       delayNow = Math.max(ecgFit.displayDelay(t, dt), accFit.ready ? accFit.displayDelay(t, dt) : 0);
@@ -987,7 +1013,6 @@
     }
     drawStrip();
     drawHrvTrend(t);
-    requestAnimationFrame(frame);
   }
   setInterval(drawAvg, 250);
 
