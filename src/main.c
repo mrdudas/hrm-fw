@@ -995,6 +995,12 @@ int main(void)
 	const float hp_b = 0.939101f;   /* exp(-2*pi*5/500)   */
 	const float hp_a = 0.993737f;   /* exp(-2*pi*0.5/500) */
 	float hp_y = 0.0f, hp_xp = 0.0f;
+	/* Second stage: clean first-order 0.5 Hz high-pass on the shelf output.
+	 * y = c*(y1 + x - x1), c = exp(-2*pi*0.5/500). The shelf leaves a ~9.7x DC
+	 * pedestal and passes baseline wander; this removes both and re-centres the
+	 * stream on 0, without touching P/T (those sit well above 0.5 Hz). */
+	const float hpf_c = 0.993737f;  /* exp(-2*pi*0.5/500) */
+	float hpf_y = 0.0f, hpf_xp = 0.0f;
 #endif
 
 	/* Processing loop: the SAADC fills buffers via DMA in hardware; here we just
@@ -1037,7 +1043,11 @@ int main(void)
 			float hp_x = (float)ns;
 			hp_y = hp_a * hp_y + hp_x - hp_b * hp_xp;
 			hp_xp = hp_x;
-			int16_t out = (int16_t)CLAMP(hp_y + (hp_y >= 0 ? 0.5f : -0.5f),
+			/* 0.5 Hz high-pass on the shelf output: strip the DC pedestal
+			 * and baseline wander, re-centre on 0. */
+			hpf_y = hpf_c * (hpf_y + hp_y - hpf_xp);
+			hpf_xp = hp_y;
+			int16_t out = (int16_t)CLAMP(hpf_y + (hpf_y >= 0 ? 0.5f : -0.5f),
 						     -32768.0f, 32767.0f);
 #else
 			int16_t out = ns;
