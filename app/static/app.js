@@ -171,20 +171,18 @@
   // search window around the newest ECG sample at the time the RR event arrived
   // (both share the BLE link, so a stall delays them together)
   let SNAP_BACK = Math.round(0.35 * FS), SNAP_FWD = Math.round(0.12 * FS);
-  // Signal-averaged beat, two beats long: every segment is one continuous piece
-  // of ECG aligned on its FIRST R peak only (R at 0 ms) and two beat periods
-  // long. The first beat (up to half a period after R) is shown as the mean.
-  // The second beat is deliberately neither re-aligned nor averaged: RR varies,
-  // so its QRS lands at slightly different times -- there the individual beats
-  // are drawn on top of each other, the newest sharpest and older ones fading
-  // out. avgM (the period, in samples) is the median RR when collection starts;
-  // Clear picks a new one.
-  let AVG_PRE = Math.round(0.20 * FS);      // -200 ms before R1
-  let avgM = null;                          // beat period in samples; null = not set yet
-  let AVG_LEN = 0;                          // 2 * avgM
-  const rrRecent = [];                      // last R-R distances (samples) for the median
+  // Signal-averaged beat: every segment is one continuous piece of ECG aligned on
+  // its R peak (0 ms), from AVG_T0 to AVG_T1 -- long enough to hold the next beat.
+  // The first beat (up to half a beat period after R) is shown as the mean. The
+  // second beat is deliberately neither re-aligned nor averaged: RR varies, so
+  // its QRS lands at slightly different times -- there the individual beats are
+  // drawn on top of each other, the newest sharpest and older ones fading out.
+  const AVG_T0 = -0.3, AVG_T1 = 1.2;        // s around the R peak
+  let AVG_PRE = Math.round(-AVG_T0 * FS);
+  let AVG_LEN = Math.round((AVG_T1 - AVG_T0) * FS) + 1;
+  const rrRecent = [];                      // last R-R distances (samples): median = beat period
   const pendingBeats = [];  // { ta, rr: [ms...] }  awaiting ECG data around the beat
-  const pendingSegs = [];   // R-peak indices awaiting two beat periods of samples
+  const pendingSegs = [];   // R-peak indices awaiting the samples up to AVG_T1
   const beatDots = [];      // R-peak sample indices (value read back from the ring)
   const segs = [];          // Float32Array(AVG_LEN) ring for the ensemble average
   let lastR = -1e9;
@@ -203,11 +201,10 @@
     ecgLast = -1; ecgLastBase = null; ecgLastLen = 0; ecgLastArrival = 0;
     accE.fill(NaN);                          // accel ECG positions referred to the old index space
     SNAP_BACK = Math.round(0.35 * FS); SNAP_FWD = Math.round(0.12 * FS);
-    AVG_PRE = Math.round(0.20 * FS);
     pendingBeats.length = 0; beatDots.length = 0;
     lastR = -1e9;
     rrRecent.length = 0;
-    setAvgPeriod(null);                      // also clears the collected segments
+    resetAvg();                              // new sample grid; clears the collected segments
     setText("ecg-fs", fsLabel());
   }
 
@@ -511,9 +508,10 @@
 
   // measurement overlay: A/B lines (or A + the cursor while placing B), shaded
   // span on every lane, Δt label on the ECG lane
-  function drawMeasure(u, withLabel) {
-    const a = meas.a;
-    const b = meas.b != null ? meas.b : (measureMode && hoverT != null ? hoverT : null);
+  // m: marker state {a, b}; hover: x under the cursor; unit: seconds per x unit
+  function drawMeasure(u, withLabel, m = meas, hover = hoverT, unit = 1) {
+    const a = m.a;
+    const b = m.b != null ? m.b : (measureMode && hover != null ? hover : null);
     if (a == null) return;
     const ctx = u.ctx, { left, top, width, height } = u.bbox, dpr = devicePixelRatio;
     const xa = u.valToPos(a, "x", true), xb = b != null ? u.valToPos(b, "x", true) : null;
@@ -524,12 +522,12 @@
       ctx.fillRect(Math.min(xa, xb), top, Math.abs(xb - xa), height);
     }
     ctx.strokeStyle = COL.meas; ctx.lineWidth = dpr;
-    ctx.setLineDash(meas.b == null ? [4 * dpr, 3 * dpr] : []);
+    ctx.setLineDash(m.b == null ? [4 * dpr, 3 * dpr] : []);
     for (const x of xb != null ? [xa, xb] : [xa]) {
       ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + height); ctx.stroke();
     }
     if (withLabel && xb != null && b !== a && Math.max(xa, xb) > left && Math.min(xa, xb) < left + width) {
-      const txt = measText(a, b);
+      const txt = measText(a * unit, b * unit);
       ctx.setLineDash([]);
       ctx.font = `600 ${12 * dpr}px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif`;
       const tw = ctx.measureText(txt).width, pad = 6 * dpr, bh = 20 * dpr;
@@ -643,31 +641,46 @@
   }
 
   // ---------- signal-averaged beat (two beats) ----------
-  let avgX = [];
+  let avgX = Array.from({ length: AVG_LEN }, (_, i) => (i - AVG_PRE) / FS * 1000);
   let avgPlot = null;
+  // x zoom / pan (ms) and time measurement, like the live strip
+  const AVG_VIEW = { min: AVG_T0 * 1000, max: AVG_T1 * 1000 };
+  const avgView = { ...AVG_VIEW };
+  const avgMeas = { a: null, b: null };
+  let avgHover = null;
+  function avgSetData(data) {
+    avgPlot.batch(() => { avgPlot.setData(data, false); avgPlot.setScale("x", avgView); });
+  }
+  function avgSetView(min, max) {
+    const full = AVG_VIEW.max - AVG_VIEW.min;
+    let span = Math.min(full, Math.max(20, max - min));          // 20 ms .. full window
+    min = Math.min(AVG_VIEW.max - span, Math.max(AVG_VIEW.min, min));
+    avgView.min = min; avgView.max = min + span;
+    avgPlot.setScale("x", avgView);
+  }
 
-  // (re)start the average with beat period m samples (null: wait for a new median)
-  function setAvgPeriod(m) {
-    avgM = m;
-    AVG_LEN = m ? 2 * m : 0;
+  // (re)start the collection on the current sample rate's grid
+  function resetAvg() {
+    AVG_PRE = Math.round(-AVG_T0 * FS);
+    AVG_LEN = Math.round((AVG_T1 - AVG_T0) * FS) + 1;
     avgX = Array.from({ length: AVG_LEN }, (_, i) => (i - AVG_PRE) / FS * 1000);
     segs.length = 0; pendingSegs.length = 0;
-    if (avgPlot) avgPlot.setData([avgX, avgX.map(() => null), avgX.map(() => null), avgX.map(() => null)]);
+    if (avgPlot) avgSetData([avgX, avgX.map(() => null), avgX.map(() => null), avgX.map(() => null)]);
     setText("avg-count", 0);
-    setText("avg-rr", m ? Math.round(m / FS * 1000) + " ms" : "–");
     if ($("avg-csv")) $("avg-csv").disabled = true;
   }
-  // a new R peak r2 after r1: learn the beat period from the first RRs, then
-  // queue every beat (the window after it is two periods long)
+  // beat period in samples: median of the recent R-R distances (0.9 s until known)
+  function avgPeriod() {
+    if (!rrRecent.length) return Math.round(0.9 * FS);
+    return rrRecent.slice().sort((a, b) => a - b)[rrRecent.length >> 1];
+  }
+  // a new R peak r2 after r1: every beat is collected
   function avgOnBeat(r1, r2) {
     const d = r2 - r1;
     if (d > 0.3 * FS && d < 2 * FS) {                    // consecutive beats
       rrRecent.push(d);
       if (rrRecent.length > 9) rrRecent.shift();
-    }
-    if (avgM == null) {
-      if (rrRecent.length < 5) return;
-      setAvgPeriod(rrRecent.slice().sort((a, b) => a - b)[rrRecent.length >> 1]);
+      setText("avg-rr", Math.round(avgPeriod() / FS * 1000) + " ms");
     }
     pendingSegs.push(r2);
   }
@@ -681,26 +694,28 @@
       width: host.clientWidth, height: host.clientHeight || 300, legend: { show: false },
       padding: [6, 12, 0, 0],
       cursor: { y: false, drag: { x: false, y: false, setScale: false } },
-      scales: { x: { time: false } },
+      scales: { x: { time: false, auto: false } },
       axes: [
         { stroke: COL.text, font: FONT, grid: { stroke: COL.grid }, ticks: { show: false },
-          label: "ms  (first R = 0)", labelSize: 18, labelFont: FONT },
+          label: "ms  (R = 0)", labelSize: 18, labelFont: FONT },
         { stroke: COL.text, font: FONT, grid: { stroke: COL.grid }, ticks: { show: false },
           label: "ECG (avg)", labelSize: 14, labelFont: FONT, size: 50 },
       ],
       series: [{}, { stroke: COL.ecg, width: 2, points: { show: false } },      // mean, first beat
                { stroke: "transparent", points: { show: false } },      // envelope of the
                { stroke: "transparent", points: { show: false } }],     // overlaid beats (y range)
-      hooks: { draw: [drawAvgOverlay] },
-    }, [avgX, [], [], []], host);
+      hooks: { draw: [drawAvgOverlay, (u) => drawMeasure(u, true, avgMeas, avgHover, 0.001)] },
+    }, [avgX, avgX.map(() => null), avgX.map(() => null), avgX.map(() => null)], host);
+    avgPlot.setScale("x", avgView);
   }
-  const avgSeam = () => AVG_PRE + (avgM >> 1);      // first sample of the "second beat" part
+  // first sample of the "second beat" part: half a beat period after R
+  const avgSeam = () => Math.min(AVG_LEN - 1, AVG_PRE + (avgPeriod() >> 1));
 
   // second beat: every collected beat drawn individually, oldest first and faint,
   // the newest last and sharpest
   function drawAvgOverlay(u) {
     const n = segs.length;
-    if (!n || !avgM) return;
+    if (!n) return;
     const ctx = u.ctx, { left, top, width, height } = u.bbox, dpr = devicePixelRatio, seam = avgSeam();
     ctx.save();
     ctx.beginPath(); ctx.rect(left, top, width, height); ctx.clip();
@@ -749,18 +764,16 @@
       for (const seg of segs) { const v = seg[i]; if (v < a) a = v; if (v > b) b = v; }
       lo[i] = a; hi[i] = b;
     }
-    avgPlot.setData([avgX, mean.map((v, i) => (i <= seam ? v : null)), hi, lo]);
+    avgSetData([avgX, mean.map((v, i) => (i <= seam ? v : null)), hi, lo]);
   }
-  function clearAvg() {      // also picks a new beat period from the current heart rate
-    setAvgPeriod(null);
-  }
+  function clearAvg() { resetAvg(); }
   function downloadAvg() {
     if (!segs.length) return;
     const { n, mean, sd } = avgStats();
     const stamp = new Date();
     const lines = [
-      `# Govinda / HRM Raw RR signal-averaged beat, two beat periods long, aligned on the first R only ` +
-        `(R at t_ms = 0; the second beat, nominally at ${(avgM * 1000 / FS).toFixed(1)} ms, is not re-aligned -- sd shows its spread)`,
+      `# Govinda / HRM Raw RR signal-averaged beat, ${AVG_T0 * 1000} .. ${AVG_T1 * 1000} ms around the R peak (t_ms = 0); ` +
+        `later beats in the window are not re-aligned -- sd shows their spread`,
       `# exported ${stamp.toISOString()}, ${n} beats, ECG ${FS} Hz, display notch ${notch.f0 ? notch.f0 + " Hz" : (strapNotchHz ? "in strap " + strapNotchHz + " Hz" : "off")}`,
       "t_ms,mean_adc,sd_adc",
     ];
@@ -889,19 +902,88 @@
   function setMeasureMode(on) {
     measureMode = on;
     $("measure-btn").classList.toggle("active", on);
-    if (!on) hoverT = null;
+    $("avg-measure-btn").classList.toggle("active", on);
+    if (!on) { hoverT = null; avgHover = null; }
     updateCursor();
     updateReadout();
   }
-  function clearMeasure() { meas.a = meas.b = null; updateReadout(); }
+  function clearMeasure() {
+    meas.a = meas.b = avgMeas.a = avgMeas.b = null;
+    updateReadout();
+    if (avgPlot) avgPlot.redraw(false);
+  }
   function updateReadout() {
     const el = $("meas-readout");
     if (meas.a != null && meas.b != null) el.textContent = measText(meas.a, meas.b);
     else if (measureMode) el.textContent = meas.a == null ? "click the start point" : "click the end point";
     else el.textContent = "";
+    const ea = $("avg-meas-readout");
+    if (avgMeas.a != null && avgMeas.b != null) ea.textContent = measText(avgMeas.a / 1000, avgMeas.b / 1000);
+    else if (measureMode) ea.textContent = avgMeas.a == null ? "click the start point" : "click the end point";
+    else ea.textContent = "";
   }
   function updateCursor() {
     $("strip-chart").style.cursor = measureMode ? "crosshair" : paused ? "grab" : "";
+    $("avg-chart").style.cursor = measureMode ? "crosshair" : "grab";
+  }
+
+  // averaged-beat chart: wheel = zoom around the cursor, drag = pan, double-click =
+  // whole window, and in measure mode a click places a marker (shared mode/keys)
+  function initAvgTools() {
+    const host = $("avg-chart");
+    const msAt = (clientX) => {
+      const r = avgPlot.over.getBoundingClientRect(), x = clientX - r.left;
+      return x >= 0 && x <= r.width ? avgPlot.posToVal(x, "x") : null;
+    };
+    host.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const dy = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1);
+      const k = Math.exp(dy * 0.002);
+      let c = msAt(e.clientX);
+      if (c == null) c = (avgView.min + avgView.max) / 2;
+      avgSetView(c + (avgView.min - c) * k, c + (avgView.max - c) * k);
+    }, { passive: false });
+    host.addEventListener("dblclick", () => { if (!measureMode) avgSetView(AVG_VIEW.min, AVG_VIEW.max); });
+    let drag = null;
+    host.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      drag = { x0: e.clientX, min0: avgView.min, max0: avgView.max, moved: false };
+      e.preventDefault();
+    });
+    window.addEventListener("mousemove", (e) => {
+      const r = host.getBoundingClientRect();
+      const h = e.clientY >= r.top && e.clientY <= r.bottom ? msAt(e.clientX) : null;
+      const rubber = measureMode && avgMeas.a != null && avgMeas.b == null && h !== avgHover;
+      avgHover = h;
+      if (drag) {
+        const dx = e.clientX - drag.x0;
+        if (drag.moved || Math.abs(dx) >= 4) {
+          drag.moved = true;
+          host.style.cursor = "grabbing";
+          const pxW = avgPlot.bbox.width / devicePixelRatio;
+          const d = dx * (drag.max0 - drag.min0) / pxW;
+          avgSetView(drag.min0 - d, drag.max0 - d);
+          return;
+        }
+      }
+      if (rubber) avgPlot.redraw(false);       // rubber band follows the cursor
+    });
+    window.addEventListener("mouseup", (e) => {
+      if (!drag) return;
+      const wasClick = !drag.moved;
+      drag = null;
+      updateCursor();
+      if (!wasClick || !measureMode) return;
+      const t = msAt(e.clientX);
+      if (t == null) return;
+      if (avgMeas.a == null || avgMeas.b != null) { avgMeas.a = t; avgMeas.b = null; }
+      else avgMeas.b = t;
+      updateReadout();
+      avgPlot.redraw(false);
+    });
+    host.addEventListener("mouseleave", () => { avgHover = null; });
+    $("avg-measure-btn").addEventListener("click", () => setMeasureMode(!measureMode));
+    updateCursor();
   }
 
   // drag = pan (pauses a live view); a click without movement places a marker
@@ -949,7 +1031,9 @@
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key === " ") { e.preventDefault(); setPaused(!paused); }
       else if (e.key === "m" || e.key === "M") setMeasureMode(!measureMode);
-      else if (e.key === "Escape") { if (meas.a != null) clearMeasure(); else setMeasureMode(false); }
+      else if (e.key === "Escape") {
+        if (meas.a != null || avgMeas.a != null) clearMeasure(); else setMeasureMode(false);
+      }
     });
   }
 
@@ -1190,7 +1274,7 @@
 
   // handle for poking at the clocks from the devtools console
   window.hrmDebug = { get ecgFit() { return ecgFit; }, accFit, fs: () => FS,
-                      delay: () => delayNow, paused: () => paused,
+                      delay: () => delayNow, paused: () => paused, avgView: () => ({ ...avgView }),
                       trend: () => ({ t0: trendT0, n: trend.t.length,
                                       x: trendPlots && [trendPlots.hrv.scales.x.min, trendPlots.hrv.scales.x.max] }) };
 
@@ -1201,6 +1285,7 @@
     makeHrvTrend();
     initZoom();
     initPauseMeasure();
+    initAvgTools();
     initDevicePicker();
     connect();
     new ResizeObserver(resize).observe($("strip-chart"));
