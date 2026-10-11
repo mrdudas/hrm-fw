@@ -171,11 +171,18 @@
   // search window around the newest ECG sample at the time the RR event arrived
   // (both share the BLE link, so a stall delays them together)
   let SNAP_BACK = Math.round(0.35 * FS), SNAP_FWD = Math.round(0.12 * FS);
-  let AVG_PRE = Math.round(0.20 * FS);      // -200 ms
-  let AVG_POST = Math.round(0.50 * FS);     // +500 ms
-  let AVG_LEN = AVG_PRE + AVG_POST + 1;
+  // Signal-averaged beat, two beats long: every segment is one continuous piece
+  // of ECG aligned on its FIRST R peak only (R at 0 ms) and two beat periods
+  // long. The second beat is deliberately not re-aligned: RR varies, so its QRS
+  // lands at slightly different times and the mean smears there -- the +/- SD
+  // band drawn around the mean shows exactly that spread. avgM (the period, in
+  // samples) is the median RR when collection starts; Clear picks a new one.
+  let AVG_PRE = Math.round(0.20 * FS);      // -200 ms before R1
+  let avgM = null;                          // beat period in samples; null = not set yet
+  let AVG_LEN = 0;                          // 2 * avgM
+  const rrRecent = [];                      // last R-R distances (samples) for the median
   const pendingBeats = [];  // { ta, rr: [ms...] }  awaiting ECG data around the beat
-  const pendingSegs = [];   // R indices awaiting +AVG_POST samples
+  const pendingSegs = [];   // R-peak indices awaiting two beat periods of samples
   const beatDots = [];      // R-peak sample indices (value read back from the ring)
   const segs = [];          // Float32Array(AVG_LEN) ring for the ensemble average
   let lastR = -1e9;
@@ -194,13 +201,11 @@
     ecgLast = -1; ecgLastBase = null; ecgLastLen = 0; ecgLastArrival = 0;
     accE.fill(NaN);                          // accel ECG positions referred to the old index space
     SNAP_BACK = Math.round(0.35 * FS); SNAP_FWD = Math.round(0.12 * FS);
-    AVG_PRE = Math.round(0.20 * FS); AVG_POST = Math.round(0.50 * FS);
-    AVG_LEN = AVG_PRE + AVG_POST + 1;
-    avgX = Array.from({ length: AVG_LEN }, (_, i) => (i - AVG_PRE) / FS * 1000);
-    pendingBeats.length = 0; pendingSegs.length = 0; beatDots.length = 0; segs.length = 0;
+    AVG_PRE = Math.round(0.20 * FS);
+    pendingBeats.length = 0; beatDots.length = 0;
     lastR = -1e9;
-    if (avgPlot) avgPlot.setData([avgX, avgX.map(() => null)]);
-    setText("avg-count", 0);
+    rrRecent.length = 0;
+    setAvgPeriod(null);                      // also clears the collected segments
     setText("ecg-fs", fsLabel());
   }
 
@@ -402,11 +407,11 @@
         if (v === v && v - base > bestv) { bestv = v - base; best = j; }
       }
       if (best < 0) continue;
-      if (best - lastR > 0.2 * FS) { beatDots.push(best); pendingSegs.push(best); lastR = best; }
+      if (best - lastR > 0.2 * FS) { beatDots.push(best); avgOnBeat(lastR, best); lastR = best; }
     }
     for (let k = 0; k < pendingSegs.length; ) {
       const r = pendingSegs[k];
-      if (ecgLast < r + AVG_POST) { k++; continue; }
+      if (ecgLast < r - AVG_PRE + AVG_LEN) { k++; continue; }
       pendingSegs.splice(k, 1);
       const seg = new Float32Array(AVG_LEN);
       let ok = true;
@@ -635,9 +640,35 @@
 
   }
 
-  // ---------- signal-averaged beat ----------
-  let avgX = Array.from({ length: AVG_LEN }, (_, i) => (i - AVG_PRE) / FS * 1000);
+  // ---------- signal-averaged beat (two beats) ----------
+  let avgX = [];
   let avgPlot = null;
+
+  // (re)start the average with beat period m samples (null: wait for a new median)
+  function setAvgPeriod(m) {
+    avgM = m;
+    AVG_LEN = m ? 2 * m : 0;
+    avgX = Array.from({ length: AVG_LEN }, (_, i) => (i - AVG_PRE) / FS * 1000);
+    segs.length = 0; pendingSegs.length = 0;
+    if (avgPlot) avgPlot.setData([avgX, avgX.map(() => null), avgX.map(() => null), avgX.map(() => null)]);
+    setText("avg-count", 0);
+    setText("avg-rr", m ? Math.round(m / FS * 1000) + " ms" : "–");
+    if ($("avg-csv")) $("avg-csv").disabled = true;
+  }
+  // a new R peak r2 after r1: learn the beat period from the first RRs, then
+  // queue every beat (the window after it is two periods long)
+  function avgOnBeat(r1, r2) {
+    const d = r2 - r1;
+    if (d > 0.3 * FS && d < 2 * FS) {                    // consecutive beats
+      rrRecent.push(d);
+      if (rrRecent.length > 9) rrRecent.shift();
+    }
+    if (avgM == null) {
+      if (rrRecent.length < 5) return;
+      setAvgPeriod(rrRecent.slice().sort((a, b) => a - b)[rrRecent.length >> 1]);
+    }
+    pendingSegs.push(r2);
+  }
   function avgN() {
     const n = parseInt($("avg-n")?.value, 10);
     return Math.min(300, Math.max(5, n || 50));
@@ -651,12 +682,15 @@
       scales: { x: { time: false } },
       axes: [
         { stroke: COL.text, font: FONT, grid: { stroke: COL.grid }, ticks: { show: false },
-          label: "ms  (R = 0)", labelSize: 18, labelFont: FONT },
+          label: "ms  (first R = 0)", labelSize: 18, labelFont: FONT },
         { stroke: COL.text, font: FONT, grid: { stroke: COL.grid }, ticks: { show: false },
           label: "ECG (avg)", labelSize: 14, labelFont: FONT, size: 50 },
       ],
-      series: [{}, { stroke: COL.ecg, width: 2, points: { show: false } }],
-    }, [avgX, avgX.map(() => null)], host);
+      series: [{}, { stroke: COL.ecg, width: 2, points: { show: false } },
+               { stroke: "transparent", points: { show: false } },      // mean + SD
+               { stroke: "transparent", points: { show: false } }],     // mean - SD
+      bands: [{ series: [2, 3], fill: "rgba(75,209,160,0.22)" }],
+    }, [avgX, [], [], []], host);
   }
   function avgStats() {                 // mean and SD per sample over the collected beats
     const n = segs.length, mean = new Array(AVG_LEN).fill(0), sd = new Array(AVG_LEN).fill(0);
@@ -673,19 +707,19 @@
     setText("avg-count", segs.length);
     $("avg-csv").disabled = !segs.length;
     if (!segs.length) return;
-    avgPlot.setData([avgX, avgStats().mean]);
+    const { mean, sd } = avgStats();
+    avgPlot.setData([avgX, mean, mean.map((v, i) => v + sd[i]), mean.map((v, i) => v - sd[i])]);
   }
-  function clearAvg() {
-    segs.length = 0; pendingSegs.length = 0;
-    avgPlot.setData([avgX, avgX.map(() => null)]);
-    drawAvg();
+  function clearAvg() {      // also picks a new beat period from the current heart rate
+    setAvgPeriod(null);
   }
   function downloadAvg() {
     if (!segs.length) return;
     const { n, mean, sd } = avgStats();
     const stamp = new Date();
     const lines = [
-      `# HRM Raw RR signal-averaged beat (R-aligned at t_ms = 0)`,
+      `# Govinda / HRM Raw RR signal-averaged beat, two beat periods long, aligned on the first R only ` +
+        `(R at t_ms = 0; the second beat, nominally at ${(avgM * 1000 / FS).toFixed(1)} ms, is not re-aligned -- sd shows its spread)`,
       `# exported ${stamp.toISOString()}, ${n} beats, ECG ${FS} Hz, display notch ${notch.f0 ? notch.f0 + " Hz" : (strapNotchHz ? "in strap " + strapNotchHz + " Hz" : "off")}`,
       "t_ms,mean_adc,sd_adc",
     ];
