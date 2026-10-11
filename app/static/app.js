@@ -723,7 +723,7 @@
                { stroke: "transparent", points: { show: false } },      // envelope of the
                { stroke: "transparent", points: { show: false } },      // overlaid beats (y range)
                { stroke: COL.y, width: 1.5, points: { show: false } }], // high-pass compensated mean
-      hooks: { draw: [drawAvgOverlay, drawQrst, (u) => drawMeasure(u, true, avgMeas, avgHover, 0.001, 22)] },
+      hooks: { draw: [drawAvgOverlay, drawQrst, (u) => drawMeasure(u, true, avgMeas, avgHover, 0.001)] },
     }, [avgX, ...[0, 1, 2, 3].map(() => avgX.map(() => null))], host);
     avgPlot.setScale("x", avgView);
   }
@@ -781,10 +781,10 @@
       ctx.strokeStyle = color; ctx.fillStyle = color;
       ctx.globalAlpha = dashed ? 0.75 : 0.9;
       ctx.setLineDash(dashed ? [3 * dpr, 3 * dpr] : []);
-      // labels in one row just under the top edge, the line runs down from there
-      const yTop = top + 16 * dpr;
-      ctx.beginPath(); ctx.moveTo(x, yTop); ctx.lineTo(x, top + height); ctx.stroke();
-      if (label) { ctx.globalAlpha = 1; ctx.fillText(label, x, yTop - 2 * dpr); }
+      // labels in one row just above the bottom edge, the line runs down to it
+      const yLab = top + height - 3 * dpr;
+      ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, label ? yLab - 13 * dpr : top + height); ctx.stroke();
+      if (label) { ctx.globalAlpha = 1; ctx.fillText(label, x, yLab); }
     }
     ctx.restore();
   }
