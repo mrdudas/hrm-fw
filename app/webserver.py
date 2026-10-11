@@ -11,9 +11,11 @@ from aiohttp import web, WSMsgType
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 
-def make_app(hub):
+def make_app(hub, log=print):
     app = web.Application()
     app["hub"] = hub
+    app["log"] = log
+    app["ws_seq"] = 0
     app.router.add_get("/", _index)
     app.router.add_get("/ws", _ws_handler)
     app.router.add_static("/static/", STATIC_DIR, name="static")
@@ -28,6 +30,14 @@ async def _no_cache(request, response):
         response.headers["Cache-Control"] = "no-cache"
 
 
+def _agent(request):
+    ua = request.headers.get("User-Agent", "")
+    for name in ("Firefox", "Edg", "Chrome", "Safari", "Python", "curl"):
+        if name in ua:
+            return "Edge" if name == "Edg" else name
+    return ua[:24] or "no user agent"
+
+
 async def _index(request):
     return web.FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
@@ -36,7 +46,13 @@ async def _ws_handler(request):
     hub = request.app["hub"]
     ws = web.WebSocketResponse(heartbeat=20)
     await ws.prepare(request)
+    # who is talking: several pages (and scripts) can be attached to one backend,
+    # and any of them may send connect / disconnect -- name them in the log
+    request.app["ws_seq"] += 1
+    who = f"client #{request.app['ws_seq']} ({_agent(request)}, {request.remote})"
+    log = request.app["log"]
     hub.add_client(ws)
+    log(f"{who} attached; {len(hub.clients)} client(s)")
     # immediate snapshot so a reloaded page isn't blank
     for msg in hub.snapshot_messages():
         await ws.send_str(msg)
@@ -50,9 +66,12 @@ async def _ws_handler(request):
                 except ValueError:
                     continue
                 if isinstance(msg, dict):
+                    if msg.get("cmd"):
+                        log(f"{who}: {msg.get('cmd')}")
                     hub.command(msg)
     finally:
         hub.remove_client(ws)
+        log(f"{who} detached; {len(hub.clients)} client(s)")
     return ws
 
 
