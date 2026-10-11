@@ -177,19 +177,12 @@
   const pendingBeats = [];  // { ta, rr: [ms...] }  awaiting ECG data around the beat
   const pendingSegs = [];   // R indices awaiting +AVG_POST samples
   const beatDots = [];      // R-peak sample indices (value read back from the ring)
-  const rrPts = [];         // { idx } or { t }, plus { v: rr ms }
   const segs = [];          // Float32Array(AVG_LEN) ring for the ensemble average
   let lastR = -1e9;
 
-  // The strap reports its ECG rate (250 Hz on older firmware, 1024 Hz newer).
-  // A change re-creates everything indexed by ECG sample; RR points already
-  // placed on the old index are converted to absolute times so they stay put.
+  // The strap reports its ECG rate (250 Hz on older firmware, 500 / 1024 Hz newer).
+  // A change re-creates everything indexed by ECG sample.
   function setEcgRate(fs) {
-    if (ecgFit.ready) {
-      for (const p of rrPts) if (p.t == null) { p.t = ecgFit.t(p.idx); delete p.idx; }
-    } else {
-      rrPts.length = 0;
-    }
     const oldDelay = ecgFit.delay;
     FS = fs;
     RING = FS * (WIN_MAX + 4);
@@ -228,19 +221,21 @@
   // previous RR is excluded, and successive differences only use two consecutive
   // accepted beats (so an ectopic beat drops both of its intervals). A pause of
   // more than 3 s (lost link) breaks the chain.
-  // Display: the card shows the window values through a ~1 min exponential
-  // moving average (no jumping from beat to beat); a sparkline shows RMSSD per
-  // wall-clock minute (dots) with a 5-minute moving average (line).
+  // Display: the KPI card shows the 5 min window values through a ~1 min
+  // exponential moving average (no jumping from beat to beat). The HRV trend card
+  // is per beat on a 2 min time axis: RMSSD over the trailing 30 s (a value from
+  // the second RR on, then smoothed by the moving window), |dRR| per beat, and
+  // beat-to-beat HR. It fills from the left, then scrolls like the live strip.
   const HRV_WIN = 300, HRV_MIN_S = 30;   // 5 min window, first value after 30 s
   const HRV_TAU = 60;                    // s, display smoothing time constant
-  const HRV_MA_MIN = 5;                  // minutes in the trend's moving average
+  const TREND_WIN = 120;                 // s on the trend's x axis
+  const TREND_RMS_WIN = 30;              // s, moving RMSSD window of the trend line
   const hrvBeats = [];                   // { t, rr, ok, chain }  chain: diff to previous is valid
   let hrvPrev = null;
   let hrvEma = null;                     // { t, rmssd, sdnn, pnn50 }
-  let hrvMin = null;                     // current minute bucket { key, sumSq, n }
-  const hrvTrend = { t: [], v: [], ma: [] };
-  const hrvLive = { t: [], v: [] };      // smoothed RMSSD, one point every 5 s
-  let hrvPlot = null;
+  const trend = { t: [], rmssd: [], dabs: [], hr: [] };   // one entry per beat
+  let trendT0 = null;                    // first beat: left edge while the window fills
+  let trendPlots = null, trendDirty = false, trendDrawn = 0;
   function hrvAdd(rrs) {
     const tArr = now();
     // several RRs in one notification: the last beat is "now", earlier ones step back
@@ -253,7 +248,7 @@
       const beat = { t, rr, ok, chain: ok && linked && prev.ok };
       hrvBeats.push(beat);
       hrvPrev = beat;
-      hrvMinuteAdd(t, beat.chain ? rr - prev.rr : null);
+      hrvTrendAdd(beat, prev);
     });
     while (hrvBeats.length && hrvBeats[0].t < tArr - HRV_WIN) hrvBeats.shift();
     hrvUpdate();
@@ -289,10 +284,6 @@
       hrvEma.t = t;
     }
     setText("hrv", Math.round(hrvEma.rmssd));
-    if (!hrvLive.t.length || t - hrvLive.t[hrvLive.t.length - 1] >= 5) {
-      hrvLive.t.push(t); hrvLive.v.push(hrvEma.rmssd);
-      drawHrvTrend();
-    }
     const win = span < HRV_WIN - 5 ? `${Math.round(span)} s` : "5 min";
     setText("hrv-sub", `SDNN ${Math.round(hrvEma.sdnn)} ms · pNN50 ${Math.round(hrvEma.pnn50)} % · ` +
                        `${good.length} beats / ${win}` +
@@ -301,78 +292,93 @@
                      `card shows a ~1 min moving average`;
   }
 
-  // RMSSD per wall-clock minute (needs >= 10 valid successive differences)
-  function hrvMinuteAdd(t, diff) {
-    const key = Math.floor(t / 60);
-    if (hrvMin && key !== hrvMin.key) {
-      if (hrvMin.n >= 10) hrvTrendPush(hrvMin.key * 60 + 30, Math.sqrt(hrvMin.sumSq / hrvMin.n));
-      hrvMin = null;
+  // one trend point per beat: moving RMSSD (as soon as one successive difference
+  // exists, i.e. from the second RR), |dRR| of this beat, and beat-to-beat HR
+  function hrvTrendAdd(beat, prev) {
+    const t = beat.t;
+    if (trendT0 == null) trendT0 = t;
+    let sumSq = 0, n = 0;
+    for (let i = hrvBeats.length - 1; i >= 1 && hrvBeats[i].t > t - TREND_RMS_WIN; i--) {
+      if (!hrvBeats[i].chain) continue;
+      const d = hrvBeats[i].rr - hrvBeats[i - 1].rr;
+      sumSq += d * d; n++;
     }
-    if (!hrvMin) hrvMin = { key, sumSq: 0, n: 0 };
-    if (diff != null) { hrvMin.sumSq += diff * diff; hrvMin.n++; }
+    trend.t.push(t);
+    trend.rmssd.push(n ? Math.sqrt(sumSq / n) : null);
+    trend.dabs.push(beat.chain ? Math.abs(beat.rr - prev.rr) : null);
+    trend.hr.push(beat.rr >= 300 && beat.rr <= 2000 ? 60000 / beat.rr : null);
+    while (trend.t.length && trend.t[0] < t - TREND_WIN - 10) {
+      trend.t.shift(); trend.rmssd.shift(); trend.dabs.shift(); trend.hr.shift();
+    }
+    trendDirty = true;
   }
-  function hrvTrendPush(t, v) {
-    const T = hrvTrend;
-    T.t.push(t); T.v.push(v);
-    // trailing moving average over the last HRV_MA_MIN minutes that have a value
-    let s = 0, c = 0;
-    for (let i = T.t.length - 1; i >= 0 && T.t[i] > t - HRV_MA_MIN * 60; i--) { s += T.v[i]; c++; }
-    T.ma.push(s / c);
-    drawHrvTrend();
-  }
-  // full-width HRV trend card: RMSSD per minute (dots), its 5-minute moving
-  // average and the live smoothed RMSSD, over the whole session, clock on x
+
   function makeHrvTrend() {
-    const host = $("hrv-chart");
-    const clock = (u, splits) => splits.map((v) =>
-      new Date(v * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }));
-    hrvPlot = new uPlot({
-      width: host.clientWidth, height: 220,
-      cursor: { y: false, drag: { x: false, y: false, setScale: false }, points: { size: 6 } },
-      padding: [8, 12, 0, 0],
-      scales: { x: { time: false },
-                y: { range: (u, lo, hi) => {             // margin above/below, >= 10 ms span
-                  if (lo == null || !(hi >= lo)) return [0, 100];
-                  const mid = (lo + hi) / 2, half = Math.max(hi - lo, 10) * 0.6;
-                  return [Math.max(0, mid - half), mid + half];
-                } } },
+    const clock = (u, splits) => splits.map((v) => new Date(v * 1000).toLocaleTimeString([], { hour12: false }));
+    const axis = { stroke: COL.text, font: FONT, ticks: { show: false }, grid: { stroke: COL.grid, width: 1 } };
+    const mk = (id, h, label, bottom, series) => new uPlot({
+      width: $(id).clientWidth, height: h, legend: { show: false }, pxAlign: 0,
+      padding: [6, 8, bottom ? 0 : 4, 0],
+      cursor: { sync: { key: "hrv" }, y: false, points: { show: false },
+                drag: { x: false, y: false, setScale: false } },
+      scales: { x: { time: false, auto: false }, y: { auto: false } },
       axes: [
-        { stroke: COL.text, font: FONT, grid: { stroke: COL.grid }, ticks: { show: false },
-          space: 70, incrs: [60, 120, 300, 600, 900, 1800, 3600, 7200], values: clock },
-        { stroke: COL.text, font: FONT, grid: { stroke: COL.grid }, ticks: { show: false },
-          label: "RMSSD ms", labelSize: 14, labelFont: FONT, size: 50 },
+        { ...axis, scale: "x", space: 80, incrs: [10, 15, 30, 60],
+          values: bottom ? clock : (u, splits) => splits.map(() => ""), size: bottom ? 26 : 0 },
+        { ...axis, scale: "y", label, labelSize: 14, labelFont: FONT, size: 50, space: 30 },
       ],
-      series: [
-        { label: "time", value: (u, v) => v == null ? "–" : new Date(v * 1000).toLocaleTimeString([], { hour12: false }) },
-        { label: "RMSSD / minute", stroke: COL.text, width: 0, paths: () => null,
-          points: { show: true, size: 6, fill: COL.text, stroke: COL.text },
-          value: (u, v) => v == null ? "–" : v.toFixed(0) + " ms" },
-        { label: `${HRV_MA_MIN}-min average`, stroke: COL.ecg, width: 2, spanGaps: true, points: { show: false },
-          value: (u, v) => v == null ? "–" : v.toFixed(0) + " ms" },
-        { label: "live (smoothed)", stroke: COL.y, width: 1, spanGaps: true, points: { show: false },
-          value: (u, v) => v == null ? "–" : v.toFixed(0) + " ms" },
-      ],
-    }, [[], [], [], []], host);
-  }
-  function drawHrvTrend() {
-    if (!hrvPlot) return;
-    const T = hrvTrend, L = hrvLive;
-    if (!T.t.length && !L.t.length) return;
-    hrvPlot.setData(uPlot.join([[T.t, T.v, T.ma], [L.t, L.v]]));
-    setText("hrv-span", T.t.length ? `${T.t.length} min` : "first minute…");
+      series: [{}, ...series],
+    }, [[], ...series.map(() => [])], $(id));
+    trendPlots = {
+      hrv: mk("hrv-lane", 170, "RMSSD ms", false, [
+        { stroke: "transparent", paths: () => null,                       // |dRR| per beat
+          points: { show: true, size: 4, fill: COL.text, stroke: COL.text } },
+        { stroke: COL.ecg, width: 2, spanGaps: true, points: { show: false } },   // moving RMSSD
+      ]),
+      hr: mk("hr-lane", 130, "HR bpm", true, [
+        { stroke: COL.rr, width: 1.4, spanGaps: true,
+          points: { show: true, size: 4, fill: COL.rr, stroke: COL.rr } },
+      ]),
+      hrvRange: autoRange(10), hrRange: autoRange(6),
+    };
   }
 
-
-  // place RR values ending at beat position `end` (sample index or time)
-  function placeRr(rr, end, byIdx) {
-    let pos = end;
-    for (let k = rr.length - 1; k >= 0; k--) {
-      rrPts.push(byIdx ? { idx: pos, v: rr[k] } : { t: pos, v: rr[k] });
-      pos -= byIdx ? rr[k] / 1000 * FS : rr[k] / 1000;
-    }
-    rrPts.sort((p, q) => xOfPt(p) - xOfPt(q));
+  // x range: [first beat, +2 min] while filling, then the last 2 min, scrolling.
+  // ~9 px/s on screen, so redrawing 10 times a second is smooth enough.
+  function drawHrvTrend(tNow) {
+    if (!trendPlots || trendT0 == null) return;
+    const scrolling = tNow > trendT0 + TREND_WIN;
+    if (!trendDirty && (!scrolling || tNow - trendDrawn < 0.1)) return;
+    trendDirty = false; trendDrawn = tNow;
+    const end = scrolling ? tNow : trendT0 + TREND_WIN;
+    const xr = { min: end - TREND_WIN, max: end };
+    const span = (arrs) => {
+      let lo = Infinity, hi = -Infinity;
+      for (const a of arrs) for (let i = 0; i < a.length; i++) {
+        const v = a[i];
+        if (v != null && trend.t[i] >= xr.min) { if (v < lo) lo = v; if (v > hi) hi = v; }
+      }
+      return [lo, hi];
+    };
+    const P = trendPlots;
+    const [vlo, vhi] = span([trend.rmssd, trend.dabs]);
+    P.hrv.batch(() => {
+      P.hrv.setData([trend.t, trend.dabs, trend.rmssd], false);
+      P.hrv.setScale("x", xr);
+      const r = P.hrvRange(vlo, vhi);
+      P.hrv.setScale("y", { min: Math.max(0, r.min), max: r.max });
+    });
+    const [hlo, hhi] = span([trend.hr]);
+    P.hr.batch(() => {
+      P.hr.setData([trend.t, trend.hr], false);
+      P.hr.setScale("x", xr);
+      P.hr.setScale("y", P.hrRange(hlo, hhi));
+    });
+    const last = (a) => { for (let i = a.length - 1; i >= 0; i--) if (a[i] != null) return a[i]; return null; };
+    const r = last(trend.rmssd), h = last(trend.hr);
+    setText("hrv-now", (r != null ? `RMSSD ${Math.round(r)} ms` : "RMSSD –") +
+                       (h != null ? ` · HR ${Math.round(h)} bpm` : ""));
   }
-  const xOfPt = (p) => p.t != null ? p.t : ecgFit.t(p.idx);
 
   function localBaseline(n) {
     let s = 0, c = 0;
@@ -381,12 +387,11 @@
   }
 
   function processBeats() {
-    const tnow = now();
     for (let k = 0; k < pendingBeats.length; ) {
       const b = pendingBeats[k];
       const nb = b.nb;
-      if (!ecgLive() || nb < 0) {                     // no ECG: plot RR at arrival time
-        placeRr(b.rr, b.ta, false); pendingBeats.splice(k, 1); continue;
+      if (!ecgLive() || nb < 0) {                     // no ECG to snap the beat to
+        pendingBeats.splice(k, 1); continue;
       }
       if (ecgLast < nb + SNAP_FWD) { k++; continue; } // wait for the samples after the beat
       pendingBeats.splice(k, 1);
@@ -396,8 +401,7 @@
         const v = ecgAt(j);
         if (v === v && v - base > bestv) { bestv = v - base; best = j; }
       }
-      if (best < 0) { placeRr(b.rr, b.ta, false); continue; }
-      placeRr(b.rr, best, true);
+      if (best < 0) continue;
       if (best - lastR > 0.2 * FS) { beatDots.push(best); pendingSegs.push(best); lastR = best; }
     }
     for (let k = 0; k < pendingSegs.length; ) {
@@ -410,8 +414,6 @@
       if (ok) segs.push(seg);
     }
     while (beatDots.length && beatDots[0] <= ecgLast - RING) beatDots.shift();
-    const tOld = tnow - delayNow - WIN_MAX - 2;
-    while (rrPts.length && xOfPt(rrPts[0]) < tOld) rrPts.shift();
   }
 
   // ---------- smoothed y-ranges (expand at once, shrink slowly) ----------
@@ -454,8 +456,7 @@
     { key: "ecg", label: "ECG", h: 240, color: COL.ecg, width: 1.2, minSpan: 200, paper: true },
     { key: "x",   label: "X",   h: 66,  color: COL.x,   width: 1,   minSpan: 400 },
     { key: "y",   label: "Y",   h: 66,  color: COL.y,   width: 1,   minSpan: 400 },
-    { key: "z",   label: "Z",   h: 66,  color: COL.z,   width: 1,   minSpan: 400 },
-    { key: "rr",  label: "HR bpm", h: 140, color: COL.rr, width: 1.4, minSpan: 6, bottom: true },
+    { key: "z",   label: "Z",   h: 92,  color: COL.z,   width: 1,   minSpan: 400, bottom: true },
   ];
 
   function laneOpts(L, width) {
@@ -473,7 +474,6 @@
                      grid: { stroke: COL.gridMinor, width: 1 }, ticks: { show: false }, values: () => [] });
     }
     const series = [{}, { stroke: L.color, width: L.width, spanGaps: false, points: { show: false } }];
-    if (L.key === "rr") series[1].points = { show: true, size: 5, fill: COL.rr, stroke: COL.rr };
     const hooks = { draw: [(u) => drawMeasure(u, L.key === "ecg")] };
     if (L.key === "ecg") hooks.draw.unshift(drawBeatDots);
     return {
@@ -633,17 +633,6 @@
     }
     for (const c of ["x", "y", "z"]) update(c, [accXs, accVs[c]], xr, mm[c][0], mm[c][1]);
 
-    // beat-to-beat HR (60000 / RR) at each beat, drawn beat to beat
-    const rx = [], ry = [];
-    let rmin = Infinity, rmax = -Infinity;
-    for (const p of rrPts) {
-      const x = xOfPt(p);
-      if (x < tStart - 3 || x > tEnd + 1 || !(p.v > 0)) continue;
-      const bpm = 60000 / p.v;
-      rx.push(x); ry.push(bpm);
-      if (bpm < rmin) rmin = bpm; if (bpm > rmax) rmax = bpm;
-    }
-    update("rr", [rx, ry], xr, rmin, rmax);
   }
 
   // ---------- signal-averaged beat ----------
@@ -723,6 +712,7 @@
       processBeats();              // frozen view: keep beats/RR exactly as they were
     }
     drawStrip();
+    drawHrvTrend(t);
     requestAnimationFrame(frame);
   }
   setInterval(drawAvg, 250);
@@ -893,8 +883,11 @@
     for (const L of LANES) lanes[L.key].u.setSize({ width: w, height: L.h });
     const a = $("avg-chart");
     if (avgPlot) avgPlot.setSize({ width: a.clientWidth, height: a.clientHeight || 300 });
-    const h = $("hrv-chart");
-    if (hrvPlot) hrvPlot.setSize({ width: h.clientWidth, height: 220 });
+    if (trendPlots) {
+      trendPlots.hrv.setSize({ width: $("hrv-lane").clientWidth, height: 170 });
+      trendPlots.hr.setSize({ width: $("hr-lane").clientWidth, height: 130 });
+      trendDirty = true;
+    }
   }
 
   // ---------- DOM panels ----------
@@ -1122,7 +1115,9 @@
 
   // handle for poking at the clocks from the devtools console
   window.hrmDebug = { get ecgFit() { return ecgFit; }, accFit, fs: () => FS,
-                      delay: () => delayNow, paused: () => paused };
+                      delay: () => delayNow, paused: () => paused,
+                      trend: () => ({ t0: trendT0, n: trend.t.length,
+                                      x: trendPlots && [trendPlots.hrv.scales.x.min, trendPlots.hrv.scales.x.max] }) };
 
   // ---------- init ----------
   window.addEventListener("load", () => {

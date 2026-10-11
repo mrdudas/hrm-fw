@@ -89,14 +89,17 @@
     </div>
   </section>
 
-  <!-- HRV trend over the whole session -->
+  <!-- HRV trend: per beat, last 2 minutes (fills from the left, then scrolls) -->
   <section class="card wide">
     <div class="card-head">
       <h2>HRV trend</h2>
-      <span class="hint">RMSSD per minute · 5-min moving average · live (smoothed) — since this page was opened ·
-        <span id="hrv-span">waiting for beats…</span></span>
+      <span class="hint">RMSSD over the last 30 s (line) · |ΔRR| per beat (dots) · beat-to-beat HR — last 2 min ·
+        <span id="hrv-now" class="hrv-now">waiting for beats…</span></span>
     </div>
-    <div id="hrv-chart" class="chart-hrv"></div>
+    <div id="hrv-chart" class="chart-hrv">
+      <div id="hrv-lane" class="lane"></div>
+      <div id="hr-lane" class="lane"></div>
+    </div>
   </section>
 
   <!-- signal-averaged beat (ensemble average, R-aligned) -->
