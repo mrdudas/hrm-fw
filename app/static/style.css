@@ -65,7 +65,7 @@ main{max-width:1200px; margin:0 auto; padding:18px 16px; display:flex; flex-dire
 .chart-hrv{width:100%; display:flex; flex-direction:column}
 .chart-hrv .lane{width:100%; line-height:0}
 .hrv-now{color:var(--text); font-weight:600; font-variant-numeric:tabular-nums}
-.kpi-sub{color:var(--muted); font-size:12px; margin-top:2px}
+.kpi-sub{color:var(--muted); font-size:12px; margin-top:2px; line-height:17px; min-height:34px; font-variant-numeric:tabular-nums}
 
 .chart-strip{width:100%; display:flex; flex-direction:column}
 .chart-strip .lane{width:100%; line-height:0}
@@ -129,3 +129,11 @@ footer code{background:var(--panel-2); padding:2px 6px; border-radius:4px}
           font-variant-numeric:tabular-nums; min-height:20px}
 .qrst-out .q-k{color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em; margin-right:4px}
 .qrst-out .q-note{flex-basis:100%; color:var(--muted); font-size:11px}
+
+/* Steady layout: live values never move their surroundings, and each chart is
+   its own layout/paint island, so a redraw or a new value touches only itself. */
+html{background:var(--bg); color-scheme:dark}
+.chart-strip .lane, .chart-hrv .lane, .chart-avg{contain:layout paint style}
+.card{contain:layout style}
+.hint, .qrst-out, .meas-readout{font-variant-numeric:tabular-nums}
+.avg-stat{display:inline-block; min-width:17em; text-align:right}
