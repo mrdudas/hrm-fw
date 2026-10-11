@@ -47,7 +47,7 @@ async def run_scan():
         return
     print(f"\n{'address':40}  rssi  name")
     for addr, name, rssi in devs:
-        mark = "  <-- looks like the strap" if name in (DEVICE_NAME, *LEGACY_NAMES) else ""
+        mark = "  <-- looks like the strap" if name in (DEVICE_NAME, *LEGACY_NAMES) or name.startswith(DEVICE_NAME + "-") else ""
         print(f"{addr:40}  {str(rssi):>4}  {name}{mark}")
 
 
