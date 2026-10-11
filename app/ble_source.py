@@ -26,6 +26,7 @@ import parsers
 SCAN_S = 8          # length of one scan
 RETRY_S = 60        # pause between scans while the strap is not found
 RECONNECT_S = 2     # quick retry right after a dropped link
+CLOSE_S = 5         # longest the state machine waits for the OS to close a link
 SETTINGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "device.json")
 
 
@@ -84,6 +85,7 @@ class BLESource:
         self._raw_kick = asyncio.Event()
         self._ecg_last = 0.0             # monotonic time of the last ECG packet
         self._vdd = None                 # [min, max] mV over all reads since the last log
+        self._closing = None             # a cancelled session whose link is still closing
 
     def stop(self):
         self._stop.set()
@@ -127,6 +129,8 @@ class BLESource:
                 "auto": self.address is None}
 
     def _status(self, state, detail="", **extra):
+        if state != self._phase:               # every transition in the log, in order
+            self.log(f"state: {self._phase} -> {state}" + (f" ({detail})" if detail else ""))
         self._phase = state
         self.hub.publish_status(state, detail=detail, target=self._target(),
                                 enabled=self.enabled, **extra)
@@ -148,7 +152,8 @@ class BLESource:
 
     def _is_strap(self, addr, name):
         """The strap by its advertised name (current or pre-v1.0) or its known address."""
-        return (name == self.name or name in LEGACY_NAMES
+        # the firmware appends a per-chip suffix to its name ("Govinda-B0CF")
+        return (name == self.name or name.startswith(self.name + "-") or name in LEGACY_NAMES
                 or addr.upper() == KNOWN_ADDRESS.upper())
 
     async def _scan(self, want_target):
@@ -215,6 +220,11 @@ class BLESource:
                 await self._sleep(RETRY_S)
                 continue
 
+            if self._closing and not self._closing.done():   # previous link still closing
+                await asyncio.wait({self._closing}, timeout=CLOSE_S)
+                if not self.enabled:
+                    continue
+            self._closing = None
             self.log(f"connecting to {dev.address} ({dev.name or ''}) ...")
             self._status("connecting", detail=dev.name or dev.address)
             # run the connect + session as a task so Disconnect (or picking another
@@ -228,13 +238,21 @@ class BLESource:
             err = None
             if not session.done():
                 session.cancel()
-            try:
-                await session
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                err = e
-                self.log(f"BLE session error: {e!r}")
+                # closing the link is the OS's job and can hang; the UI must not
+                # wait for it longer than CLOSE_S
+                await asyncio.wait({session}, timeout=CLOSE_S)
+            if session.done():
+                try:
+                    session.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    err = e
+                    self.log(f"BLE session error: {e!r}")
+            else:
+                self.log(f"link still closing after {CLOSE_S}s; not waiting for it")
+                session.add_done_callback(lambda t: t.cancelled() or t.exception())
+                self._closing = session
             if self.enabled and not self._stop.is_set() and not self._abort.is_set():
                 if self._was_connected:
                     self._status("disconnected")            # link lost -> reconnect
@@ -274,23 +292,25 @@ class BLESource:
             self._was_connected = True
             self._status("connected", detail=label, address=dev.address)
             link_task = asyncio.create_task(self._link_params(c))
-            # hold the link until it drops, the user disconnects or picks another device
-            while (not disconnected.is_set() and not self._stop.is_set()
-                   and self.enabled and self._target() == target and c.is_connected):
-                # raw ECG went quiet while subscribed: another host may have taken
-                # it over -> check ownership now instead of at the next poll
-                if self._ecg_sub and time.monotonic() - self._ecg_last > 2 and not self._raw_kick.is_set():
-                    self._ecg_last = time.monotonic()
-                    self._raw_kick.set()
-                if self._scan_requested:          # refresh the list while connected
-                    self._scan_requested = False
-                    await self._safe_scan(want_target=False)
-                    self._status("connected", detail=label, address=dev.address)
-                    continue
-                await self._sleep(0.5)
-            link_task.cancel()
-            self.hub.publish_raw("none")
-            self.log("link closed")
+            try:
+                # hold the link until it drops, the user disconnects or picks another device
+                while (not disconnected.is_set() and not self._stop.is_set()
+                       and self.enabled and self._target() == target and c.is_connected):
+                    # raw ECG went quiet while subscribed: another host may have taken
+                    # it over -> check ownership now instead of at the next poll
+                    if self._ecg_sub and time.monotonic() - self._ecg_last > 2 and not self._raw_kick.is_set():
+                        self._ecg_last = time.monotonic()
+                        self._raw_kick.set()
+                    if self._scan_requested:          # refresh the list while connected
+                        self._scan_requested = False
+                        await self._safe_scan(want_target=False)
+                        self._status("connected", detail=label, address=dev.address)
+                        continue
+                    await self._sleep(0.5)
+            finally:                                  # also when Disconnect cancels the session
+                link_task.cancel()
+                self.hub.publish_raw("none")
+                self.log("link closed")
 
     async def _read_link(self, c, log=False):
         """One a1b20004 reading (None on firmware without it)."""

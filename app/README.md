@@ -14,7 +14,7 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
 
 ## What it does
 
-- Scans for the strap **by name** (`Govinda`; pre-v1.0 firmware advertised
+- Scans for the strap **by name** (`Govinda` or `Govinda-XXXX` with the per-chip suffix; pre-v1.0 firmware advertised
   `HRM Raw RR`, which is still matched) — cross-platform and macOS-safe
   (macOS exposes opaque UUIDs, not MAC addresses). If it isn't found, it scans
   again **every minute** (the dashboard shows a countdown).
