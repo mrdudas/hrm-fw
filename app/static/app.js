@@ -509,7 +509,7 @@
   // measurement overlay: A/B lines (or A + the cursor while placing B), shaded
   // span on every lane, Δt label on the ECG lane
   // m: marker state {a, b}; hover: x under the cursor; unit: seconds per x unit
-  function drawMeasure(u, withLabel, m = meas, hover = hoverT, unit = 1) {
+  function drawMeasure(u, withLabel, m = meas, hover = hoverT, unit = 1, labelY = 4) {
     const a = m.a;
     const b = m.b != null ? m.b : (measureMode && hover != null ? hover : null);
     if (a == null) return;
@@ -533,7 +533,7 @@
       const tw = ctx.measureText(txt).width, pad = 6 * dpr, bh = 20 * dpr;
       let x = (xa + xb) / 2 - tw / 2 - pad;
       x = Math.max(left + 2 * dpr, Math.min(left + width - tw - 2 * pad - 2 * dpr, x));
-      const y = top + 4 * dpr;
+      const y = top + labelY * dpr;
       ctx.fillStyle = COL.measBox; ctx.fillRect(x, y, tw + 2 * pad, bh);
       ctx.fillStyle = COL.meas; ctx.textBaseline = "middle"; ctx.textAlign = "left";
       ctx.fillText(txt, x + pad, y + bh / 2);
@@ -723,7 +723,7 @@
                { stroke: "transparent", points: { show: false } },      // envelope of the
                { stroke: "transparent", points: { show: false } },      // overlaid beats (y range)
                { stroke: COL.y, width: 1.5, points: { show: false } }], // high-pass compensated mean
-      hooks: { draw: [drawAvgOverlay, drawQrst, (u) => drawMeasure(u, true, avgMeas, avgHover, 0.001)] },
+      hooks: { draw: [drawAvgOverlay, drawQrst, (u) => drawMeasure(u, true, avgMeas, avgHover, 0.001, 22)] },
     }, [avgX, ...[0, 1, 2, 3].map(() => avgX.map(() => null))], host);
     avgPlot.setScale("x", avgView);
   }
@@ -781,8 +781,10 @@
       ctx.strokeStyle = color; ctx.fillStyle = color;
       ctx.globalAlpha = dashed ? 0.75 : 0.9;
       ctx.setLineDash(dashed ? [3 * dpr, 3 * dpr] : []);
-      ctx.beginPath(); ctx.moveTo(x, top + (dashed ? 0.45 : 0.3) * height); ctx.lineTo(x, top + height); ctx.stroke();
-      if (label) { ctx.globalAlpha = 1; ctx.fillText(label, x, top + (dashed ? 0.45 : 0.3) * height - 2 * dpr); }
+      // labels in one row just under the top edge, the line runs down from there
+      const yTop = top + 16 * dpr;
+      ctx.beginPath(); ctx.moveTo(x, yTop); ctx.lineTo(x, top + height); ctx.stroke();
+      if (label) { ctx.globalAlpha = 1; ctx.fillText(label, x, yTop - 2 * dpr); }
     }
     ctx.restore();
   }
