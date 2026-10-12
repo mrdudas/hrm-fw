@@ -1531,7 +1531,30 @@
   //   Disconnect -> Disconnecting… -> Disconnected
   // A click shows its "…ing" state immediately (`pending`) until the backend's
   // next status confirms or replaces it.
+  // A click the backend does not answer is sent once more after 2 s; after 6 s
+  // the buttons come back with a note, so a lost command is never a dead end.
   let pending = null;            // "connecting" | "disconnecting" | null
+  let pendingCmd = null, pendingAt = 0, pendingResent = false, cmdNote = "", cmdNoteUntil = 0;
+  function command(obj, state) {
+    if (!send(obj)) return false;
+    pending = state; pendingCmd = obj; pendingAt = Date.now(); pendingResent = false; cmdNote = "";
+    renderStatus();
+    return true;
+  }
+  setInterval(() => {
+    if (cmdNote && Date.now() > cmdNoteUntil) { cmdNote = ""; renderStatus(); }
+    if (!pending) return;
+    const age = Date.now() - pendingAt;
+    if (age > 6000) {
+      cmdNote = `the app did not answer “${pendingCmd.cmd}” · `; cmdNoteUntil = Date.now() + 15000;
+      console.warn("hrm: no status change after", pendingCmd, "backend state:", status.state);
+      pending = null; renderStatus();
+    } else if (age > 2000 && !pendingResent) {
+      pendingResent = true;
+      console.warn("hrm: no answer to", pendingCmd, "after 2 s, sending it again");
+      send(pendingCmd);
+    }
+  }, 500);
   function uiState() {
     if (pending) return pending;
     switch (status.state) {
@@ -1548,6 +1571,9 @@
   function statusLabel() {
     const s = status;
     const left = Math.max(0, Math.round((s.next_scan || 0) - Date.now() / 1000));
+    return cmdNote + statusLabelBase(s, left);
+  }
+  function statusLabelBase(s, left) {
     switch (uiState()) {
       case "connected": return "Connected" + (s.detail ? " · " + s.detail : "");
       case "connecting":
@@ -1655,13 +1681,11 @@
     sel.addEventListener("change", () => { userPicked = true; renderDevices(); });
     $("conn-btn").addEventListener("click", () => {
       const opt = sel.selectedOptions[0];
-      if (!send({ cmd: "connect", address: sel.value || null, name: opt ? opt.dataset.name : "" })) return;
-      userPicked = false;
-      pending = "connecting"; renderStatus();
+      if (!command({ cmd: "connect", address: sel.value || null, name: opt ? opt.dataset.name : "" }, "connecting")) return;
+      userPicked = false; renderDevices();
     });
     $("disc-btn").addEventListener("click", () => {
-      if (!send({ cmd: "disconnect" })) return;
-      pending = "disconnecting"; renderStatus();
+      command({ cmd: "disconnect" }, "disconnecting");
     });
     $("take-raw").addEventListener("click", () => send({ cmd: "take_raw" }));
     $("avg-clear").addEventListener("click", clearAvg);
