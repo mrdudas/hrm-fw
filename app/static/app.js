@@ -42,7 +42,10 @@
   // troubleshooting switches in the page URL:
   //   ?fps=N   chart redraw rate (default 30: about half the GPU load of 60 and
   //            the scrolling still looks continuous; ?fps=60 for the full rate)
-  //   ?sw=1    software-rendered canvases (rules out GPU canvas glitches)
+  //   ?sw=0    GPU-accelerated canvases. The default is software rendering:
+  //            with one-device-pixel traces it costs the same CPU in total, and
+  //            Chrome's GPU process does not pile up ~500 MB of canvas caches
+  //            (measured on a 2016 MacBook Pro: 118 MB flat instead of 420 -> 670 MB)
   const URL_OPT = new URLSearchParams(location.search);
   const FRAME_MIN = 1 / Math.min(240, Math.max(5, +URL_OPT.get("fps") || 30)) - 0.003;
   //   ?lw=N   trace width of the live strip in CSS px (default: one device pixel)
@@ -50,7 +53,7 @@
   // (Retina) the 1.2 px traces kept one core busy in Chrome's GPU process and
   // the strip at ~38 fps; one-device-pixel lines run at a steady 60.
   const LINE_W = Math.min(4, Math.max(0, +URL_OPT.get("lw"))) || 1 / devicePixelRatio;
-  if (URL_OPT.get("sw") === "1") {
+  if (URL_OPT.get("sw") !== "0") {
     const getContext = HTMLCanvasElement.prototype.getContext;
     HTMLCanvasElement.prototype.getContext = function (type, opts) {
       return getContext.call(this, type, type === "2d" ? { ...opts, willReadFrequently: true } : opts);
