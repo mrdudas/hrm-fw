@@ -64,7 +64,10 @@ class Hub:
         out = [json.dumps(self._status)]
         for key in ("ecg_info", "devices", "battery", "rr", "accel", "ectopy", "link", "raw"):
             if key in self._snapshot:
-                out.append(self._snapshot[key])
+                msg = self._snapshot[key]
+                if key == "ectopy":      # an old event, not one happening now
+                    msg = json.dumps({**json.loads(msg), "replay": True})
+                out.append(msg)
         return out
 
     def command(self, msg: dict):

@@ -249,6 +249,7 @@
     accE.fill(NaN);                          // accel ECG positions referred to the old index space
     SNAP_BACK = Math.round(0.35 * FS); SNAP_FWD = Math.round(0.12 * FS);
     pendingBeats.length = 0; beatDots.length = 0;
+    pendingEcto.length = 0;                  // their sample indices are gone
     lastR = -1e9;
     rrRecent.length = 0;
     resetAvg();                              // new sample grid; clears the collected segments
@@ -463,6 +464,13 @@
       let ok = true;
       for (let i = 0; i < AVG_LEN; i++) { const v = ecgAt(r - AVG_PRE + i); if (v !== v) { ok = false; break; } seg[i] = v; }
       if (ok) segs.push(seg);
+    }
+    for (let k = 0; k < pendingEcto.length; ) {
+      const p = pendingEcto[k];
+      // wait for the beats after the event; a stalled stream gets what there is
+      if (ecgLast < p.n0 + ECTO_POST * FS && now() - p.ta < ECTO_POST + 3) { k++; continue; }
+      pendingEcto.splice(k, 1);
+      ectoCapture(p.ev, p.n0);
     }
     while (beatDots.length && beatDots[0] <= ecgLast - RING) beatDots.shift();
   }
@@ -1102,6 +1110,7 @@
     else if (kind === "accel") pushAccel(msg, ta);
     else if (kind === "rr") pendingBeats.push({ ta, rr: msg, nb: ecgLast });
     else if (kind === "link") accLinkBroken = true;
+    else if (kind === "ecto") pendingEcto.push({ ev: msg, n0: ecgLast, ta });
   }
 
   function oldestTime() {
@@ -1145,7 +1154,12 @@
     measureMode = on;
     $("measure-btn").classList.toggle("active", on);
     $("avg-measure-btn").classList.toggle("active", on);
-    if (!on) { hoverT = null; avgHover = null; }
+    if (!on) {                       // leaving the mode takes the markers with it
+      hoverT = null; avgHover = null;
+      meas.a = meas.b = avgMeas.a = avgMeas.b = null;
+      if (avgPlot) avgPlot.redraw(false);
+      if (ectoPlot) ectoPlot.redraw(false);
+    }
     updateCursor();
     updateReadout();
   }
@@ -1309,6 +1323,8 @@
     for (const L of LANES) lanes[L.key].u.setSize({ width: w, height: L.h });
     const a = $("avg-chart");
     if (avgPlot) avgPlot.setSize({ width: a.clientWidth, height: a.clientHeight || 300 });
+    const ev = $("ecto-chart");
+    if (ectoPlot && ectoSel) ectoPlot.setSize({ width: ev.clientWidth, height: ev.clientHeight || 220 });
     if (trendPlots) {
       trendPlots.hrv.setSize({ width: $("hrv-lane").clientWidth, height: 170 });
       trendPlots.hr.setSize({ width: $("hr-lane").clientWidth, height: 130 });
@@ -1317,6 +1333,113 @@
   }
 
   // ---------- DOM panels ----------
+  // Every event the strap reports keeps its own piece of ECG: the strap decides
+  // one beat late (it needs the pause after the early beat), so the early beat
+  // is pause_ms before the notification. Kept: ECTO_PRE before the beat that
+  // precedes it .. ECTO_POST after the notification, with the R positions.
+  // Click a row of the log to look at it. (Browser memory only; the whole
+  // recording is in the ECG CSV.)
+  const ECTO_PRE = 2.0, ECTO_POST = 2.0;   // s
+  const ECTO_KEEP = 40;                    // rows (and waveforms) in the log
+  const pendingEcto = [];                  // { ev, n0, ta }  waiting for the samples after the event
+  let ectoPlot = null, ectoSel = null;     // the event shown
+  const ectoCls = (name) => name === "PVC" ? "pvc" : name === "PAC" ? "pac" : "art";
+
+  function ectoCapture(ev, n0) {
+    const pause = ev.pause_ms / 1000 * FS, coup = ev.coupling_ms / 1000 * FS;
+    // the early beat: the R whose intervals before and after are the reported
+    // coupling and pause, the pause ending at about the notification
+    let r0 = null, err = 0.12 * FS;
+    for (let k = 1; k + 1 < beatDots.length; k++) {
+      const r = beatDots[k], next = beatDots[k + 1];
+      if (next < n0 - 0.7 * FS || next > n0 + 0.2 * FS) continue;
+      const e = Math.abs(r - beatDots[k - 1] - coup) + Math.abs(next - r - pause);
+      if (e < err) { err = e; r0 = r; }
+    }
+    const exact = r0 != null;
+    if (!exact) r0 = Math.round(n0 - pause - 0.15 * FS);        // ~ detection + radio latency
+    const from = Math.max(0, ecgLast - RING + 1, Math.round(r0 - coup - ECTO_PRE * FS));
+    const to = Math.min(ecgLast, Math.round(n0 + ECTO_POST * FS));
+    if (to - from < 0.5 * FS) return;
+    const x = new Array(to - from + 1), y = new Array(to - from + 1);
+    let any = false;
+    for (let n = from; n <= to; n++) {
+      const v = ecgRing[n % RING];
+      x[n - from] = (n - r0) / FS * 1000;
+      y[n - from] = v === v ? v : null;
+      if (v === v) any = true;
+    }
+    if (!any) return;
+    ev.wave = { x, y, exact,
+                beats: beatDots.filter((n) => n >= from && n <= to).map((n) => (n - r0) / FS * 1000) };
+    if (ev.row) { ev.row.classList.add("has-wave"); ev.row.title = "Show the ECG around this beat"; }
+  }
+
+  function ectoShow(ev) {
+    if (ectoSel && ectoSel.row) ectoSel.row.classList.remove("sel");
+    ectoSel = ev && ev.wave ? ev : null;
+    $("ecto-view").hidden = !ectoSel;
+    if (!ectoSel) return;
+    ev.row.classList.add("sel");
+    const w = ev.wave;
+    $("ecto-view-title").innerHTML =
+      `<span class="tag ${ectoCls(ev.type_name)}">${ev.type_name}</span> ${ev.ts}` +
+      ` <span class="meta">· coupling ${ev.coupling_ms} ms · pause ${ev.pause_ms} ms` +
+      (w.exact ? "" : " · beat position estimated") + `</span>`;
+    const host = $("ecto-chart");
+    if (!ectoPlot) {
+      ectoPlot = new uPlot({
+        width: host.clientWidth, height: host.clientHeight || 220, legend: { show: false },
+        padding: [6, 12, 0, 0],
+        cursor: { y: false, drag: { x: false, y: false, setScale: false } },
+        scales: { x: { time: false } },
+        axes: [
+          { stroke: COL.text, font: FONT, grid: { stroke: COL.grid }, ticks: { show: false },
+            label: "ms  (reported beat = 0)", labelSize: 18, labelFont: FONT },
+          { stroke: COL.text, font: FONT, grid: { stroke: COL.grid }, ticks: { show: false },
+            label: "ECG", labelSize: 14, labelFont: FONT, size: 50 },
+        ],
+        series: [{}, { stroke: COL.ecg, width: 1.5, points: { show: false } }],
+        hooks: { draw: [drawEctoBeats] },
+      }, [w.x, w.y], host);
+    } else {
+      ectoPlot.setSize({ width: host.clientWidth, height: host.clientHeight || 220 });
+      ectoPlot.setData([w.x, w.y]);
+    }
+  }
+  // R positions, the R-R interval between them, the reported beat highlighted
+  function drawEctoBeats(u) {
+    if (!ectoSel) return;
+    const w = ectoSel.wave, ctx = u.ctx, { left, top, width, height } = u.bbox, dpr = devicePixelRatio;
+    const col = getComputedStyle(document.documentElement)
+      .getPropertyValue("--" + ectoCls(ectoSel.type_name)).trim() || COL.rr;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(left, top, width, height); ctx.clip();
+    const x0 = u.valToPos(0, "x", true);
+    ctx.fillStyle = col; ctx.globalAlpha = 0.13;
+    ctx.fillRect(x0 - 14 * dpr, top, 28 * dpr, height);
+    ctx.globalAlpha = 1;
+    ctx.font = `600 ${11 * dpr}px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif`;
+    ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+    ctx.fillText(ectoSel.type_name, x0, top + height - 3 * dpr);
+    ctx.textBaseline = "top";
+    ctx.strokeStyle = COL.text; ctx.lineWidth = dpr; ctx.setLineDash([2 * dpr, 3 * dpr]);
+    let prev = null;
+    for (const t of w.beats) {
+      const x = u.valToPos(t, "x", true);
+      ctx.globalAlpha = 0.6;
+      ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + 16 * dpr); ctx.stroke();
+      ctx.globalAlpha = 1;
+      if (prev != null && t - prev < 2500) {
+        const early = Math.abs(t) < 1, late = Math.abs(prev) < 1;
+        ctx.fillStyle = early || late ? col : COL.text;
+        ctx.fillText(Math.round(t - prev) + " ms", (x + u.valToPos(prev, "x", true)) / 2, top + 3 * dpr);
+      }
+      prev = t;
+    }
+    ctx.restore();
+  }
+
   function onEctopy(msg) {
     setText("pvc", msg.pvc);
     setText("pac", msg.pac);
@@ -1325,17 +1448,25 @@
     setText("total-beats", msg.total);
     if (msg.type_name && msg.type_name !== "NONE") {
       const log = $("ecto-log");
+      // the last event again (sent to every new page / after a reconnect)
+      if (msg.replay && [...log.children].some((d) => d.ev && d.ev.t === msg.t)) return;
       const empty = log.querySelector(".ecto-empty");
       if (empty) empty.remove();
-      const cls = msg.type_name === "PVC" ? "pvc" : msg.type_name === "PAC" ? "pac" : "art";
       const div = document.createElement("div");
-      div.className = "evt " + cls;
-      const ts = new Date((msg.t || Date.now() / 1000) * 1000).toLocaleTimeString();
+      div.className = "evt " + ectoCls(msg.type_name);
+      msg.ts = new Date((msg.t || Date.now() / 1000) * 1000).toLocaleTimeString();
       div.innerHTML = `<span class="tag">${msg.type_name}</span>` +
-        `<span>${ts}</span>` +
+        `<span>${msg.ts}</span>` +
         `<span class="meta">coupling ${msg.coupling_ms}ms · pause ${msg.pause_ms}ms</span>`;
+      div.ev = msg; msg.row = div;
+      div.addEventListener("click", () => ectoShow(ectoSel === msg ? null : msg));
       log.prepend(div);
-      while (log.children.length > 40) log.removeChild(log.lastChild);
+      while (log.children.length > ECTO_KEEP) {
+        const old = log.lastChild;
+        if (old.ev === ectoSel) ectoShow(null);
+        log.removeChild(old);
+      }
+      if (!msg.replay) stream("ecto", msg);          // its waveform follows with the ECG
     }
   }
 
@@ -1554,6 +1685,7 @@
     initPauseMeasure();
     initAvgTools();
     initDevicePicker();
+    $("ecto-view-close").addEventListener("click", () => ectoShow(null));
     connect();
     new ResizeObserver(resize).observe($("strip-chart"));
     requestAnimationFrame(frame);

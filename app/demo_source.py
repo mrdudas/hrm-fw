@@ -78,6 +78,8 @@ class DemoSource:
         packet = []
         last_r = None               # sample time of the previous R peak
         reported = True             # R of the current cycle already published?
+        ecto_cycle = 0              # type of the premature beat in the current cycle (0 = none)
+        ecto_pend = None            # (type, coupling_ms) waiting for the pause, like the firmware
         t_samp = 0.0
         next_t = time.monotonic()
         # accelerometer like the v2 firmware: one sample every acc_div ECG ticks,
@@ -107,24 +109,36 @@ class DemoSource:
                     if last_r is not None and self.enabled:
                         rr_ms = (r_t - last_r) * 1000.0
                         self.hub.publish_rr(round(60000.0 / rr_ms), [rr_ms], "yes")
+                        # like the firmware: the premature beat is reported one beat
+                        # later, when the interval after it (the pause) is known
+                        if ecto_pend:
+                            self._emit_ecto(ecto_pend[0], round(ecto_pend[1]), round(rr_ms),
+                                            pvc, pac, art, total)
+                            ecto_pend = None
+                        if ecto_cycle:
+                            ecto_pend = (ecto_cycle, rr_ms)
                     last_r = r_t
                 if phase >= rr_s:
                     phase -= rr_s
                     total += 1
                     reported = False
+                    after_pvc = ecto_cycle == 1
+                    ecto_cycle = 0
                     # decide the NEXT interval (respiratory sinus arrhythmia + noise)
                     hrv = 0.06 * math.sin(time.time() * 0.25) + random.gauss(0, 0.02)
                     rr_s = max(0.3, 60.0 / self.base_hr * (1 + hrv))
+                    if after_pvc:
+                        rr_s *= 1.35               # compensatory pause
                     # ~4% chance of an ectopic beat
                     roll = random.random()
                     if roll < 0.025:
                         pvc += 1
                         rr_s = 0.34            # premature, short coupling
-                        self._emit_ecto(1, 320, 900, pvc, pac, art, total)
+                        ecto_cycle = 1
                     elif roll < 0.04:
                         pac += 1
                         rr_s = 0.40
-                        self._emit_ecto(2, 380, 500, pvc, pac, art, total)
+                        ecto_cycle = 2
             if self.enabled:
                 self.hub.publish_ecg(seq & 0xFFFF, list(packet))
             seq += 1
