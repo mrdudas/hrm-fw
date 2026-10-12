@@ -48,11 +48,12 @@
   //            (measured on a 2016 MacBook Pro: 118 MB flat instead of 420 -> 670 MB)
   const URL_OPT = new URLSearchParams(location.search);
   const FRAME_MIN = 1 / Math.min(240, Math.max(5, +URL_OPT.get("fps") || 30)) - 0.003;
-  //   ?lw=N   trace width of the live strip in CSS px (default: one device pixel)
+  //   ?lw=N   ECG trace width of the live strip in CSS px (default: one device pixel)
   // Strokes wider than one device pixel are what costs: on a 2016 MacBook Pro
   // (Retina) the 1.2 px traces kept one core busy in Chrome's GPU process and
   // the strip at ~38 fps; one-device-pixel lines run at a steady 60.
   const LINE_W = Math.min(4, Math.max(0, +URL_OPT.get("lw"))) || 1 / devicePixelRatio;
+  const ACC_W = Math.min(LINE_W, 1);      // the accelerometer lanes stay at 1 px at most
   if (URL_OPT.get("sw") !== "0") {
     const getContext = HTMLCanvasElement.prototype.getContext;
     HTMLCanvasElement.prototype.getContext = function (type, opts) {
@@ -535,10 +536,10 @@
 
   const LANES = [
     { key: "ecg", label: "ECG", h: 240, color: COL.ecg, width: LINE_W, minSpan: 200, paper: true },
-    { key: "acc", label: "XYZ g",    h: 96, color: [COL.x, COL.y, COL.z], width: LINE_W, minSpan: 0.1,
+    { key: "acc", label: "XYZ g",    h: 96, color: [COL.x, COL.y, COL.z], width: ACC_W, minSpan: 0.1,
       legend: ["X", "Y", "Z"] },
-    { key: "rot", label: "Rot °/s",  h: 66, color: COL.rot, width: LINE_W, minSpan: 20, floor: 0 },
-    { key: "mag", label: "|a| g",    h: 92, color: COL.mag, width: LINE_W, minSpan: 0.1, bottom: true },
+    { key: "rot", label: "Rot °/s",  h: 66, color: COL.rot, width: ACC_W, minSpan: 20, floor: 0 },
+    { key: "mag", label: "|a| g",    h: 92, color: COL.mag, width: ACC_W, minSpan: 0.1, bottom: true },
   ];
 
   function laneOpts(L, width) {

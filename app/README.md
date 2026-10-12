@@ -115,6 +115,25 @@ dashboard and the CSV recorder without any hardware.
   app already does that).
 - **Windows** — Windows 10 (build 16299+) / 11 work out of the box via WinRT.
 
+### Mac with two GPUs: the dashboard opens in its own Chrome window
+
+On a MacBook Pro with an integrated and a discrete GPU, Chrome draws the
+charts on the integrated one, and there a trace wider than one device pixel
+is rasterised on the CPU: on a 2016 15" model (Intel HD 530 + Radeon Pro 450)
+the 1.2 px ECG trace kept a whole core busy and the strip at ~42 fps. The page
+therefore defaults to software-rendered canvases, one-device-pixel traces and
+30 fps, which is cheap on every machine (`?sw=0`, `?lw=1.2`, `?fps=60` in the
+URL change each of them).
+
+On the discrete GPU the wide trace costs 11-12 % of a core, but only a switch
+on the command line of a newly started Chrome selects that GPU. So when
+`app.py` finds Google Chrome and two graphics chipsets on macOS, it opens the
+dashboard in a separate Chrome window with its own profile
+(`~/Library/Application Support/HRM Raw RR/chrome-profile`),
+`--force_high_performance_gpu`, and `?sw=0&lw=1.2`. The discrete GPU draws
+more power on battery: `./run.sh --browser default` uses the default browser
+instead, and `--browser chrome-gpu` forces the dedicated window on any Mac.
+
 ## Packaging (optional, later)
 
 Can be bundled into a single executable with PyInstaller, e.g.:
