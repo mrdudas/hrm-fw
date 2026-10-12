@@ -40,10 +40,11 @@
   }
 
   // troubleshooting switches in the page URL:
-  //   ?fps=30  cap the chart redraw rate (default 60, also on 120 Hz displays)
+  //   ?fps=N   chart redraw rate (default 30: about half the GPU load of 60 and
+  //            the scrolling still looks continuous; ?fps=60 for the full rate)
   //   ?sw=1    software-rendered canvases (rules out GPU canvas glitches)
   const URL_OPT = new URLSearchParams(location.search);
-  const FRAME_MIN = 1 / Math.min(240, Math.max(5, +URL_OPT.get("fps") || 60)) - 0.003;
+  const FRAME_MIN = 1 / Math.min(240, Math.max(5, +URL_OPT.get("fps") || 30)) - 0.003;
   //   ?lw=N   trace width of the live strip in CSS px (default: one device pixel)
   // Strokes wider than one device pixel are what costs: on a 2016 MacBook Pro
   // (Retina) the 1.2 px traces kept one core busy in Chrome's GPU process and
@@ -1062,7 +1063,7 @@
   function frame() {
     requestAnimationFrame(frame);
     const t = now();
-    if (lastFrame != null && t - lastFrame < FRAME_MIN) return;   // 120 Hz display: every other frame
+    if (lastFrame != null && t - lastFrame < FRAME_MIN) return;   // frame-rate cap
     const dt = lastFrame == null ? 0 : Math.min(0.1, t - lastFrame);
     lastFrame = t;
     if (!paused) {
