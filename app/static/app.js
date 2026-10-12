@@ -1583,7 +1583,9 @@
   }
   function fsLabel() {
     return FS + " Hz" + (link ? ` · CI ${link.interval_ms} ms · MTU ${link.mtu}` : "") +
-      (link && link.conn_count > 1 ? ` · ⚠ ${link.conn_count} hosts connected` : "");
+      (link && link.conn_count > 1 ? ` · ⚠ ${link.conn_count} hosts connected` : "") +
+      // sample buffers the strap itself dropped (its processing lagged), since it booted
+      (link && link.adc_overrun > 0 ? ` · ⚠ ${link.adc_overrun} ADC overruns` : "");
   }
 
   function onDevices(msg) {

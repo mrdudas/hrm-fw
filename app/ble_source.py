@@ -336,7 +336,8 @@ class BLESource:
                      f"timeout {link['timeout_ms']} ms, ATT MTU {link['mtu']} (host says {link['host_mtu']})"
                      + (f", {link['conn_count']} host(s) connected" if "conn_count" in link else "")
                      + (f", raw ECG owner: {link['raw_owner']}" if "raw_owner" in link else "")
-                     + (f", VDD {link['vdd_min_mv']}-{link['vdd_max_mv']} mV" if "vdd_min_mv" in link else ""))
+                     + (f", VDD {link['vdd_min_mv']}-{link['vdd_max_mv']} mV" if "vdd_min_mv" in link else "")
+                     + (f", ADC overruns {link['adc_overrun']}" if "adc_overrun" in link else ""))
             self.hub.publish_link(link)
         return link
 
