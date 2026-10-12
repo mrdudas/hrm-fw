@@ -6,7 +6,7 @@
  * each wave (narrow for the QRS, wide for P and T):
  *   - QRS onset / offset: where the slope stays below a small fraction of the
  *     steepest QRS slope;
- *   - P: the most prominent upright wave before the QRS, bounded by slope;
+ *   - P: the most prominent upright wave before the QRS, from 12 % to 12 % of its height;
  *   - T: largest deflection after the J point; T end by the tangent method (the
  *     tangent at the steepest return slope, where it meets the baseline).
  *
@@ -108,12 +108,21 @@
       // before and after (so a sloping ST segment is not mistaken for it)
       const tb = tailRef(xt), wT = ms(100);
       let best = 0;
+      const cand = [];
       for (let i = tLo + 1; i < tHi; i++) {
         if ((dt[i - 1] > 0) === (dt[i] > 0)) continue;              // not a local extremum
         const a = Math.max(tLo, i - wT), b = Math.min(tHi, i + wT);
         const prom = Math.abs(xt[i] - (xt[a] + (xt[b] - xt[a]) * (i - a) / (b - a)));
         const score = Math.abs(xt[i] - tb) + prom;
+        cand.push([i, score]);
         if (score > best) { best = score; tIdx = i; }
+      }
+      // a wave of the opposite polarity right before the winner, nearly as strong:
+      // that one is the T wave and the winner its rebound (the second phase of a
+      // biphasic T, or the undershoot a high-pass front end adds after the T)
+      for (const [i, score] of cand) {
+        if (i >= tIdx || tIdx - i > ms(200) || score < 0.6 * best) continue;
+        if (Math.sign(xt[i] - tb) !== Math.sign(xt[tIdx] - tb)) { tIdx = i; best = score; break; }
       }
       if (tIdx > 0 && best > 0.008 * Rv) { tSgn = Math.sign(xt[tIdx] - tb) || 1; fid.T = T(tIdx); }
       else tIdx = -1;
@@ -123,7 +132,7 @@
     // MAXIMUM before the QRS -- its height above the line joining the lowest points
     // on either side. (The largest deviation from a fixed level picks the valley
     // between the previous T wave and the P wave at higher heart rates.)
-    const xp = smooth(x, 0.008 * fs), dp = deriv(smooth(x, 0.010 * fs), fs);
+    const xp = smooth(x, 0.008 * fs);
     // not further back than the previous beat's T peak (this beat's T, one RR earlier)
     const tPrev = tIdx > 0 ? tIdx - ms(rrMs) + ms(40) : R - ms(Math.min(340, 0.5 * rrMs));
     const pLo = Math.max(ms(12), R - ms(340), tPrev), pHi = R - ms(60), pEnd = R - ms(35);
@@ -164,16 +173,16 @@
     if (hasQ) fid.Q = T(q);
     if (hasS) fid.S = T(sIdx);
 
-    if (pIdx > 0) {                           // P onset / offset by slope
-      const p = pIdx;
-      let pd = 0;
-      for (let i = Math.max(pLo, p - ms(80)); i <= Math.min(on, p + ms(80)); i++) pd = Math.max(pd, Math.abs(dp[i]));
-      const prun = Math.max(3, ms(14)), quiet = (i) => Math.abs(dp[i]) < 0.15 * pd;
-      const pOn = edge(p - ms(10), -1, Math.max(prun, p - ms(140)), prun, quiet);
-      const pOff = edge(p + ms(10), +1, on, prun, quiet);
-      fid.P = T(p);
-      if (pOn != null) fid.pOn = T(pOn);
-      fid.pOff = T(pOff != null ? pOff : on);
+    if (pIdx > 0) {
+      // P onset / offset: where the wave has come down to 12 % of its height above
+      // the line joining its feet. (A slope criterion wanders by tens of ms on a
+      // small, broad P wave.)
+      const p = pIdx, h = xp[p] - pBase(xp);
+      const above = (i) => xp[i] - (xp[pL] + (xp[pR] - xp[pL]) * (i - pL) / Math.max(1, pR - pL));
+      let pOn = pL, pOff = Math.min(pR, on);
+      for (let i = p; i >= pL; i--) if (above(i) < 0.12 * h) { pOn = i; break; }
+      for (let i = p; i <= Math.min(pR, on); i++) if (above(i) < 0.12 * h) { pOff = i; break; }
+      fid.P = T(p); fid.pOn = T(pOn); fid.pOff = T(pOff);
     }
 
     // ---- amplitudes and T end: on the compensated signal if a corner is given
