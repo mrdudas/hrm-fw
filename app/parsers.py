@@ -56,6 +56,57 @@ def parse_ecg_info(b: bytes) -> dict:
 
 
 def parse_link(b: bytes) -> dict:
+    """Link diagnostics, char a1b20004 (read), little-endian: u16 connection
+    interval (1.25 ms units), u16 peripheral latency, u16 supervision timeout
+    (10 ms units), u16 ATT MTU -- what the strap actually got from the central.
+    What follows depends on the firmware and is told apart by the length:
+
+    9 B:   + u8 conn_count (centrals connected right now)
+    10 B:  + u8 owner of the raw ECG stream: 0 none, 1 this connection, 2 another
+             (firmware where one host gets raw ECG, last subscriber wins)
+    14 B:  + u16 VDD min, u16 VDD max in mV since the previous read
+    15 B:  conn_count, then u32 adc_overrun (sample buffers the strap itself
+           dropped because its processing lagged) and u16 ob_env (|ECG| envelope
+           of the differential front end). No raw owner, no VDD: every
+           subscribed host gets raw ECG. This is the current firmware."""
+    b = bytes(b)
+    iv, lat, tmo, mtu = struct.unpack_from("<HHHH", b, 0)
+    d = {"interval_ms": iv * 1.25, "latency": lat, "timeout_ms": tmo * 10, "mtu": mtu}
+    if len(b) >= 9:
+        d["conn_count"] = b[8]
+    if len(b) >= 15:
+        d["adc_overrun"], d["ob_env"] = struct.unpack_from("<IH", b, 9)
+    elif len(b) >= 10:
+        d["raw_owner"] = {0: "none", 1: "mine", 2: "other"}.get(b[9], "other")
+        if len(b) >= 14:
+            # VDD extremes since the previous read of this char (the strap resets them
+            # on every read): min = TX-burst dip, max = resting
+            d["vdd_min_mv"], d["vdd_max_mv"] = struct.unpack_from("<HH", b, 10)
+    return d
+
+
+def parse_ecg_info(b: bytes) -> dict:
+    """ECG stream info, char a1b20003 (read once on connect), little-endian:
+    u16 sample_hz, u16 raw_batch, u8 sample_bytes, u8 fmt_ver
+    [+ u16 acc_div: accel is read every acc_div ECG ticks -- 8-byte firmware]
+    [+ u8 flags: bit0 stream is mains-notched in firmware, bit1 notch at 60 Hz
+       (else 50 Hz), bit2 the stream is already compensated for the front-end
+       high-pass in firmware -- 9-byte firmware]
+    [+ u8 hp_comp: corner the firmware compensates, 0.1 Hz units (0 = not
+       stated) -- 10-byte firmware]."""
+    b = bytes(b)
+    hz, batch, nbytes, ver = struct.unpack_from("<HHBB", b, 0)
+    d = {"sample_hz": hz, "raw_batch": batch, "sample_bytes": nbytes, "fmt_ver": ver}
+    if len(b) >= 8:
+        d["acc_div"] = struct.unpack_from("<H", b, 6)[0]
+    if len(b) >= 9:
+        d["notched_hz"] = (60 if b[8] & 2 else 50) if b[8] & 1 else 0
+        d["hp_comp"] = bool(b[8] & 4)
+        d["hp_comp_hz"] = b[9] / 10 if d["hp_comp"] and len(b) >= 10 else 0
+    return d
+
+
+def parse_link(b: bytes) -> dict:
     """Link diagnostics, char a1b20004 (read), little-endian u16 x4: connection
     interval (1.25 ms units), peripheral latency, supervision timeout (10 ms
     units), ATT MTU -- what the strap actually got from the central
