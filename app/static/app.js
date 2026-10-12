@@ -70,6 +70,18 @@
   let ecgLastArrival = 0;
   const ecgAt = (n) => (n > ecgLast - RING && n <= ecgLast && n >= 0) ? ecgRing[n % RING] : NaN;
 
+  // samples received / missing (packets the strap could not send), and the share
+  // missing over the last LOSS_WIN seconds for the strip header
+  let ecgGot = 0, ecgLost = 0, ecgLossPct = 0;
+  const LOSS_WIN = 10, lossLog = [];     // [t, got, lost] once a second
+  setInterval(() => {
+    lossLog.push([now(), ecgGot, ecgLost]);
+    while (lossLog.length > LOSS_WIN + 1) lossLog.shift();
+    const got = ecgGot - lossLog[0][1], lost = ecgLost - lossLog[0][2];
+    ecgLossPct = got + lost > 0 && got >= 0 && lost >= 0 ? 100 * lost / (got + lost) : 0;
+    setText("ecg-fs", fsLabel());
+  }, 1000);
+
   function pushEcg(msg, ta) {
     if (msg.fs && msg.fs !== FS) setEcgRate(msg.fs);
     if (msg.base === ecgLastBase) return;   // repeated packet (strap TX retry): already have it
@@ -79,7 +91,7 @@
       const wrap = 65536 * len;
       const d = (((msg.base - ecgLastBase) % wrap) + wrap) % wrap;
       if (d !== len) {
-        if (d > len && d <= 2 * FS) skip = d - len;          // dropped packets: leave a gap
+        if (d > len && d <= 2 * FS) { skip = d - len; ecgLost += skip; }   // dropped packets: leave a gap
         else                                                  // restart / reconnect: keep the
           skip = Math.max(0, Math.round((ta - ecgLastArrival - len / FS) * FS));   // index ~ time
       }
@@ -94,6 +106,7 @@
       ecgRaw[ecgLast % RING] = s;
       ecgRing[ecgLast % RING] = notch.step(s);
     }
+    ecgGot += len;
     ecgLastBase = msg.base;
     ecgLastLen = len;
     ecgLastArrival = ta;
@@ -1583,6 +1596,7 @@
   }
   function fsLabel() {
     return FS + " Hz" + (link ? ` · CI ${link.interval_ms} ms · MTU ${link.mtu}` : "") +
+      (ecgLossPct >= 1 ? ` · ⚠ ${ecgLossPct.toFixed(0)} % of the ECG lost on the radio link` : "") +
       (link && link.conn_count > 1 ? ` · ⚠ ${link.conn_count} hosts connected` : "") +
       // sample buffers the strap itself dropped (its processing lagged), since it booted
       (link && link.adc_overrun > 0 ? ` · ⚠ ${link.adc_overrun} ADC overruns` : "");
