@@ -134,9 +134,17 @@
         <div class="ecto-count art"><div class="ec-n" id="artifact">0</div><div class="ec-l">Artifact</div></div>
       </div>
       <div class="ecto-log-wrap">
-        <div class="ecto-log-head">Recent events</div>
+        <div class="ecto-log-head">Recent events <span class="ecto-tip">· click one to see its ECG</span></div>
         <div id="ecto-log" class="ecto-log"><div class="ecto-empty">no ectopic beats yet</div></div>
       </div>
+    </div>
+    <!-- the ECG around the event picked in the log -->
+    <div id="ecto-view" class="ecto-view" hidden>
+      <div class="ecto-view-head">
+        <span id="ecto-view-title"></span>
+        <button id="ecto-view-close" class="tool-btn" title="Hide the waveform">Close</button>
+      </div>
+      <div id="ecto-chart" class="chart-ecto"></div>
     </div>
   </section>
 </main>

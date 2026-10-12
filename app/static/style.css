@@ -137,3 +137,16 @@ html{background:var(--bg); color-scheme:dark}
 .card{contain:layout style}
 .hint, .qrst-out, .meas-readout{font-variant-numeric:tabular-nums}
 .avg-stat{display:inline-block; min-width:17em; text-align:right}
+
+/* ectopy events: rows with a stored waveform are clickable, the chart opens below */
+.ecto-log .evt.has-wave{cursor:pointer}
+.ecto-log .evt.has-wave:hover{background:var(--panel-2)}
+.ecto-log .evt.sel{background:var(--panel-2); box-shadow:inset 2px 0 0 var(--text)}
+.ecto-tip{opacity:.7}
+.ecto-view{margin-top:14px}
+.ecto-view-head{display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:13px;
+  margin-bottom:6px; font-variant-numeric:tabular-nums}
+.ecto-view-head .tag{font-weight:700}
+.ecto-view-head .tag.pvc{color:var(--pvc)} .ecto-view-head .tag.pac{color:var(--pac)} .ecto-view-head .tag.art{color:var(--art)}
+.ecto-view-head .meta{color:var(--muted)}
+.chart-ecto{width:100%; height:220px; line-height:0; contain:layout paint style}
