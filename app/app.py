@@ -11,6 +11,7 @@ Usage:
     python app.py --scan          # list nearby BLE devices and exit
     python app.py --address ADDR  # connect to a specific address/UUID
     python app.py --no-open       # don't auto-open the browser
+    python app.py --browser default   # Mac: default browser instead of the dedicated Chrome window
     python app.py --port 8770     # change the web server port
 """
 import argparse
@@ -18,8 +19,8 @@ import asyncio
 import os
 import sys
 import time
-import webbrowser
 
+import browser
 from config import HOST, PORT, DEVICE_NAME, LEGACY_NAMES
 from recorder import CSVRecorder
 from hub import Hub
@@ -87,10 +88,7 @@ async def run_dashboard(args):
         # open the browser shortly after the server is up
         async def _open():
             await asyncio.sleep(0.6)
-            try:
-                webbrowser.open(url)
-            except Exception:
-                pass
+            await asyncio.to_thread(browser.open_dashboard, url, args.browser, log)
         asyncio.create_task(_open())
 
     log("running. Press Ctrl+C to stop.")
@@ -125,6 +123,10 @@ def parse_args(argv):
                    help=f"web port (default {PORT})")
     p.add_argument("--no-open", action="store_true",
                    help="do not auto-open the browser")
+    p.add_argument("--browser", choices=("auto", "default", "chrome-gpu"), default="auto",
+                   help="auto: on a Mac with a discrete GPU the dashboard gets its own Chrome "
+                        "window on that GPU, elsewhere the default browser; default: always the "
+                        "default browser; chrome-gpu: the dedicated Chrome window on any Mac")
     return p.parse_args(argv)
 
 
