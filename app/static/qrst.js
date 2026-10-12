@@ -6,7 +6,7 @@
  * each wave (narrow for the QRS, wide for P and T):
  *   - QRS onset / offset: where the slope stays below a small fraction of the
  *     steepest QRS slope;
- *   - P: largest deflection from the PQ level before the QRS, bounded by slope;
+ *   - P: the most prominent upright wave before the QRS, bounded by slope;
  *   - T: largest deflection after the J point; T end by the tangent method (the
  *     tangent at the steepest return slope, where it meets the baseline).
  *
@@ -74,7 +74,8 @@
     const i0 = tms.findIndex((v) => v >= 0);
     if (i0 < ms(120) || !(rrMs > 250)) return null;
     // one cardiac cycle: stop well before the next beat's P wave
-    const tEndMs = Math.min(tms[tms.length - 1], Math.max(350, rrMs - 180));
+    // (at high heart rates the next P wave follows the T wave closely)
+    const tEndMs = Math.min(tms[tms.length - 1], Math.max(Math.min(350, rrMs - 110), rrMs - 180));
     const n = Math.min(y.length, i0 + ms(tEndMs) + 1);
     const t = Array.from(tms).slice(0, n);
     const T = (i) => t[Math.max(0, Math.min(n - 1, Math.round(i)))];
@@ -83,7 +84,7 @@
     for (let i = 0; i < n; i++) x[i] = y[i] - base;
     const fid = {}, amp = {};
 
-    // ---- QRS (narrow scale)
+    // ---- QRS (narrow scale): R peak and the J point
     const xs = smooth(x, 0.003 * fs), d = deriv(smooth(x, 0.004 * fs), fs);
     let R = i0;
     for (let i = i0 - ms(20); i <= i0 + ms(20); i++) if (xs[i] > xs[R]) R = i;
@@ -92,42 +93,8 @@
     let dmax = 0;
     for (let i = R - ms(60); i <= Math.min(n - 1, R + ms(60)); i++) dmax = Math.max(dmax, Math.abs(d[i]));
     const thr = 0.06 * dmax, run = Math.max(3, ms(12));
-    // onset: flat AND back at the baseline (a small initial deflection before the
-    // main complex has a flat top, but is not at the baseline)
-    const lim = Math.max(run, R - ms(140));
-    let on = edge(R, -1, lim, run, (i) => Math.abs(d[i]) < 0.04 * dmax && Math.abs(xs[i]) < 0.03 * Rv);
-    if (on == null) on = edge(R, -1, lim, run, (i) => Math.abs(d[i]) < thr);
     const off = edge(R, +1, Math.min(n - 1 - run, R + ms(170)), run, (i) => Math.abs(d[i]) < thr);
-    if (on == null || off == null) return null;
-    fid.qrsOn = T(on); fid.R = T(R); fid.qrsOff = T(off);
-    let q = on, sIdx = R;
-    for (let i = on; i <= R; i++) if (xs[i] < xs[q]) q = i;
-    for (let i = R; i <= off; i++) if (xs[i] < xs[sIdx]) sIdx = i;
-    const hasQ = xs[q] < -0.03 * Rv && q > on && q < R;
-    const hasS = xs[sIdx] < -0.03 * Rv && sIdx > R && sIdx < off;
-    if (hasQ) fid.Q = T(q);
-    if (hasS) fid.S = T(sIdx);
-
-    // ---- P (wide scale), referenced to the level before the P wave
-    const xp = smooth(x, 0.008 * fs), dp = deriv(smooth(x, 0.010 * fs), fs);
-    const pLo = Math.max(ms(12), on - ms(300)), pHi = on - ms(20);
-    const pRef = (a) => mean(a, Math.max(0, pLo - ms(12)), pLo + ms(12));
-    let pIdx = -1;
-    if (pHi - pLo > ms(40)) {
-      const pq = pRef(xp);
-      let p = pLo;
-      for (let i = pLo; i <= pHi; i++) if (Math.abs(xp[i] - pq) > Math.abs(xp[p] - pq)) p = i;
-      if (Math.abs(xp[p] - pq) > 0.008 * Rv && p > pLo && p < pHi) {
-        let pd = 0;
-        for (let i = Math.max(pLo, p - ms(80)); i <= Math.min(pHi, p + ms(80)); i++) pd = Math.max(pd, Math.abs(dp[i]));
-        const prun = Math.max(3, ms(14)), quiet = (i) => Math.abs(dp[i]) < 0.15 * pd;
-        const pOn = edge(p - ms(10), -1, Math.max(prun, p - ms(140)), prun, quiet);
-        const pOff = edge(p + ms(10), +1, on, prun, quiet);
-        pIdx = p; fid.P = T(p);
-        if (pOn != null) fid.pOn = T(pOn);
-        fid.pOff = T(pOff != null ? pOff : on);
-      }
-    }
+    if (off == null) return null;
 
     // ---- T (wide scale); baseline = end of the cycle (TP segment)
     const sT = 0.014 * fs;
@@ -152,6 +119,63 @@
       else tIdx = -1;
     }
 
+    // ---- P (wide scale): an upright wave in this lead, so the most prominent local
+    // MAXIMUM before the QRS -- its height above the line joining the lowest points
+    // on either side. (The largest deviation from a fixed level picks the valley
+    // between the previous T wave and the P wave at higher heart rates.)
+    const xp = smooth(x, 0.008 * fs), dp = deriv(smooth(x, 0.010 * fs), fs);
+    // not further back than the previous beat's T peak (this beat's T, one RR earlier)
+    const tPrev = tIdx > 0 ? tIdx - ms(rrMs) + ms(40) : R - ms(Math.min(340, 0.5 * rrMs));
+    const pLo = Math.max(ms(12), R - ms(340), tPrev), pHi = R - ms(60), pEnd = R - ms(35);
+    let pIdx = -1, pL = 0, pR = 0;
+    const pBase = (a) => a[pL] + (a[pR] - a[pL]) * (pIdx - pL) / Math.max(1, pR - pL);
+    if (pHi - pLo > ms(30)) {
+      const reach = ms(90);
+      let best = 0.008 * Rv;
+      for (let i = pLo + 1; i < pHi; i++) {
+        if (!(xp[i] >= xp[i - 1] && xp[i] > xp[i + 1])) continue;        // local maximum
+        let l = i, r = i;
+        for (let k = i; k >= Math.max(pLo - ms(20), 0, i - reach); k--) if (xp[k] < xp[l]) l = k;
+        for (let k = i; k <= Math.min(pEnd, i + reach); k++) if (xp[k] < xp[r]) r = k;
+        if (l === i || r === i) continue;
+        const prom = xp[i] - (xp[l] + (xp[r] - xp[l]) * (i - l) / (r - l));
+        if (prom > best) { best = prom; pIdx = i; pL = l; pR = r; }
+      }
+    }
+
+    // ---- QRS onset: flat AND back at the baseline (a small initial deflection
+    // before the main complex has a flat top, but is not at the baseline). Never
+    // searched back past the P wave: with a short PQ segment the P's own slope
+    // would otherwise be taken for the start of the QRS.
+    const lim = Math.max(run, R - ms(140), pIdx > 0 ? pIdx + ms(16) : 0);
+    let on = edge(R, -1, lim, run, (i) => Math.abs(d[i]) < 0.04 * dmax && Math.abs(xs[i]) < 0.03 * Rv);
+    if (on == null) on = edge(R, -1, lim, run, (i) => Math.abs(d[i]) < thr);
+    if (on == null && pIdx > 0) {             // no flat PQ segment: its flattest point
+      on = lim;
+      for (let i = lim; i <= R - ms(10); i++) if (Math.abs(d[i]) < Math.abs(d[on])) on = i;
+    }
+    if (on == null) return null;
+    fid.qrsOn = T(on); fid.R = T(R); fid.qrsOff = T(off);
+    let q = on, sIdx = R;
+    for (let i = on; i <= R; i++) if (xs[i] < xs[q]) q = i;
+    for (let i = R; i <= off; i++) if (xs[i] < xs[sIdx]) sIdx = i;
+    const hasQ = xs[q] < -0.03 * Rv && q > on && q < R;
+    const hasS = xs[sIdx] < -0.03 * Rv && sIdx > R && sIdx < off;
+    if (hasQ) fid.Q = T(q);
+    if (hasS) fid.S = T(sIdx);
+
+    if (pIdx > 0) {                           // P onset / offset by slope
+      const p = pIdx;
+      let pd = 0;
+      for (let i = Math.max(pLo, p - ms(80)); i <= Math.min(on, p + ms(80)); i++) pd = Math.max(pd, Math.abs(dp[i]));
+      const prun = Math.max(3, ms(14)), quiet = (i) => Math.abs(dp[i]) < 0.15 * pd;
+      const pOn = edge(p - ms(10), -1, Math.max(prun, p - ms(140)), prun, quiet);
+      const pOff = edge(p + ms(10), +1, on, prun, quiet);
+      fid.P = T(p);
+      if (pOn != null) fid.pOn = T(pOn);
+      fid.pOff = T(pOff != null ? pOff : on);
+    }
+
     // ---- amplitudes and T end: on the compensated signal if a corner is given
     let sig = xs, ap = xp, at = xt, adt = dt;
     if (hp > 0) {
@@ -170,7 +194,7 @@
     amp.R = sig[R];
     if (hasQ) amp.Q = sig[q];
     if (hasS) amp.S = sig[sIdx];
-    if (pIdx > 0) amp.P = ap[pIdx] - pRef(ap);
+    if (pIdx > 0) amp.P = ap[pIdx] - pBase(ap);
     if (tIdx > 0) {
       const tb = tailRef(at);
       amp.T = at[tIdx] - tb;
