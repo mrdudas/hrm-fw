@@ -44,6 +44,11 @@
   //   ?sw=1    software-rendered canvases (rules out GPU canvas glitches)
   const URL_OPT = new URLSearchParams(location.search);
   const FRAME_MIN = 1 / Math.min(240, Math.max(5, +URL_OPT.get("fps") || 60)) - 0.003;
+  //   ?lw=N   trace width of the live strip in CSS px (default: one device pixel)
+  // Strokes wider than one device pixel are what costs: on a 2016 MacBook Pro
+  // (Retina) the 1.2 px traces kept one core busy in Chrome's GPU process and
+  // the strip at ~38 fps; one-device-pixel lines run at a steady 60.
+  const LINE_W = Math.min(4, Math.max(0, +URL_OPT.get("lw"))) || 1 / devicePixelRatio;
   if (URL_OPT.get("sw") === "1") {
     const getContext = HTMLCanvasElement.prototype.getContext;
     HTMLCanvasElement.prototype.getContext = function (type, opts) {
@@ -463,7 +468,7 @@
       const seg = new Float32Array(AVG_LEN);
       let ok = true;
       for (let i = 0; i < AVG_LEN; i++) { const v = ecgAt(r - AVG_PRE + i); if (v !== v) { ok = false; break; } seg[i] = v; }
-      if (ok) segs.push(seg);
+      if (ok) { segs.push(seg); avgSegRev++; }
     }
     for (let k = 0; k < pendingEcto.length; ) {
       const p = pendingEcto[k];
@@ -512,11 +517,11 @@
   };
 
   const LANES = [
-    { key: "ecg", label: "ECG", h: 240, color: COL.ecg, width: 1.2, minSpan: 200, paper: true },
-    { key: "acc", label: "XYZ g",    h: 96, color: [COL.x, COL.y, COL.z], width: 1, minSpan: 0.1,
+    { key: "ecg", label: "ECG", h: 240, color: COL.ecg, width: LINE_W, minSpan: 200, paper: true },
+    { key: "acc", label: "XYZ g",    h: 96, color: [COL.x, COL.y, COL.z], width: LINE_W, minSpan: 0.1,
       legend: ["X", "Y", "Z"] },
-    { key: "rot", label: "Rot °/s",  h: 66, color: COL.rot, width: 1, minSpan: 20, floor: 0 },
-    { key: "mag", label: "|a| g",    h: 92, color: COL.mag, width: 1, minSpan: 0.1, bottom: true },
+    { key: "rot", label: "Rot °/s",  h: 66, color: COL.rot, width: LINE_W, minSpan: 20, floor: 0 },
+    { key: "mag", label: "|a| g",    h: 92, color: COL.mag, width: LINE_W, minSpan: 0.1, bottom: true },
   ];
 
   function laneOpts(L, width) {
@@ -648,8 +653,14 @@
     });
   }
 
+  let stripSig = null;      // what a frozen view was last drawn with
   function drawStrip() {
     stepZoom();
+    if (paused) {             // frozen view: draw only when something in it changed
+      const sig = `${viewEnd}|${win}|${meas.a}|${meas.b}|${measureMode ? hoverT : ""}|${notch.f0}|${FS}`;
+      if (sig === stripSig) return;
+      stripSig = sig;
+    } else stripSig = null;
     const tEnd = paused ? viewEnd : now() - delayNow, tStart = tEnd - win;
     const xr = { min: tStart, max: tEnd };
 
@@ -736,6 +747,7 @@
   // what gets averaged / overlaid: each beat with its own baseline removed and
   // its QRS amplitude scaled to the median, minus the beats rejected as outliers.
   let avgNorm = true, avgUse = [], avgRejected = 0;
+  let avgSegRev = 0;                        // counts collected beats (redraw trigger)
   try { avgNorm = localStorage.getItem("hrm.avgNorm") !== "0"; } catch (e) {}
   const AVG_CORR_MIN = 0.85;                // shape correlation with the mean, QRS..T window
   const AVG_GAIN_MAX = 2.5;                 // amplitude more than this far off the median: artifact
@@ -855,7 +867,7 @@
       const seg = avgUse[k], off = avgOff[k], newest = k === n - 1;
       const age = (k + 1) / n;                       // 1 = newest
       ctx.globalAlpha = newest ? 1 : 0.05 + 0.5 * age * age * age;
-      ctx.lineWidth = (newest ? 2 : 1) * dpr;
+      ctx.lineWidth = newest ? 2 * dpr : 1;          // one device pixel: cheap to stroke
       ctx.beginPath();
       for (let i = seam; i < AVG_LEN; i++) {
         const y = u.valToPos(seg[i] + off, "y", true);
@@ -981,8 +993,13 @@
     }
     return { n, mean, sd };
   }
+  // runs 4x a second, but only does anything when a beat arrived or a setting changed
+  let avgSig = null;
   function drawAvg() {
     while (segs.length > avgN()) segs.shift();
+    const sig = [segs.length, avgSegRev, avgNorm, qrstOn, qrstHp, strapHpComp, FS, avgPeriod()].join("|");
+    if (sig === avgSig) return;
+    avgSig = sig;
     avgPrepare();
     setText("avg-count", segs.length + (avgRejected ? ` (${avgRejected} rejected)` : ""));
     $("avg-csv").disabled = !avgUse.length;
