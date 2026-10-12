@@ -527,7 +527,9 @@
   function laneOpts(L, width) {
     const axisBase = { stroke: COL.text, font: FONT, ticks: { show: false } };
     const axes = [
-      { ...axisBase, scale: "x", space: L.bottom ? 70 : 60, incrs: [0.2, 0.5, 1, 2, 5, 10, 15, 30],
+      // side given explicitly: uPlot only defaults axis 0 to the bottom, and the
+      // paper grid below takes that slot on the ECG lane
+      { ...axisBase, scale: "x", side: 2, space: L.bottom ? 70 : 60, incrs: [0.2, 0.5, 1, 2, 5, 10, 15, 30],
         grid: { stroke: COL.grid, width: 1 },
         values: L.bottom ? clockValues : (u, splits) => splits.map(() => ""),
         size: L.bottom ? 26 : 0 },
