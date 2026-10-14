@@ -236,7 +236,8 @@ static int32_t adc_read_vdd_mv(void)
  * (~VDD/2) sits near 2048; off-body it collapses toward 0. Used to gate startup.
  * Only valid before continuous (differential) sampling is running. */
 #define ONBODY_THR 500   /* half-supply counts above this = AFE powered = on-body */
-static int32_t adc_read_ain2(void)
+/* Kept for diagnostics / future use; the HW_DIFF path no longer gates on it. */
+static int32_t __maybe_unused adc_read_ain2(void)
 {
 	static const nrfx_saadc_channel_t ain2_channel = {
 		.channel_config = {
@@ -570,9 +571,19 @@ static void adv_work_fn(struct k_work *w)
 	LOG_INF("advertising %s", e ? "FAILED" : "started");
 }
 static K_WORK_DEFINE(adv_work, adv_work_fn);
-/* conn_count defined above (needed earlier by the link-info characteristic) */
+/* conn_count defined above (needed earlier by the link-info characteristic).
+ * idle_since (HW_DIFF): uptime (ms, low 32 bits) of the moment the strap last
+ * became idle (boot, or the last disconnect leaving no connection). The power
+ * loop sleeps PROBATION_MS after this; a live connection clears it. 32-bit so
+ * the read in the loop is atomic against the callback write. */
+static volatile uint32_t idle_since;
 static void connected(struct bt_conn *c, uint8_t err) { if (!err) { conn_count++; k_work_submit(&adv_work); } }  /* keep advertising for a 2nd host */
-static void disconnected(struct bt_conn *c, uint8_t r) { if (conn_count > 0) conn_count--; k_work_submit(&adv_work); }
+static void disconnected(struct bt_conn *c, uint8_t r)
+{
+	if (conn_count > 0) conn_count--;
+	if (conn_count == 0) idle_since = k_uptime_get_32();   /* start the 60 s advertise grace */
+	k_work_submit(&adv_work);
+}
 BT_CONN_CB_DEFINE(conn_cb) = { .connected = connected, .disconnected = disconnected };
 static void bt_ready(int e) { if (!e) k_work_submit(&adv_work); }
 
@@ -1012,11 +1023,98 @@ static bool onbody_held(int win_ms)
 }
 #endif
 
+/* Drain one filled ADC buffer: average OVERSAMPLE raw samples -> 500 Hz samples,
+ * run Levkov 50 Hz notch -> detector -> optional HP-compensation -> BLE stream.
+ * Filter/stream state is static (one ECG stream at a time); it simply re-settles
+ * (~7 s) when sampling resumes after a gap, which the app discards as warm-up. */
+static void process_adc_buffer(const nrf_saadc_value_t *buf)
+{
+	static uint8_t raw_buf[2 + RAW_BATCH * 2];
+	static uint16_t seq;
+	static int rn;
+#if HP_COMP
+	static float hp_y, hp_xp, hpf_y, hpf_xp;
+#endif
+	for (int i = 0; i < ADC_BUF_SMP; i += OVERSAMPLE) {
+		int32_t acc = 0;
+		for (int j = 0; j < OVERSAMPLE; j++) acc += buf[i + j];
+		int16_t raw = (int16_t)(acc / OVERSAMPLE);   /* 12-bit range preserved */
+#if HW_DIFF
+		raw = (int16_t)(-raw);   /* differential AFE output is inverted (R points down) */
+#endif
+		float lv = levkov(raw);
+		lv = CLAMP(lv + (lv >= 0 ? 0.5f : -0.5f), -32768.0f, 32767.0f);
+		int16_t ns = (int16_t)lv;
+
+		detector_feed(ns);   /* detector runs on the uncompensated signal */
+
+		sample_idx++;
+		if (led_off_idx && sample_idx >= led_off_idx) { led_off(); led_off_idx = 0; }
+
+#if HP_COMP
+		float hp_x = (float)ns;
+		float s1;
+		if (g_hp_flags & HP_FLAG_SHELF) {
+			hp_y = g_hp_a * hp_y + hp_x - g_hp_b * hp_xp;
+			s1 = hp_y;
+		} else {
+			s1 = hp_x;
+		}
+		hp_xp = hp_x;
+		float s2;
+		if (g_hp_flags & HP_FLAG_HPF) {
+			hpf_y = g_hpf_c * (hpf_y + s1 - hpf_xp);
+			s2 = hpf_y;
+		} else {
+			s2 = s1;
+		}
+		hpf_xp = s1;
+		int16_t out = (int16_t)CLAMP(s2 + (s2 >= 0 ? 0.5f : -0.5f), -32768.0f, 32767.0f);
+#else
+		int16_t out = ns;
+#endif
+		sys_put_le16((uint16_t)out, &raw_buf[2 + rn * 2]);
+		if (++rn >= RAW_BATCH) {
+			sys_put_le16(seq++, &raw_buf[0]);
+			if (cap_ccc) tx_enqueue(TX_ECG, raw_buf, sizeof(raw_buf));
+			rn = 0;
+		}
+	}
+}
+
+/* Start / stop hardware-timed continuous ECG sampling (advanced mode, 8 kHz
+ * internal timer -> DMA). Gated on an active BLE connection so the ADC + AFE
+ * DSP draw nothing while merely advertising. Re-configuring the channel each
+ * start is fine: the blocking VDD read already reconfigures the SAADC. */
+static volatile bool ecg_running;
+static void ecg_start(void)
+{
+	if (ecg_running) return;
+	nrfx_saadc_adv_config_t adv = NRFX_SAADC_DEFAULT_ADV_CONFIG;
+	adv.internal_timer_cc = ADC_TIMER_CC;   /* 16 MHz / 8 kHz = 2000 */
+	adv.start_on_end      = true;           /* HW re-arms DMA into the next buffer */
+	if (nrfx_saadc_channel_config(&ecg_channel) != 0 ||
+	    nrfx_saadc_advanced_mode_set(BIT(0), NRF_SAADC_RESOLUTION_12BIT, &adv,
+					 saadc_handler) != 0) {
+		LOG_ERR("saadc ECG start failed");
+		return;
+	}
+	nrfx_saadc_buffer_set(adc_bufs[0], ADC_BUF_SMP);
+	nrfx_saadc_offset_calibrate(saadc_handler);   /* -> CALIBRATEDONE -> trigger: sampling starts */
+	ecg_running = true;
+}
+static void ecg_stop(void)
+{
+	if (!ecg_running) return;
+	nrfx_saadc_abort();
+	ecg_running = false;
+	k_msleep(2);                  /* let the abort's final DONE settle before draining */
+	nrf_saadc_value_t *p;
+	while (k_msgq_get(&adc_doneq, &p, K_NO_WAIT) == 0) { }   /* drop stale buffers */
+}
+
 int main(void)
 {
-	uint8_t raw_buf[2 + RAW_BATCH * 2];
-	uint16_t seq = 0; int rn = 0;
-
 	LOG_INF("HRM raw-RR+ECG firmware boot");
 
 	nrf_gpio_cfg_output(LED_PIN);
@@ -1060,25 +1158,44 @@ int main(void)
 	bt_set_name(dev_name);   /* keep the GAP Device Name characteristic consistent with adv */
 	k_work_init_delayable(&tx_dwork, tx_work_fn);
 
-	/* ---- AFE-friendly startup: gate the ADC/DSP on on-body ----------------
-	 * Running the ADC + DSP while the AFE is still settling injects CPU/supply
-	 * noise into the front end (a feedback loop). So after wake we only advertise
-	 * and watch for on-body; continuous sampling starts only once the AFE is up.
-	 * Nobody wears it within PROBATION_MS -> back to sleep. */
-	int64_t wake = k_uptime_get();
+	/* ---- Power lifecycle: a BLE connection drives sleep/wake ---------------
+	 * The on-body check is OUT of the sleep/wake logic. On wake we advertise
+	 * immediately; the connection state decides everything from there. */
+	last_beat_ms   = k_uptime_get();
+	last_motion_ms = k_uptime_get();
 #if HW_DIFF
-	/* on-body = the AFE half-supply has appeared on AIN2 (P0.04). Poll it with
-	 * one-shot single-ended reads (differential ECG isn't running yet); blink the
-	 * LED ~2 Hz while waiting. */
-	while (adc_read_ain2() < ONBODY_THR) {
-		if (k_uptime_get() - wake > PROBATION_MS) enter_deep_sleep();
-		led_on(); k_msleep(100); led_off(); k_msleep(400);
+	/* HW_DIFF (accel-equipped): ECG samples only while a central is connected.
+	 *   wake -> advertise; nobody connects within PROBATION_MS -> sleep
+	 *   connected  -> stream, never sleep while connected
+	 *   disconnect -> keep advertising PROBATION_MS, then        -> sleep
+	 * A double-tap on the SC7A20 (INT1 -> P0.14) wakes from System OFF. */
+	idle_since = k_uptime_get_32();
+	for (;;) {
+		/* ADVERTISE: idle, waiting for a connection (~0.5 Hz LED blink). */
+		while (conn_count == 0) {
+			if ((uint32_t)(k_uptime_get_32() - idle_since) > PROBATION_MS)
+				enter_deep_sleep();   /* no connection in time -> System OFF */
+			led_on(); k_msleep(60); led_off(); k_msleep(1940);
+		}
+		/* STREAM: connected -> run the ADC and drain buffers until disconnect.
+		 * The 100 ms get timeout lets us notice a disconnect promptly. */
+		ecg_start();
+		while (conn_count > 0) {
+			nrf_saadc_value_t *buf;
+			if (k_msgq_get(&adc_doneq, &buf, K_MSEC(100)) == 0)
+				process_adc_buffer(buf);
+		}
+		ecg_stop();   /* disconnected() has armed the grace window via idle_since */
 	}
 #else
+	/* Standard board (no accel): on-body gates start-up and sleep, as before.
+	 * ---- AFE-friendly startup: wait for on-body before sampling (running the
+	 * ADC + DSP while the AFE settles injects CPU/supply noise into the front
+	 * end). Nobody wears it within PROBATION_MS -> back to sleep. */
+	int64_t wake = k_uptime_get();
 	bool running = false;
 	while (!running) {
-		/* phase 1: P0.12 on-body comes up (light ~200 ms debounce; off-body it sits
-		 * solidly low). The real confirmation is the post-assist persistence check. */
+		/* phase 1: P0.12 on-body comes up (light ~200 ms debounce). */
 		led_off();
 		int lp = 0;
 		const int ONBODY_DETECT = 50;   /* ~200 ms at the 4 ms poll */
@@ -1097,146 +1214,26 @@ int main(void)
 		running = onbody_held(500);   /* phase 3: did on-body persist? */
 		wake = k_uptime_get();        /* restart the probation window if it fell off */
 	}
-#endif
 
-	/* now start continuous ECG (advanced mode, internal 8 kHz timer -> DMA) */
-	nrfx_saadc_adv_config_t adv = NRFX_SAADC_DEFAULT_ADV_CONFIG;
-	adv.internal_timer_cc = ADC_TIMER_CC;   /* 16 MHz / 8 kHz = 2000 */
-	adv.start_on_end      = true;           /* HW re-arms DMA into the next buffer */
-	if (nrfx_saadc_channel_config(&ecg_channel) != 0 ||
-	    nrfx_saadc_advanced_mode_set(BIT(0), NRF_SAADC_RESOLUTION_12BIT, &adv,
-					 saadc_handler) != 0) {
-		LOG_ERR("saadc ECG mode failed");
-		return -1;
-	}
-	nrfx_saadc_buffer_set(adc_bufs[0], ADC_BUF_SMP);
-	nrfx_saadc_offset_calibrate(saadc_handler);   /* -> CALIBRATEDONE -> mode_trigger: sampling starts */
-
+	ecg_start();                      /* on-body confirmed -> start continuous ECG */
 	int64_t session_start = k_uptime_get();
-	last_beat_ms = session_start;
+	last_beat_ms   = session_start;
 	last_motion_ms = session_start;
-#if HW_DIFF
-	float   slow_mean = 0.0f;     /* slow DC baseline of the differential ECG (off-body sits ~-188) */
-	float   ob_env = 1000.0f;     /* peak-hold AC envelope of |ECG - slow_mean|; worn >=430, off-body ~20 */
-	int64_t ob_flat_since = 0;    /* when the AC envelope first fell below the off-body floor */
-#else
-	int  contact_lp = CONTACT_DEB;   /* we entered RUN on a held on-body contact */
-#endif
-#if HP_COMP
-	/* Shelving HP-compensation (y = a*y1 + x - b*x1) + a clean 0.5 Hz high-pass
-	 * on its output. The coefficients (g_hp_a/g_hp_b/g_hpf_c) and the enable
-	 * flags are live-tunable from the app via CAP_CFG; only the filter STATE is
-	 * local here. */
-	float hp_y = 0.0f, hp_xp = 0.0f;
-	float hpf_y = 0.0f, hpf_xp = 0.0f;
-#endif
-
-	/* Processing loop: the SAADC fills buffers via DMA in hardware; here we just
-	 * drain filled buffers, average OVERSAMPLE raw samples -> one 500 Hz sample,
-	 * and run the same pipeline as before (Levkov -> detector -> stream). Because
-	 * sampling is now hardware, BLE preemption only delays this drain -- it can
-	 * never lose a sample tick (the 10 ms buffer absorbs the stall). */
+	int contact_lp = CONTACT_DEB;     /* we entered RUN on a held on-body contact */
 	while (1) {
 		nrf_saadc_value_t *buf;
 		k_msgq_get(&adc_doneq, &buf, K_FOREVER);
+		process_adc_buffer(buf);
 
-		for (int i = 0; i < ADC_BUF_SMP; i += OVERSAMPLE) {
-			int32_t acc = 0;
-			for (int j = 0; j < OVERSAMPLE; j++) acc += buf[i + j];
-			int16_t raw = (int16_t)(acc / OVERSAMPLE);   /* 12-bit range preserved */
-#if HW_DIFF
-			/* The differential AFE output is inverted (R-wave points down). Flip
-			 * polarity at the source so the whole pipeline -- stream, detector,
-			 * envelope -- sees an upright ECG. Safe: the signed differential sits
-			 * near 0 (range ~+-2048), well clear of INT16_MIN. */
-			raw = (int16_t)(-raw);
-#endif
-
-			/* Levkov 50 Hz subtraction (deterministic, no ring); output is
-			 * delayed LV_M samples, both streamed and fed to the detector
-			 * (constant delay -> RR timing unaffected). */
-			float lv = levkov(raw);
-			lv = CLAMP(lv + (lv >= 0 ? 0.5f : -0.5f), -32768.0f, 32767.0f);
-			int16_t ns = (int16_t)lv;
-
-			detector_feed(ns);   /* detector runs on the uncompensated signal */
-
-			sample_idx++;
-			if (led_off_idx && sample_idx >= led_off_idx) { led_off(); led_off_idx = 0; }
-
-#if HP_COMP
-			/* Stage 1 -- shelving filter restores the lows the AFE high-pass
-			 * removed (detector/envelope above already saw the raw ns). Flags
-			 * and coefficients are live-tunable from the app via CAP_CFG. */
-			float hp_x = (float)ns;
-			float s1;
-			if (g_hp_flags & HP_FLAG_SHELF) {
-				hp_y = g_hp_a * hp_y + hp_x - g_hp_b * hp_xp;
-				s1 = hp_y;
-			} else {
-				s1 = hp_x;   /* comp disabled from the app: stream raw ns */
-			}
-			hp_xp = hp_x;
-			/* Stage 2 -- 0.5 Hz high-pass: strip the DC pedestal + baseline
-			 * wander, re-centre on 0 (P/T sit well above 0.5 Hz). */
-			float s2;
-			if (g_hp_flags & HP_FLAG_HPF) {
-				hpf_y = g_hpf_c * (hpf_y + s1 - hpf_xp);
-				s2 = hpf_y;
-			} else {
-				s2 = s1;
-			}
-			hpf_xp = s1;
-			int16_t out = (int16_t)CLAMP(s2 + (s2 >= 0 ? 0.5f : -0.5f),
-						     -32768.0f, 32767.0f);
-#else
-			int16_t out = ns;
-#endif
-
-			/* raw ECG streaming (only when a client subscribes) */
-			sys_put_le16((uint16_t)out, &raw_buf[2 + rn * 2]);
-			if (++rn >= RAW_BATCH) {
-				sys_put_le16(seq++, &raw_buf[0]);
-				if (cap_ccc) {
-					tx_enqueue(TX_ECG, raw_buf, sizeof(raw_buf));
-				}
-				rn = 0;
-			}
-
-			/* ---- power state machine (running = already on-body) ----
-			 * Sleep when the 3 h session cap elapses, OR the belt is off-body with
-			 * no motion for 1 min. Motion INT on P0.14 wakes from System OFF. */
-			int64_t now = k_uptime_get();
-#if HW_DIFF
-			/* No contact pin here (it's the LED). On-body is read from the signal.
-			 * The AFE stays powered off-body, so the differential does NOT collapse
-			 * to zero -- it sits on a flat DC offset (~-188). So track AC activity,
-			 * not |ECG|: a slow mean removes the DC baseline, and the envelope of
-			 * |ECG - mean| is large when worn (QRS) and ~noise floor (6) off-body. */
-			slow_mean += ((float)ns - slow_mean) * (1.0f / 1024);
-			float ac = (float)ns - slow_mean;
-			if (ac < 0.0f) ac = -ac;
-			/* peak-hold: jump up to each QRS peak, then decay slowly (~2 s). The
-			 * envelope stays high between beats when worn (>=430) and only decays
-			 * to the flat-baseline floor (~20) a few seconds after removal. A plain
-			 * EMA was too fast -- it dipped below the floor between beats. */
-			if (ac > ob_env) ob_env = ac;
-			else              ob_env -= ob_env * (1.0f / 1024);
-			dbg_obenv = (int32_t)ob_env;
-			bool contact = ob_env > OB_FLOOR;
-			if (contact) ob_flat_since = 0;
-			else if (ob_flat_since == 0) ob_flat_since = now;
-			bool offbody = !contact && ob_flat_since && (now - ob_flat_since > OFFBODY_MS);
-			bool go_sleep = (now - session_start > MAX_ACTIVE_MS) ||
-					(offbody && (now - last_motion_ms > OFFBODY_MS));
-#else
-			if (nrf_gpio_pin_read(CONTACT_PIN)) { if (contact_lp < CONTACT_DEB) contact_lp++; }
-			else                                { if (contact_lp > 0) contact_lp--; }
-			bool contact = contact_lp > (CONTACT_DEB / 2);
-			bool go_sleep = (now - session_start > MAX_ACTIVE_MS) ||        /* 3 h cap */
-					(!contact && (now - last_motion_ms > OFFBODY_MS)); /* off-body + still */
-#endif
-			if (go_sleep) enter_deep_sleep();   /* drops connections, System OFF; does not return */
-		}
+		/* Power state machine: sleep on the 3 h cap, or off-body + no motion
+		 * for 1 min. Motion INT on P0.14 wakes from System OFF. */
+		int64_t now = k_uptime_get();
+		if (nrf_gpio_pin_read(CONTACT_PIN)) { if (contact_lp < CONTACT_DEB) contact_lp++; }
+		else                                { if (contact_lp > 0) contact_lp--; }
+		bool contact = contact_lp > (CONTACT_DEB / 2);
+		bool go_sleep = (now - session_start > MAX_ACTIVE_MS) ||        /* 3 h cap */
+				(!contact && (now - last_motion_ms > OFFBODY_MS)); /* off-body + still */
+		if (go_sleep) enter_deep_sleep();   /* drops connections, System OFF; does not return */
 	}
+#endif
 }
