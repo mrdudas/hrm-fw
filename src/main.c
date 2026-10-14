@@ -32,6 +32,7 @@
 #include <zephyr/bluetooth/services/bas.h>
 #include <hal/nrf_gpio.h>
 #include <string.h>
+#include <math.h>
 
 LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 
@@ -101,6 +102,32 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 #endif
 #define HP_COMP_FC_X10 50     /* fc = 5.0 Hz (0.1 Hz units; reported in GATT info) */
 #define HP_COMP_F0_X10 5      /* f0 = 0.5 Hz safety corner */
+#define HP_HPF_X10     5      /* second-stage high-pass corner = 0.5 Hz (DC/baseline) */
+
+#if HP_COMP
+/* Runtime-tunable HP-compensation parameters, set from the app via CAP_CFG
+ * (a1b20005). Corners are in 0.1 Hz units. The coefficients are recomputed
+ * once per config write (expf is fine off the hot path); the sampling loop
+ * reads the volatile coefficients live. A 32-bit aligned float store is a
+ * single word write on Cortex-M, so a mid-update read just costs one stale
+ * sample -- harmless for an IIR corner. */
+#define HP_FLAG_SHELF  0x01   /* shelving HP-compensation enabled */
+#define HP_FLAG_HPF    0x02   /* second-stage 0.5 Hz high-pass enabled */
+static volatile uint8_t  g_hp_flags  = HP_FLAG_SHELF | HP_FLAG_HPF;
+static volatile uint16_t g_hp_fc_x10 = HP_COMP_FC_X10;
+static volatile uint16_t g_hp_f0_x10 = HP_COMP_F0_X10;
+static volatile uint16_t g_hpf_x10   = HP_HPF_X10;
+static volatile float    g_hp_a = 0.993737f;   /* exp(-2*pi*0.5/500) shelf pole  */
+static volatile float    g_hp_b = 0.939101f;   /* exp(-2*pi*5.0/500) shelf zero  */
+static volatile float    g_hpf_c = 0.993737f;  /* exp(-2*pi*0.5/500) HPF corner  */
+static void hp_recompute(void)
+{
+	const float k = -2.0f * 3.14159265f / (float)SAMPLE_HZ;
+	g_hp_b  = expf(k * ((float)g_hp_fc_x10 * 0.1f));
+	g_hp_a  = expf(k * ((float)g_hp_f0_x10 * 0.1f));
+	g_hpf_c = expf(k * ((float)g_hpf_x10   * 0.1f));
+}
+#endif
 
 /* 8-22 Hz band-pass (Butterworth order 2 -> 4th order section) @500 Hz */
 static const float BP_b[] = {0.00686787f, 0.0f, -0.01373573f, 0.0f, 0.00686787f};
@@ -306,10 +333,14 @@ static void hrm_notify(uint8_t hr, uint16_t rr_1024)
 #define CAP_CHR  BT_UUID_128_ENCODE(0xa1b20002,0x0000,0x1000,0x8000,0x00805f9b34fb)
 #define CAP_INFO BT_UUID_128_ENCODE(0xa1b20003,0x0000,0x1000,0x8000,0x00805f9b34fb)
 #define CAP_LINK BT_UUID_128_ENCODE(0xa1b20004,0x0000,0x1000,0x8000,0x00805f9b34fb)
+#define CAP_CFG  BT_UUID_128_ENCODE(0xa1b20005,0x0000,0x1000,0x8000,0x00805f9b34fb)
 static struct bt_uuid_128 cap_svc_uuid  = BT_UUID_INIT_128(CAP_SVC);
 static struct bt_uuid_128 cap_chr_uuid  = BT_UUID_INIT_128(CAP_CHR);
 static struct bt_uuid_128 cap_info_uuid = BT_UUID_INIT_128(CAP_INFO);
 static struct bt_uuid_128 cap_link_uuid = BT_UUID_INIT_128(CAP_LINK);
+#if HP_COMP
+static struct bt_uuid_128 cap_cfg_uuid  = BT_UUID_INIT_128(CAP_CFG);
+#endif
 static uint8_t cap_ccc;
 static void cap_ccc_changed(const struct bt_gatt_attr *a, uint16_t v) { cap_ccc = (v == BT_GATT_CCC_NOTIFY); }
 
@@ -329,8 +360,12 @@ static ssize_t read_cap_info(struct bt_conn *c, const struct bt_gatt_attr *a,
 	sys_put_le16(SAMPLE_HZ / 25, &info[6]);
 	info[8] = 0x01;   /* mains-filtered (Levkov) @ 50 Hz */
 #if HP_COMP
-	info[8] |= 0x04;                 /* stream is HP-compensated in firmware */
-	info[9] = HP_COMP_FC_X10;        /* comp corner, 0.1 Hz units (50 = 5.0 Hz) */
+	if (g_hp_flags & HP_FLAG_SHELF) {
+		info[8] |= 0x04;             /* stream is HP-compensated in firmware */
+		info[9] = (uint8_t)g_hp_fc_x10;  /* LIVE comp corner, 0.1 Hz units (tunable via CAP_CFG) */
+	} else {
+		info[9] = 0;                 /* comp currently disabled from the app */
+	}
 #else
 	info[9] = 0;                     /* no firmware HP comp */
 #endif
@@ -358,6 +393,48 @@ static ssize_t read_cap_link(struct bt_conn *c, const struct bt_gatt_attr *a,
 	return bt_gatt_attr_read(c, a, buf, len, off, out, sizeof(out));
 }
 
+#if HP_COMP
+/* HP-compensation config (a1b20005), read + write. 7 bytes LE:
+ *   [0]   flags: bit0 shelf HP-comp on, bit1 0.5 Hz HPF on
+ *   [1:3] fc_x10  shelf corner, 0.1 Hz units (50 = 5.0 Hz) -- lower = less boost
+ *   [3:5] f0_x10  shelf pole / safety corner, 0.1 Hz units (<= fc)
+ *   [5:7] hpf_x10 second-stage high-pass corner, 0.1 Hz units
+ * Write recomputes the IIR coefficients; read returns the live values so the
+ * app can show the current setting. No reflash needed to retune. */
+static ssize_t read_cap_cfg(struct bt_conn *c, const struct bt_gatt_attr *a,
+			    void *buf, uint16_t len, uint16_t off)
+{
+	uint8_t cfg[7];
+	cfg[0] = g_hp_flags;
+	sys_put_le16(g_hp_fc_x10, &cfg[1]);
+	sys_put_le16(g_hp_f0_x10, &cfg[3]);
+	sys_put_le16(g_hpf_x10,   &cfg[5]);
+	return bt_gatt_attr_read(c, a, buf, len, off, cfg, sizeof(cfg));
+}
+static ssize_t write_cap_cfg(struct bt_conn *c, const struct bt_gatt_attr *a,
+			     const void *buf, uint16_t len, uint16_t off, uint8_t flags)
+{
+	const uint8_t *p = buf;
+	if (off != 0)  return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	if (len < 7)   return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	uint16_t fc = sys_get_le16(&p[1]);
+	uint16_t f0 = sys_get_le16(&p[3]);
+	uint16_t hf = sys_get_le16(&p[5]);
+	/* clamp to sane corners (0.1 Hz units, fs = 500 Hz, keep well below Nyquist) */
+	if (fc < 1)    fc = 1;
+	if (fc > 2000) fc = 2000;        /* <= 200 Hz */
+	if (f0 < 1)    f0 = 1;
+	if (f0 > fc)   f0 = fc;          /* pole at/below the zero (no negative boost) */
+	if (hf > 2000) hf = 2000;        /* hf may be set with the bit cleared to bypass */
+	g_hp_flags  = p[0] & (HP_FLAG_SHELF | HP_FLAG_HPF);
+	g_hp_fc_x10 = fc;
+	g_hp_f0_x10 = f0;
+	g_hpf_x10   = hf;
+	hp_recompute();
+	return len;
+}
+#endif
+
 BT_GATT_SERVICE_DEFINE(cap_svc,
 	BT_GATT_PRIMARY_SERVICE(&cap_svc_uuid),
 	BT_GATT_CHARACTERISTIC(&cap_chr_uuid.uuid, BT_GATT_CHRC_NOTIFY,
@@ -367,6 +444,11 @@ BT_GATT_SERVICE_DEFINE(cap_svc,
 			       BT_GATT_PERM_READ, read_cap_info, NULL, NULL),
 	BT_GATT_CHARACTERISTIC(&cap_link_uuid.uuid, BT_GATT_CHRC_READ,
 			       BT_GATT_PERM_READ, read_cap_link, NULL, NULL),
+#if HP_COMP
+	BT_GATT_CHARACTERISTIC(&cap_cfg_uuid.uuid, BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+			       read_cap_cfg, write_cap_cfg, NULL),
+#endif
 );
 
 /* ---- Accelerometer data service: raw X/Y/Z (int16) + step count (u16) ---- */
@@ -989,17 +1071,11 @@ int main(void)
 	int  contact_lp = CONTACT_DEB;   /* we entered RUN on a held on-body contact */
 #endif
 #if HP_COMP
-	/* First-order shelving HP-compensation: y = a*y1 + x - b*x1.
-	 * b = exp(-2*pi*fc/fs), a = exp(-2*pi*f0/fs); fc=5 Hz, f0=0.5 Hz, fs=500 Hz.
-	 * DC gain (1-b)/(1-a) ~= 9.7. If HP_COMP_FC_X10/F0_X10 change, recompute these. */
-	const float hp_b = 0.939101f;   /* exp(-2*pi*5/500)   */
-	const float hp_a = 0.993737f;   /* exp(-2*pi*0.5/500) */
+	/* Shelving HP-compensation (y = a*y1 + x - b*x1) + a clean 0.5 Hz high-pass
+	 * on its output. The coefficients (g_hp_a/g_hp_b/g_hpf_c) and the enable
+	 * flags are live-tunable from the app via CAP_CFG; only the filter STATE is
+	 * local here. */
 	float hp_y = 0.0f, hp_xp = 0.0f;
-	/* Second stage: clean first-order 0.5 Hz high-pass on the shelf output.
-	 * y = c*(y1 + x - x1), c = exp(-2*pi*0.5/500). The shelf leaves a ~9.7x DC
-	 * pedestal and passes baseline wander; this removes both and re-centres the
-	 * stream on 0, without touching P/T (those sit well above 0.5 Hz). */
-	const float hpf_c = 0.993737f;  /* exp(-2*pi*0.5/500) */
 	float hpf_y = 0.0f, hpf_xp = 0.0f;
 #endif
 
@@ -1037,17 +1113,29 @@ int main(void)
 			if (led_off_idx && sample_idx >= led_off_idx) { led_off(); led_off_idx = 0; }
 
 #if HP_COMP
-			/* shelving filter restores the lows the AFE high-pass removed; the
-			 * stream carries the compensated value (the detector/envelope above
-			 * already saw the raw ns). */
+			/* Stage 1 -- shelving filter restores the lows the AFE high-pass
+			 * removed (detector/envelope above already saw the raw ns). Flags
+			 * and coefficients are live-tunable from the app via CAP_CFG. */
 			float hp_x = (float)ns;
-			hp_y = hp_a * hp_y + hp_x - hp_b * hp_xp;
+			float s1;
+			if (g_hp_flags & HP_FLAG_SHELF) {
+				hp_y = g_hp_a * hp_y + hp_x - g_hp_b * hp_xp;
+				s1 = hp_y;
+			} else {
+				s1 = hp_x;   /* comp disabled from the app: stream raw ns */
+			}
 			hp_xp = hp_x;
-			/* 0.5 Hz high-pass on the shelf output: strip the DC pedestal
-			 * and baseline wander, re-centre on 0. */
-			hpf_y = hpf_c * (hpf_y + hp_y - hpf_xp);
-			hpf_xp = hp_y;
-			int16_t out = (int16_t)CLAMP(hpf_y + (hpf_y >= 0 ? 0.5f : -0.5f),
+			/* Stage 2 -- 0.5 Hz high-pass: strip the DC pedestal + baseline
+			 * wander, re-centre on 0 (P/T sit well above 0.5 Hz). */
+			float s2;
+			if (g_hp_flags & HP_FLAG_HPF) {
+				hpf_y = g_hpf_c * (hpf_y + s1 - hpf_xp);
+				s2 = hpf_y;
+			} else {
+				s2 = s1;
+			}
+			hpf_xp = s1;
+			int16_t out = (int16_t)CLAMP(s2 + (s2 >= 0 ? 0.5f : -0.5f),
 						     -32768.0f, 32767.0f);
 #else
 			int16_t out = ns;
