@@ -853,10 +853,13 @@ static bool acc_detect(void)
  * does. Timings are in 1/ODR units (ODR 100 Hz -> 1 unit = 10 ms); threshold is
  * in 16 mg LSB at +/-2g. Tune here if knocks are missed (lower THS) or jostling
  * still wakes it (raise THS / shrink TWIN). */
-#define TAP_THS_CNT  0x18   /* ~0.375 g: catch a finger knock (double-tap pairing rejects jostling) */
-#define TAP_TLIM     0x0A   /* 100 ms: max over-threshold time for one tap      */
-#define TAP_TLAT     0x05   /* 50 ms: dead time after the first tap             */
-#define TAP_TWIN     0x28   /* 400 ms: window to receive the second tap         */
+/* Timings are in 1/ODR units. ODR is 400 Hz (CTRL1 0x77) -> 1 unit = 2.5 ms:
+ * the 100 Hz / 10 ms resolution was too coarse for reliable double-click pairing. */
+#define TAP_THS_CNT  0x18   /* ~0.375 g: catch a finger knock                            */
+#define TAP_TLIM     0x0A   /* ~25 ms: max over-threshold time per tap -- SHARP only, so */
+                            /*         a sustained shake (longer over-threshold) is rejected */
+#define TAP_TLAT     0x10   /* ~40 ms: dead time after the first tap (skip its ring)     */
+#define TAP_TWIN     0xB4   /* ~450 ms: window to receive the second tap                 */
 
 /* Fallback: the original any-axis motion INT (~290 mg, no min duration). Used
  * only if the CLICK engine is absent on this accel (see accel_init_tap_wake). */
@@ -890,7 +893,7 @@ static bool tap_wake_active;
 static void accel_init_tap_wake(void)
 {
 	a_scl_hi(); a_sda_hi(); k_msleep(5);
-	acc_wr(0x20, 0x57);   /* CTRL1: 100Hz, XYZ on */
+	acc_wr(0x20, 0x77);   /* CTRL1: 400Hz, XYZ on (fine timing for double-click) */
 	acc_wr(0x23, 0x08);   /* CTRL4: HR, +/-2g */
 
 	acc_wr(0x3A, TAP_THS_CNT);         /* CLICK_THS: threshold (no LIR; clone ignores bit7) */
