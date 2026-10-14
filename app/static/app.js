@@ -790,6 +790,30 @@
     }
     if (avgPlot) drawAvg();
   }
+  // the strap's own front-end HP compensation settings (a1b20005, newer firmware),
+  // retuned live from here; null = not connected / firmware without them
+  let hpCfg = null;
+  const hpCfgKey = (c) => c && [c.shelf, c.fc_hz, c.f0_hz, c.hpf, c.hpf_hz].join("|");
+  function onHpCfg(msg) {
+    const prev = hpCfg, box = $("strap-hp");
+    hpCfg = msg.available ? msg : null;
+    box.hidden = !hpCfg;
+    box.classList.remove("busy");
+    if (!hpCfg) return;
+    $("strap-hp-on").checked = hpCfg.shelf;
+    $("strap-hp-fc").value = hpCfg.fc_hz;
+    $("strap-hp-fc").disabled = !hpCfg.shelf;
+    setText("strap-hp-val", hpCfg.shelf ? hpCfg.fc_hz.toFixed(1) + " Hz" : "off");
+    // beats filtered one way and the other do not belong in one mean
+    if (prev && hpCfgKey(prev) !== hpCfgKey(hpCfg)) clearAvg();
+  }
+  function sendHpCfg() {
+    if (!hpCfg) return;
+    const fc = +$("strap-hp-fc").value;
+    const ok = send({ cmd: "hp_cfg", shelf: $("strap-hp-on").checked, fc_hz: fc,
+                      f0_hz: Math.min(hpCfg.f0_hz, fc), hpf: hpCfg.hpf, hpf_hz: hpCfg.hpf_hz });
+    if (ok) $("strap-hp").classList.add("busy");     // until the strap's read-back arrives
+  }
   try {
     qrstOn = localStorage.getItem("hrm.qrst") !== "0";
     qrstHp = Math.max(0, parseFloat(localStorage.getItem("hrm.qrstHp")) || 0);
@@ -1689,6 +1713,9 @@
     });
     $("take-raw").addEventListener("click", () => send({ cmd: "take_raw" }));
     $("avg-clear").addEventListener("click", clearAvg);
+    $("strap-hp-fc").addEventListener("input", (e) => setText("strap-hp-val", (+e.target.value).toFixed(1) + " Hz"));
+    $("strap-hp-fc").addEventListener("change", sendHpCfg);
+    $("strap-hp-on").addEventListener("change", sendHpCfg);
     $("avg-csv").addEventListener("click", downloadAvg);
     const ns = $("notch-sel");
     ns.value = String(notch.f0 || 0);
@@ -1713,6 +1740,7 @@
       case "link": onLink(msg); break;
       case "raw": $("raw-note").hidden = msg.state !== "other"; break;
       case "ecg_info": onEcgInfo(msg); break;
+      case "hp_cfg": onHpCfg(msg); break;
     }
   }
 

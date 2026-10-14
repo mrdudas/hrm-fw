@@ -55,6 +55,24 @@ def parse_ecg_info(b: bytes) -> dict:
     return d
 
 
+def parse_hp_cfg(b: bytes) -> dict:
+    """Front-end high-pass compensation in the strap, char a1b20005 (read +
+    write), little-endian: u8 flags (bit0 shelving compensation on, bit1 the
+    second-stage high-pass on), u16 fc, u16 f0, u16 hpf -- corners in 0.1 Hz
+    units: fc the compensated front-end corner (lower = less boost), f0 the
+    shelf pole (<= fc), hpf the high-pass that re-centres the stream."""
+    flags, fc, f0, hpf = struct.unpack_from("<BHHH", bytes(b), 0)
+    return {"shelf": bool(flags & 1), "hpf": bool(flags & 2),
+            "fc_hz": fc / 10, "f0_hz": f0 / 10, "hpf_hz": hpf / 10}
+
+
+def build_hp_cfg(d: dict) -> bytes:
+    """Inverse of parse_hp_cfg (the strap clamps the corners to its own limits)."""
+    x10 = lambda v: max(0, min(65535, round(float(v) * 10)))
+    return struct.pack("<BHHH", (1 if d.get("shelf") else 0) | (2 if d.get("hpf") else 0),
+                       x10(d["fc_hz"]), x10(d["f0_hz"]), x10(d["hpf_hz"]))
+
+
 def parse_link(b: bytes) -> dict:
     """Link diagnostics, char a1b20004 (read), little-endian: u16 connection
     interval (1.25 ms units), u16 peripheral latency, u16 supervision timeout

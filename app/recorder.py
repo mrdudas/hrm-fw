@@ -50,6 +50,12 @@ class CSVRecorder:
         self._meta.setdefault("link", []).append(link)
         self._write_meta()
 
+    def add_hp_cfg(self, cfg):
+        """Append the strap's HP-compensation settings (a1b20005) whenever they are
+        read or changed, with the time, so a recording tells which part had which."""
+        self._meta.setdefault("hp_cfg", []).append({**cfg, "t": time.time()})
+        self._write_meta()
+
     def _write_meta(self):
         try:
             with open(os.path.join(self.outdir, f"meta_{self.session}.json"), "w") as f:
