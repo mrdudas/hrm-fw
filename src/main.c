@@ -801,9 +801,10 @@ static void detector_feed(int16_t sample)
 }
 
 /* ---- SC7A20 accelerometer: motion-wake (I2C bit-bang, SCL=P0.16, SDA=P0.18,
- * addr 0x19). Its INT1 pin is wired to nRF P0.14 (active-high). We arm a motion
- * (any-axis high-g) latched interrupt, then sleep in System OFF and wake via the
- * P0.14 GPIO SENSE -> true ~µA deep sleep, movement wakes it. */
+ * addr 0x19). Its INT1 pin is wired to nRF P0.14 (active-high). We arm a
+ * double-tap (two-knock) interrupt, then sleep in System OFF and wake via the
+ * P0.14 GPIO SENSE -> true ~µA deep sleep, a deliberate double-knock wakes it
+ * (bag/pocket jostling does not). */
 #define ACC_SCL 16
 #define ACC_SDA 18
 #define ACC_ADDR 0x19
@@ -835,19 +836,65 @@ static bool acc_detect(void)
 	return ack != 0;
 }
 
-static void accel_init_motion_int(void)
+/* Double-tap ("knock-knock") wake tuning. The SC7A20 CLICK engine looks for TWO
+ * taps inside a time window, so random bag/pocket jostling (continuous, never a
+ * clean two-tap pattern) will NOT wake the strap; only a deliberate double-knock
+ * does. Timings are in 1/ODR units (ODR 100 Hz -> 1 unit = 10 ms); threshold is
+ * in 16 mg LSB at +/-2g. Tune here if knocks are missed (lower THS) or jostling
+ * still wakes it (raise THS / shrink TWIN). */
+#define TAP_THS_CNT  0x40   /* ~1.0 g: a deliberate knock, not a nudge          */
+#define TAP_TLIM     0x0A   /* 100 ms: max over-threshold time for one tap      */
+#define TAP_TLAT     0x05   /* 50 ms: dead time after the first tap             */
+#define TAP_TWIN     0x28   /* 400 ms: window to receive the second tap         */
+
+/* Fallback: the original any-axis motion INT (~290 mg, no min duration). Used
+ * only if the CLICK engine is absent on this accel (see accel_init_tap_wake). */
+static void accel_arm_motion_int(void)
 {
-	a_scl_hi(); a_sda_hi(); k_msleep(5);
-	acc_wr(0x20, 0x57);   /* CTRL1: 100Hz, XYZ on */
-	acc_wr(0x21, 0x01);   /* CTRL2: HPIS1 = high-pass filter on INT1 (removes gravity!) */
-	acc_wr(0x23, 0x08);   /* CTRL4: HR, +/-2g */
+	acc_wr(0x21, 0x01);   /* CTRL2: HPIS1 = high-pass filter on INT1 (removes gravity) */
 	acc_wr(0x22, 0x40);   /* CTRL3: I1_IA1 -> INT1 pin */
 	acc_wr(0x24, 0x08);   /* CTRL5: latch INT1 */
 	acc_wr(0x32, 0x12);   /* INT1_THS: motion threshold (~290 mg dynamic) */
 	acc_wr(0x33, 0x00);   /* INT1_DURATION = 0 */
 	(void)acc_rd(0x26);   /* dummy read REFERENCE: reset the HP filter */
-	acc_wr(0x30, 0x2A);   /* INT1_CFG: OR of XH|YH|ZH (any-axis MOTION now) */
+	acc_wr(0x30, 0x2A);   /* INT1_CFG: OR of XH|YH|ZH (any-axis MOTION) */
 	(void)acc_rd(0x31);   /* clear latch */
+}
+
+/* True once arming confirmed the CLICK engine is present; drives which SRC
+ * register enter_deep_sleep() clears before re-arming the GPIO SENSE wake. */
+static bool tap_wake_active;
+
+/* Arm the SC7A20 for DOUBLE-TAP wake: a two-knock pattern pulses INT1 (P0.14),
+ * which the nRF GPIO SENSE turns into a System-OFF wake. The config persists
+ * while the accel stays powered, and is re-armed on every boot.
+ *
+ * The SC7A20 is a LIS2DH clone; not every clone implements the CLICK engine. We
+ * confirm it by reading CLICK_THS back: if it does not hold the written value,
+ * the engine is absent and we fall back to the any-motion INT so the strap stays
+ * wakeable (any motion) instead of becoming un-wakeable from sleep. */
+static void accel_init_tap_wake(void)
+{
+	a_scl_hi(); a_sda_hi(); k_msleep(5);
+	acc_wr(0x20, 0x57);   /* CTRL1: 100Hz, XYZ on */
+	acc_wr(0x23, 0x08);   /* CTRL4: HR, +/-2g */
+
+	acc_wr(0x3A, 0x80 | TAP_THS_CNT);  /* CLICK_THS: LIR_Click + threshold */
+	if (acc_rd(0x3A) != (0x80 | TAP_THS_CNT)) {   /* CLICK engine not present */
+		tap_wake_active = false;
+		accel_arm_motion_int();
+		return;
+	}
+	acc_wr(0x21, 0x04);   /* CTRL2: HPCLICK = high-pass the click path (removes gravity) */
+	acc_wr(0x22, 0x80);   /* CTRL3: I1_CLICK -> INT1 pin */
+	acc_wr(0x24, 0x00);   /* CTRL5: no INT1 latch (click latches via CLICK_THS bit7) */
+	acc_wr(0x3B, TAP_TLIM);            /* TIME_LIMIT   */
+	acc_wr(0x3C, TAP_TLAT);            /* TIME_LATENCY */
+	acc_wr(0x3D, TAP_TWIN);            /* TIME_WINDOW  */
+	(void)acc_rd(0x26);   /* dummy read REFERENCE: reset the HP filter */
+	acc_wr(0x38, 0x2A);   /* CLICK_CFG: double-click on X|Y|Z (ZD|YD|XD) */
+	(void)acc_rd(0x39);   /* clear CLICK_SRC latch */
+	tap_wake_active = true;
 }
 
 static void enter_deep_sleep(void)
@@ -855,8 +902,10 @@ static void enter_deep_sleep(void)
 	bt_le_adv_stop();
 	led_off();
 	if (accel_present) {
-		/* motion wake: the SC7A20 INT1 on P0.14 goes high on movement. */
-		(void)acc_rd(0x31);   /* clear pending motion INT so P0.14 is low */
+		/* double-tap wake: the SC7A20 INT1 on P0.14 goes high on a double-knock.
+		 * (If the CLICK engine was absent we fell back to the motion INT: clear
+		 * its INT1_SRC instead.) */
+		(void)acc_rd(tap_wake_active ? 0x39 : 0x31);   /* clear pending SRC so P0.14 is low */
 		nrf_gpio_cfg_sense_input(ACC_INT_PIN, NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_SENSE_HIGH);
 	} else {
 		/* no accel -> no motion-INT wake source. Pull the floating accel-INT pin low
@@ -978,7 +1027,7 @@ int main(void)
 	for (int i = 0; i < 2; i++) { led_on(); k_msleep(60); led_off(); k_msleep(120); } /* wake blink */
 
 	accel_present = acc_detect();
-	if (accel_present) accel_init_motion_int();   /* arm SC7A20 motion INT -> P0.14 wake */
+	if (accel_present) accel_init_tap_wake();   /* arm SC7A20 double-tap INT -> P0.14 wake */
 	accel_ready = true;        /* release the accel thread (it exits if no accel) */
 
 	/* Keep HFXO (16 MHz crystal) running so the SAADC internal sample timer is
