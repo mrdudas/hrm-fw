@@ -21,6 +21,7 @@ class DemoSource:
         self.log = log
         self.enabled = True           # UI Disconnect pauses the synthetic stream
         self._stop = asyncio.Event()
+        self.hp_cfg = {"shelf": True, "hpf": True, "fc_hz": 5.0, "f0_hz": 0.5, "hpf_hz": 0.5}
 
     def stop(self):
         self._stop.set()
@@ -42,6 +43,13 @@ class DemoSource:
                 self.hub.publish_status("demo", detail="synthetic stream", enabled=True,
                                         target=self._target())
             asyncio.get_event_loop().call_later(0.8, up)
+        elif cmd == "hp_cfg":              # clamped like the firmware does
+            fc = min(200.0, max(0.1, float(msg.get("fc_hz", 5))))
+            self.hp_cfg = {"shelf": bool(msg.get("shelf")), "hpf": bool(msg.get("hpf")), "fc_hz": fc,
+                           "f0_hz": min(fc, max(0.1, float(msg.get("f0_hz", 0.5)))),
+                           "hpf_hz": min(200.0, max(0.0, float(msg.get("hpf_hz", 0.5))))}
+            self.log(f"UI: HP comp -> {self.hp_cfg}")
+            self.hub.publish_hp_cfg(self.hp_cfg)
         elif cmd == "scan":
             self.hub.publish_devices([
                 {"address": "D7:CD:02:7A:05:33", "name": "Govinda", "rssi": -48, "strap": True},
@@ -60,6 +68,7 @@ class DemoSource:
         self.hub.set_ecg_fs(self.fs, {"sample_hz": self.fs, "raw_batch": self.batch,
                                       "sample_bytes": 2, "fmt_ver": 1,
                                       "notched_hz": self.notched_hz})
+        self.hub.publish_hp_cfg(self.hp_cfg)     # settings only; the synthetic ECG ignores them
         self.command({"cmd": "scan"})
         loop = asyncio.get_event_loop()
         await asyncio.gather(

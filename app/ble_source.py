@@ -20,7 +20,7 @@ import time
 
 from config import (DEVICE_NAME, LEGACY_NAMES, KNOWN_ADDRESS, HR_UUID, ECG_UUID, ACCEL_UUID,
                     ECTOPY_UUID, BATTERY_UUID, ECG_INFO_UUID, ECG_FS,
-                    LINK_UUID)
+                    LINK_UUID, HP_CFG_UUID)
 import parsers
 
 SCAN_S = 8          # length of one scan
@@ -86,6 +86,7 @@ class BLESource:
         self._ecg_last = 0.0             # monotonic time of the last ECG packet
         self._vdd = None                 # [min, max] mV over all reads since the last log
         self._closing = None             # a cancelled session whose link is still closing
+        self._hp_cfg_req = None          # HP-compensation settings to write (from the UI)
 
     def stop(self):
         self._stop.set()
@@ -119,6 +120,13 @@ class BLESource:
             self._take_raw = True
             self._raw_kick.set()
             self.log("UI: take over raw ECG")
+            return
+        elif cmd == "hp_cfg":            # retune the strap's front-end HP compensation
+            try:
+                self._hp_cfg_req = {"shelf": bool(msg.get("shelf")), "hpf": bool(msg.get("hpf")),
+                                    **{k: float(msg[k]) for k in ("fc_hz", "f0_hz", "hpf_hz")}}
+            except (KeyError, TypeError, ValueError):
+                self.log(f"UI: bad hp_cfg {msg}")
             return
         else:
             return
@@ -283,6 +291,8 @@ class BLESource:
                                disconnected_callback=on_disconnect) as c:
             self.log("connected; subscribing to streams ...")
             await self._read_ecg_info(c)       # before subscribing: rate needed for the first packet
+            self._hp_cfg_req = None            # a change asked for before this link: not for this strap
+            await self._read_hp_cfg(c, log=True)
             await self._subscribe_all(c)       # everything except raw ECG
             self._ecg_sub = False
             await self._raw_decide(c, await self._read_link(c))
@@ -301,6 +311,10 @@ class BLESource:
                     if self._ecg_sub and time.monotonic() - self._ecg_last > 2 and not self._raw_kick.is_set():
                         self._ecg_last = time.monotonic()
                         self._raw_kick.set()
+                    if self._hp_cfg_req is not None:
+                        req, self._hp_cfg_req = self._hp_cfg_req, None
+                        await self._write_hp_cfg(c, req)
+                        continue
                     if self._scan_requested:          # refresh the list while connected
                         self._scan_requested = False
                         await self._safe_scan(want_target=False)
@@ -310,6 +324,7 @@ class BLESource:
             finally:                                  # also when Disconnect cancels the session
                 link_task.cancel()
                 self.hub.publish_raw("none")
+                self.hub.publish_hp_cfg(None)
                 self.log("link closed")
 
     async def _read_link(self, c, log=False):
@@ -415,6 +430,43 @@ class BLESource:
             info, fs = None, ECG_FS
             self.log(f"  ECG info char not available ({e.__class__.__name__}); assuming {ECG_FS} Hz")
         self.hub.set_ecg_fs(fs, info)
+
+    async def _read_hp_cfg(self, c, log=False):
+        """Front-end HP-compensation settings (a1b20005) -> dashboard; None on
+        firmware without the characteristic."""
+        try:
+            cfg = parsers.parse_hp_cfg(await c.read_gatt_char(HP_CFG_UUID))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if log:
+                self.log(f"  HP-comp settings not available ({e.__class__.__name__})")
+            cfg = None
+        else:
+            if log:
+                self.log(f"  HP comp: {self._hp_cfg_text(cfg)}")
+        self.hub.publish_hp_cfg(cfg)
+        return cfg
+
+    @staticmethod
+    def _hp_cfg_text(cfg):
+        return (f"shelf {'on' if cfg['shelf'] else 'off'} fc {cfg['fc_hz']:g} Hz f0 {cfg['f0_hz']:g} Hz, "
+                f"high-pass {'on' if cfg['hpf'] else 'off'} {cfg['hpf_hz']:g} Hz")
+
+    async def _write_hp_cfg(self, c, req):
+        """Write new HP-compensation settings, then read back what the strap applied
+        (it clamps the corners) and the stream info whose comp flag follows it."""
+        self.log(f"UI: HP comp -> {self._hp_cfg_text(req)}")
+        try:
+            await c.write_gatt_char(HP_CFG_UUID, parsers.build_hp_cfg(req), response=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.log(f"  HP-comp write failed: {e}")
+        cfg = await self._read_hp_cfg(c)
+        if cfg:
+            self.log(f"  HP comp now: {self._hp_cfg_text(cfg)}")
+        await self._read_ecg_info(c)
 
     async def _read_battery(self, c):
         try:

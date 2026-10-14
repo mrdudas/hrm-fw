@@ -62,7 +62,7 @@ class Hub:
     def snapshot_messages(self):
         """JSON strings to send a newly connected client (status + last of each)."""
         out = [json.dumps(self._status)]
-        for key in ("ecg_info", "devices", "battery", "rr", "accel", "ectopy", "link", "raw"):
+        for key in ("ecg_info", "hp_cfg", "devices", "battery", "rr", "accel", "ectopy", "link", "raw"):
             if key in self._snapshot:
                 msg = self._snapshot[key]
                 if key == "ectopy":      # an old event, not one happening now
@@ -93,6 +93,14 @@ class Hub:
         """Connection parameters as reported by the strap (a1b20004)."""
         self.recorder.add_link(link)
         self._emit({"type": "link", **link}, snapshot_key="link")
+
+    def publish_hp_cfg(self, cfg: dict | None):
+        """The strap's front-end high-pass compensation settings (a1b20005);
+        None: not connected, or firmware without the characteristic."""
+        if cfg is not None:
+            self.recorder.add_hp_cfg(cfg)
+        self._emit({"type": "hp_cfg", "available": cfg is not None, **(cfg or {})},
+                   snapshot_key="hp_cfg")
 
     def set_ecg_fs(self, fs: int, info: dict | None = None):
         """ECG sample rate of the connected strap. A change restarts the ECG time base."""
