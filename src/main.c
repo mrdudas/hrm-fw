@@ -842,7 +842,7 @@ static bool acc_detect(void)
  * does. Timings are in 1/ODR units (ODR 100 Hz -> 1 unit = 10 ms); threshold is
  * in 16 mg LSB at +/-2g. Tune here if knocks are missed (lower THS) or jostling
  * still wakes it (raise THS / shrink TWIN). */
-#define TAP_THS_CNT  0x40   /* ~1.0 g: a deliberate knock, not a nudge          */
+#define TAP_THS_CNT  0x18   /* ~0.375 g: catch a finger knock (double-tap pairing rejects jostling) */
 #define TAP_TLIM     0x0A   /* 100 ms: max over-threshold time for one tap      */
 #define TAP_TLAT     0x05   /* 50 ms: dead time after the first tap             */
 #define TAP_TWIN     0x28   /* 400 ms: window to receive the second tap         */
@@ -869,30 +869,33 @@ static bool tap_wake_active;
  * which the nRF GPIO SENSE turns into a System-OFF wake. The config persists
  * while the accel stays powered, and is re-armed on every boot.
  *
- * The SC7A20 is a LIS2DH clone; not every clone implements the CLICK engine. We
- * confirm it by reading CLICK_THS back: if it does not hold the written value,
- * the engine is absent and we fall back to the any-motion INT so the strap stays
- * wakeable (any motion) instead of becoming un-wakeable from sleep. */
+ * The SC7A20 is a LIS2DH clone; not every clone implements the CLICK engine, and
+ * this one does NOT support the LIR_Click latch bit (CLICK_THS bit7 reads back 0).
+ * So we confirm the engine by reading back only the threshold bits [6:0]; if those
+ * do not hold, the engine is absent and we fall back to the any-motion INT so the
+ * strap stays wakeable (any motion) instead of becoming un-wakeable from sleep.
+ * We arm click NON-latched: INT1 pulses for the latency window on a double-tap,
+ * which the nRF GPIO SENSE still captures as a System-OFF wake. */
 static void accel_init_tap_wake(void)
 {
 	a_scl_hi(); a_sda_hi(); k_msleep(5);
 	acc_wr(0x20, 0x57);   /* CTRL1: 100Hz, XYZ on */
 	acc_wr(0x23, 0x08);   /* CTRL4: HR, +/-2g */
 
-	acc_wr(0x3A, 0x80 | TAP_THS_CNT);  /* CLICK_THS: LIR_Click + threshold */
-	if (acc_rd(0x3A) != (0x80 | TAP_THS_CNT)) {   /* CLICK engine not present */
+	acc_wr(0x3A, TAP_THS_CNT);         /* CLICK_THS: threshold (no LIR; clone ignores bit7) */
+	if ((acc_rd(0x3A) & 0x7F) != TAP_THS_CNT) {   /* CLICK engine not present */
 		tap_wake_active = false;
 		accel_arm_motion_int();
 		return;
 	}
 	acc_wr(0x21, 0x04);   /* CTRL2: HPCLICK = high-pass the click path (removes gravity) */
 	acc_wr(0x22, 0x80);   /* CTRL3: I1_CLICK -> INT1 pin */
-	acc_wr(0x24, 0x00);   /* CTRL5: no INT1 latch (click latches via CLICK_THS bit7) */
+	acc_wr(0x24, 0x00);   /* CTRL5: no INT1 latch (non-latched click pulse) */
 	acc_wr(0x3B, TAP_TLIM);            /* TIME_LIMIT   */
 	acc_wr(0x3C, TAP_TLAT);            /* TIME_LATENCY */
 	acc_wr(0x3D, TAP_TWIN);            /* TIME_WINDOW  */
 	(void)acc_rd(0x26);   /* dummy read REFERENCE: reset the HP filter */
-	acc_wr(0x38, 0x2A);   /* CLICK_CFG: double-click on X|Y|Z (ZD|YD|XD) */
+	acc_wr(0x38, 0x2A);   /* CLICK_CFG: double-click only on X|Y|Z (ZD|YD|XD) */
 	(void)acc_rd(0x39);   /* clear CLICK_SRC latch */
 	tap_wake_active = true;
 }
