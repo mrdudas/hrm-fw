@@ -1016,8 +1016,9 @@ static void accel_thread_fn(void *a, void *b, void *c)
 K_THREAD_DEFINE(accel_tid, 640, accel_thread_fn, NULL, NULL, NULL, 5, 0, 0);
 
 #if !HW_DIFF
-/* True if P0.12 reads on-body for >75% of a ~win_ms window (read-only, no ADC). */
-static bool onbody_held(int win_ms)
+/* True if P0.12 reads on-body for >75% of a ~win_ms window (read-only, no ADC).
+ * Kept for diagnostics / future use (the connection-driven loop no longer calls it). */
+static bool __maybe_unused onbody_held(int win_ms)
 {
 	int hi = 0, n = win_ms / 10;
 	if (n < 1) n = 1;
@@ -1191,52 +1192,46 @@ int main(void)
 		ecg_stop();   /* disconnected() has armed the grace window via idle_since */
 	}
 #else
-	/* Standard board (no accel): on-body gates start-up and sleep, as before.
-	 * ---- AFE-friendly startup: wait for on-body before sampling (running the
-	 * ADC + DSP while the AFE settles injects CPU/supply noise into the front
-	 * end). Nobody wears it within PROBATION_MS -> back to sleep. */
-	int64_t wake = k_uptime_get();
-	bool running = false;
-	while (!running) {
-		/* phase 1: P0.12 on-body comes up (light ~200 ms debounce). */
-		led_off();
-		int lp = 0;
-		const int ONBODY_DETECT = 50;   /* ~200 ms at the 4 ms poll */
-		while (lp < ONBODY_DETECT) {
-			if (k_uptime_get() - wake > PROBATION_MS) enter_deep_sleep();  /* not worn in 1 min */
-			if (nrf_gpio_pin_read(CONTACT_PIN)) { lp++; }
-			else if (lp > 0) { lp--; }
-			k_msleep(4);
-		}
-		/* phase 2: 5 s weak pull-up assist + 2 Hz LED blink (~100 ms flashes) */
-		nrf_gpio_cfg_input(CONTACT_PIN, NRF_GPIO_PIN_PULLUP);   /* pull-up assist, NOT an output drive */
-		for (int64_t a0 = k_uptime_get(); k_uptime_get() - a0 < ASSIST_MS; ) {
-			led_on(); k_msleep(100); led_off(); k_msleep(400);
-		}
-		nrf_gpio_cfg_input(CONTACT_PIN, NRF_GPIO_PIN_NOPULL);   /* back to read-only for normal op */
-		running = onbody_held(500);   /* phase 3: did on-body persist? */
-		wake = k_uptime_get();        /* restart the probation window if it fell off */
+	/* Standard board (no accel): same connection-driven lifecycle as HW_DIFF,
+	 * but the wake source is the P0.12 on-body signal (armed in enter_deep_sleep)
+	 * instead of a double-tap -- it wakes when put on.
+	 *
+	 * We woke because on-body went high, so first give the AFE its ~5 s pull-up
+	 * assist to latch on (as before), then advertise + stream-on-connect.
+	 *
+	 * Sleep is gated on OFF-body here, NOT on a pure no-connection timer: the
+	 * on-body wake is level-sensitive, so sleeping while still worn (P0.12 high)
+	 * would wake us again instantly. So: worn -> stay up (advertise/stream);
+	 * taken off + no connection for PROBATION_MS -> sleep (and a fresh put-on
+	 * wakes it). Connected -> never sleep, exactly like HW_DIFF. */
+	nrf_gpio_cfg_input(CONTACT_PIN, NRF_GPIO_PIN_PULLUP);   /* AFE latch assist, NOT a drive */
+	for (int64_t a0 = k_uptime_get(); k_uptime_get() - a0 < ASSIST_MS; ) {
+		led_on(); k_msleep(100); led_off(); k_msleep(400);
 	}
+	nrf_gpio_cfg_input(CONTACT_PIN, NRF_GPIO_PIN_NOPULL);   /* back to read-only */
 
-	ecg_start();                      /* on-body confirmed -> start continuous ECG */
-	int64_t session_start = k_uptime_get();
-	last_beat_ms   = session_start;
-	last_motion_ms = session_start;
-	int contact_lp = CONTACT_DEB;     /* we entered RUN on a held on-body contact */
-	while (1) {
-		nrf_saadc_value_t *buf;
-		k_msgq_get(&adc_doneq, &buf, K_FOREVER);
-		process_adc_buffer(buf);
-
-		/* Power state machine: sleep on the 3 h cap, or off-body + no motion
-		 * for 1 min. Motion INT on P0.14 wakes from System OFF. */
-		int64_t now = k_uptime_get();
-		if (nrf_gpio_pin_read(CONTACT_PIN)) { if (contact_lp < CONTACT_DEB) contact_lp++; }
-		else                                { if (contact_lp > 0) contact_lp--; }
-		bool contact = contact_lp > (CONTACT_DEB / 2);
-		bool go_sleep = (now - session_start > MAX_ACTIVE_MS) ||        /* 3 h cap */
-				(!contact && (now - last_motion_ms > OFFBODY_MS)); /* off-body + still */
-		if (go_sleep) enter_deep_sleep();   /* drops connections, System OFF; does not return */
+	int64_t offbody_since = 0;   /* when we last went off-body while not connected */
+	for (;;) {
+		/* ADVERTISE: idle. Sleep only after PROBATION_MS continuously OFF-body. */
+		while (conn_count == 0) {
+			if (nrf_gpio_pin_read(CONTACT_PIN)) {
+				offbody_since = 0;                 /* worn -> stay up */
+			} else {
+				if (offbody_since == 0) offbody_since = k_uptime_get();
+				if (k_uptime_get() - offbody_since > PROBATION_MS)
+					enter_deep_sleep();        /* off-body 1 min -> System OFF */
+			}
+			led_on(); k_msleep(60); led_off(); k_msleep(1940);
+		}
+		/* STREAM: connected -> run the ADC until disconnect. */
+		offbody_since = 0;
+		ecg_start();
+		while (conn_count > 0) {
+			nrf_saadc_value_t *buf;
+			if (k_msgq_get(&adc_doneq, &buf, K_MSEC(100)) == 0)
+				process_adc_buffer(buf);
+		}
+		ecg_stop();
 	}
 #endif
 }
