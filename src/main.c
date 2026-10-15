@@ -855,11 +855,11 @@ static bool acc_detect(void)
  * still wakes it (raise THS / shrink TWIN). */
 /* Timings are in 1/ODR units. ODR is 400 Hz (CTRL1 0x77) -> 1 unit = 2.5 ms:
  * the 100 Hz / 10 ms resolution was too coarse for reliable double-click pairing. */
-#define TAP_THS_CNT  0x18   /* ~0.375 g: catch a finger knock                            */
-#define TAP_TLIM     0x0A   /* ~25 ms: max over-threshold time per tap -- SHARP only, so */
+#define TAP_THS_CNT  0x10   /* ~0.25 g: catch a gentle finger knock (lowered: woke too hard) */
+#define TAP_TLIM     0x0E   /* ~35 ms: max over-threshold time per tap -- still SHARP, so */
                             /*         a sustained shake (longer over-threshold) is rejected */
-#define TAP_TLAT     0x10   /* ~40 ms: dead time after the first tap (skip its ring)     */
-#define TAP_TWIN     0xB4   /* ~450 ms: window to receive the second tap                 */
+#define TAP_TLAT     0x0C   /* ~30 ms: dead time after the first tap (skip its ring)     */
+#define TAP_TWIN     0xFF   /* ~640 ms: generous window to receive the second tap        */
 
 /* Fallback: the original any-axis motion INT (~290 mg, no min duration). Used
  * only if the CLICK engine is absent on this accel (see accel_init_tap_wake). */
