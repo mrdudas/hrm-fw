@@ -25,3 +25,6 @@ restore-*.hex
 app/device.json
 resume-firmware.sh
 resume-app.sh
+
+# extra build dirs (A/B, std compile-checks)
+build-*/
