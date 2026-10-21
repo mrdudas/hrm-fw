@@ -134,6 +134,33 @@ dashboard in a separate Chrome window with its own profile
 more power on battery: `./run.sh --browser default` uses the default browser
 instead, and `--browser chrome-gpu` forces the dedicated window on any Mac.
 
+## Reviewing recordings: HRV and fractal analysis
+
+`http://127.0.0.1:8770/review` (the **Recordings** button on the dashboard)
+lists the saved sessions. Pick one, drag on the heart-rate chart (or on any
+chart below it) to select a period; ◀ ▶ step by the same length, the URL keeps
+the session and the period. The session being recorded can be opened too
+(⟳ Reload re-reads it).
+
+Before any analysis the beats are checked: out-of-range RRs, runs of 5+
+identical RRs (the strap repeating a stale value) and RRs more than 20 % off
+the local median (artifacts, ectopic beats) are replaced by the median of the
+good beats around them. Breaks where beats were lost (dropped link, lost
+notifications) are found from the arrival times; no sliding window spans one.
+A window with more corrected beats than "max corrected" gets no value.
+
+Over time (sliding windows, all charts share the time axis):
+- RR tachogram with the corrected beats and the strap's PAC / PVC marks,
+- DFA α1 (4–16 beats, "window", default 2 min) and α2 (16–64 beats, "MF window"),
+- multifractal spectrum width Δα and peak position α0, by MFDFA and by
+  Chhabra–Jensen (q = −q … +q, "MF window", default 5 min),
+- RMSSD and SDNN, and movement (SD of |a|, 10 s bins) for context.
+
+For the selected period: time-domain values, SD1/SD2, α1/α2, the Fq(n)
+log-log plot, the f(α) spectra of both methods, h(q) and the Poincaré plot.
+Chhabra–Jensen needs a positive measure: |ΔRR| (default) or the RR intervals
+(those are nearly uniform, so the spectrum comes out very narrow).
+
 ## Packaging (optional, later)
 
 Can be bundled into a single executable with PyInstaller, e.g.:
@@ -157,8 +184,10 @@ app/
 ├── hub.py            # fans events out to CSV + all WebSocket clients
 ├── ble_source.py     # scan / connect / subscribe / auto-reconnect (bleak)
 ├── demo_source.py    # synthetic data generator (--demo)
-├── webserver.py      # aiohttp: serves the dashboard + /ws
-├── static/           # index.html + app.js + style.css (uPlot via CDN)
+├── webserver.py      # aiohttp: serves the dashboard + /ws, the review page + /api/sessions
+├── recordings.py     # reads saved sessions back for the review page (beats, lost-beat breaks)
+├── static/           # index.html + app.js + style.css (uPlot via CDN);
+│                     # review.html + review.js + hrv.js (HRV / DFA / MFDFA / Chhabra–Jensen)
 ├── recordings/       # CSV output (created on first run)
 ├── requirements.txt
 ├── install.sh / run.sh                 # Linux + macOS installer / launcher
