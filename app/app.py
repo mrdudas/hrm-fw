@@ -54,14 +54,14 @@ async def run_scan():
 
 async def run_dashboard(args):
     session = time.strftime("%Y%m%d_%H%M%S")
-    recorder = CSVRecorder(RECORDINGS_DIR, session)
+    recorder = CSVRecorder(args.recordings, session)
     hub = Hub(recorder)
 
     app = make_app(hub, log=log)
     runner = await start_server(app, args.host, args.port)
     url = f"http://{args.host}:{args.port}"
     log(f"dashboard at {url}")
-    log(f"recording to {RECORDINGS_DIR}/*_{session}.csv")
+    log(f"recording to {args.recordings}/*_{session}.csv")
 
     broadcaster = asyncio.create_task(hub.broadcaster())
 
@@ -121,6 +121,8 @@ def parse_args(argv):
     p.add_argument("--host", default=HOST, help=f"web bind host (default {HOST})")
     p.add_argument("--port", type=int, default=PORT,
                    help=f"web port (default {PORT})")
+    p.add_argument("--recordings", default=RECORDINGS_DIR, metavar="DIR",
+                   help="where sessions are recorded and reviewed from (default: recordings/)")
     p.add_argument("--no-open", action="store_true",
                    help="do not auto-open the browser")
     p.add_argument("--browser", choices=("auto", "default", "chrome-gpu"), default="auto",

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>HRM Raw RR — Recordings</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="review">
+<header>
+  <div class="brand">
+    <span class="logo">&#9829;</span>
+    <span>HRM Raw RR — Recordings</span>
+  </div>
+  <div class="header-right">
+    <div class="device">
+      <select id="ses-select" title="Saved session"></select>
+      <button id="ses-reload" class="tool-btn" title="Re-read the session (the one being recorded keeps growing)">⟳ Reload</button>
+    </div>
+    <a class="tool-btn nav-link" href="/">Live dashboard</a>
+  </div>
+</header>
+
+<main>
+  <section class="card wide">
+    <div class="card-head">
+      <h2 title="Heart rate over the whole recording. Drag to select a period; double-click: whole recording">Recording</h2>
+      <span class="hint rv-tools">
+        <span id="ses-info"></span>
+      </span>
+    </div>
+    <div id="ov-chart" class="rv-overview"></div>
+    <div class="rv-selbar">
+      <button id="sel-prev" class="tool-btn" title="Previous period of the same length">◀</button>
+      <span id="sel-text" class="rv-seltext">–</span>
+      <button id="sel-next" class="tool-btn" title="Next period of the same length">▶</button>
+      <button id="sel-all" class="tool-btn" title="Select the whole recording">Whole</button>
+      <span class="sep"></span>
+      <span class="hint">drag on any chart to select a period · double-click the top chart: whole recording</span>
+    </div>
+  </section>
+
+  <section class="card wide">
+    <div class="card-head">
+      <h2>Over time</h2>
+      <span class="hint rv-tools">
+        <label class="nowrap" title="DFA α1 / RMSSD / SDNN window, seconds (α1 is usually computed on 2 min)">window <input id="p-win" type="number" min="30" max="1800" step="10" value="120" class="avg-n"> s</label>
+        <label class="nowrap" title="Multifractal (MFDFA, Chhabra–Jensen) and α2 window, seconds: these need several hundred beats">MF window <input id="p-mfwin" type="number" min="120" max="7200" step="30" value="300" class="avg-n"> s</label>
+        <label class="nowrap" title="Moment orders q = −qmax … +qmax for the multifractal spectrum">q ± <input id="p-q" type="number" min="1" max="10" step="1" value="5" class="avg-n"></label>
+        <label class="nowrap" title="Chhabra–Jensen measure: the beat-to-beat changes |ΔRR| (sensitive to how the variability itself is distributed) or the RR intervals (nearly uniform, so a narrow spectrum)">CJ measure
+          <select id="p-cj"><option value="drr">|ΔRR|</option><option value="rr">RR</option></select></label>
+        <label class="nowrap" title="A window with more corrected (artifact / ectopic) beats than this, or with lost beats, gets no value">max corrected <input id="p-bad" type="number" min="0" max="50" step="1" value="5" class="avg-n"> %</label>
+      </span>
+    </div>
+    <div id="rv-readout" class="rv-readout">&nbsp;</div>
+    <div id="ln-rr" class="rv-lane"></div>
+    <div id="ln-a" class="rv-lane"></div>
+    <div id="ln-mfw" class="rv-lane"></div>
+    <div id="ln-mfa" class="rv-lane"></div>
+    <div id="ln-hrv" class="rv-lane"></div>
+    <div id="ln-act" class="rv-lane"></div>
+    <div id="rv-busy" class="hint rv-busy" hidden>computing…</div>
+  </section>
+
+  <section class="card wide">
+    <div class="card-head">
+      <h2 title="Computed over the whole selected period">Selected period</h2>
+      <span id="sum-note" class="hint"></span>
+    </div>
+    <div id="sum-stats" class="rv-stats"></div>
+    <div class="rv-plots">
+      <figure><figcaption title="DFA / MFDFA fluctuation function Fq(n) against the box size n, log-log. The slope is the scaling exponent: α1 fitted on 4–16 beats, α2 on 16–64. Lines fanning out with q = multifractal.">Fluctuation function F<sub>q</sub>(n)</figcaption><canvas id="pl-dfa"></canvas></figure>
+      <figure><figcaption title="Multifractal spectrum: MFDFA (Legendre transform of h(q)) and Chhabra–Jensen (direct). Width = degree of multifractality, peak position α0 = dominant scaling.">Singularity spectrum f(α)</figcaption><canvas id="pl-spec"></canvas></figure>
+      <figure><figcaption title="Generalised Hurst exponent h(q) from MFDFA; flat = monofractal. h(2) is the DFA exponent over the whole fitted range.">Generalised Hurst exponent h(q)</figcaption><canvas id="pl-hq"></canvas></figure>
+      <figure><figcaption title="Each beat's RR against the next one. SD1 (across the identity line): beat-to-beat variability; SD2 (along it): slower variability.">Poincaré plot</figcaption><canvas id="pl-poin"></canvas></figure>
+    </div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+<script src="/static/hrv.js"></script>
+<script src="/static/review.js"></script>
+</body>
+</html>
