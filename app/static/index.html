@@ -115,6 +115,11 @@
       </span>
     </div>
     <canvas id="rh-canvas" class="chart-rh"></canvas>
+    <div class="card-head nl-head">
+      <h2 title="Lyapunov divergence curve (Rosenstein): how fast two similar stretches of RR intervals drift apart, beat by beat. Flat and low: periodic. Rising from low, then levelling off: deterministic (the initial slope is the largest Lyapunov exponent λ₁). At the top from the first beat: random. Correlated noise also rises, so the series is compared with two surrogates of the same RR values: shuffled (no memory) and phase-randomised (same spectrum = correlated noise; band: ±2 SD). Below the blue band: structure beyond linear correlations. DET: share of recurrences lying on diagonal lines (the series repeating itself). Slow drifts of the heart rate (non-stationarity) can also look 'deterministic'. Up to the last 1000 beats of the span, recomputed every 20 s.">Determinism · Lyapunov divergence</h2>
+      <span id="nl-stats" class="hint nl-stats"></span>
+    </div>
+    <canvas id="nl-canvas" class="chart-nl"></canvas>
   </section>
 
   <!-- signal-averaged beat (ensemble average, R-aligned) -->
@@ -175,6 +180,8 @@
 <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
 <script src="/static/clock.js"></script>
 <script src="/static/qrst.js"></script>
+<script src="/static/hrv.js"></script>
+<script src="/static/nonlin.js"></script>
 <script src="/static/rrhist.js"></script>
 <script src="/static/app.js"></script>
 </body>

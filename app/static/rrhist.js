@@ -242,5 +242,40 @@
     if (!raf) raf = setTimeout(() => { raf = 0; draw(); }, 200);
   }
 
-  root.RRHist = { init, add: addAndDraw, render, RR_MIN, RR_MAX };
+  // raw RRs of the span, in order (for the nonlinear analysis)
+  function spanRR() {
+    const now = all.length ? all[all.length - 1].t : 0, out = [];
+    for (const b of all) if (!span || b.t >= now - span) out.push(b.rr);
+    return out;
+  }
+
+  root.RRHist = { spanRR, init, add: addAndDraw, render, RR_MIN, RR_MAX };
 })(window);
+
+/* Determinism panel under the live histogram: the span's beats, artifact-
+ * corrected (hrv.js), analysed in a worker (nonlin.js) every 20 s. */
+(function () {
+  "use strict";
+  if (!window.NonLin || !window.HRV) return;
+  let lastN = -1, res = null, busy = false;
+  const cv = () => document.getElementById("nl-canvas"), st = () => document.getElementById("nl-stats");
+  function run() {
+    if (busy || !cv()) return;
+    const rr = RRHist.spanRR();
+    if (rr.length === lastN) return;
+    lastN = rr.length;
+    if (rr.length < NonLin.N_MIN) { NonLin.render(cv(), st(), null, `needs ${NonLin.N_MIN} beats (${rr.length} so far)`); return; }
+    const cl = HRV.clean(rr.slice(-NonLin.N_MAX));
+    busy = true;
+    NonLin.analyzeAsync(cl.rrc, NonLin.N_MAX, (r) => {
+      busy = false; res = r;
+      NonLin.render(cv(), st(), r, "updated " + new Date().toLocaleTimeString([], { hour12: false }));
+    });
+  }
+  window.addEventListener("load", () => {
+    NonLin.render(cv(), st(), null, "collecting beats…");
+    setTimeout(run, 3000);
+    setInterval(run, 20000);
+    new ResizeObserver(() => res && NonLin.render(cv(), st(), res)).observe(cv());
+  });
+})();
