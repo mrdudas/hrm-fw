@@ -221,3 +221,11 @@ html{background:var(--bg); color-scheme:dark}
 .d-table tbody tr{cursor:pointer}
 .d-table tbody tr:hover{background:var(--panel-2)}
 .d-table tr.d-few{opacity:.45}
+
+/* exercise / fatigue */
+.ex-verdict{font-size:13px; color:var(--muted); margin:0 0 10px; font-variant-numeric:tabular-nums}
+.ex-verdict b{font-weight:600; color:var(--text)}
+.ex-verdict b.ex-tired{color:var(--off)}
+.ex-verdict b.ex-some{color:var(--warn)}
+.ex-verdict b.ex-fresh{color:var(--ok)}
+.ex-plots canvas{height:280px}

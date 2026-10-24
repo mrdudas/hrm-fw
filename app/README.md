@@ -195,6 +195,29 @@ any selected period.
 The windows are found on the server (`recordings.rest_windows`), cached per
 session; the first load reads all accelerometer files and takes a few seconds.
 
+## Exercise: how much a workout tires you
+
+A card on the live dashboard (over the last 30 min … whole session, every
+10 s) and on the review page (for the selected period), from `exercise.js`:
+
+1. **DFA α1 against HR** (Rogers, Gronwald): 2-min windows every 10 s;
+   windows where HR changed more than 15 bpm are left out (transients read
+   high). A linear fit gives HRVT1 (α1 = 0.75, ~ aerobic threshold) and
+   HRVT2 (0.5). Fatigue = lost durability: the last third of the exercise
+   gives a lower threshold HR, or a lower α1 at the same HR or at the same
+   cadence, than the first.
+2. **Decoupling**: cadence/HR, second half against the first, at the
+   period's typical cadence (± 8 %); under 5 % is good. Without step data:
+   HR drift only.
+3. **Heart rate recovery (HRR60)**: HR drop in the 60 s after each bout —
+   bouts end where the step counter shows moving turning into standing, or,
+   without step data, at HR peaks. Getting smaller through a session: fatigue.
+4. **Training load**: Banister and Edwards TRIMP, minutes in the 5 zones.
+
+The verdict counts the four signs. HR max, HR rest and sex (Banister weights)
+are set on the card and shared by both pages. Cadence comes from the
+strap's step counter (accel CSV, `steps` column), per 10 s bin.
+
 ## Packaging (optional, later)
 
 Can be bundled into a single executable with PyInstaller, e.g.:
@@ -219,7 +242,7 @@ app/
 ├── ble_source.py     # scan / connect / subscribe / auto-reconnect (bleak)
 ├── demo_source.py    # synthetic data generator (--demo)
 ├── webserver.py      # aiohttp: serves the dashboard + /ws, the review page + /api/sessions, /daily + /api/rest
-├── recordings.py     # reads saved sessions back for the review page (beats, lost-beat breaks), resting windows for /daily
+├── recordings.py     # reads saved sessions back for the review page (beats, lost-beat breaks, activity + cadence), resting windows for /daily
 ├── static/           # index.html + app.js + style.css (uPlot via CDN);
 │                     # review.html + review.js + hrv.js (HRV / DFA / MFDFA / Chhabra–Jensen)
 ├── recordings/       # CSV output (created on first run)

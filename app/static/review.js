@@ -337,6 +337,44 @@
     return { s: h.get("s"), a: +h.get("a"), b: +h.get("b") };
   }
 
+  // ---------- exercise / fatigue of the selected period (exercise.js) ----------
+  const ath = Exercise.athlete();
+  $("ex-hrmax").value = ath.hrMax; $("ex-hrrest").value = ath.hrRest; $("ex-sex").value = ath.sex;
+  for (const id of ["ex-hrmax", "ex-hrrest", "ex-sex"]) $(id).addEventListener("change", () => {
+    ath.hrMax = +$("ex-hrmax").value || 190; ath.hrRest = +$("ex-hrrest").value || 60; ath.sex = $("ex-sex").value;
+    Exercise.saveAthlete(ath);
+    exercise();
+  });
+  let exR = null;
+  function exercise() {
+    if (!ses || !sel) return;
+    const R = exR = Exercise.analyze(ses.beats.t, cl, ses.activity, sel[0], sel[1], { athlete: ath, maxBad: P.bad });
+    const v = Exercise.verdict(R), d = R.dur, L = R.load;
+    $("ex-verdict").innerHTML = `<b class="${v.cls}">${v.head}</b>${v.text ? " · " + v.text : ""}`;
+    const item = (k, val, tip) => `<div class="rv-stat" title="${tip || ""}"><span>${k}</span><b>${val}</b></div>`;
+    const sg = (x, dd = 0) => (x == null || !isFinite(x) ? "–" : (x > 0 ? "+" : "") + x.toFixed(dd));
+    const hp = R.hrr.pts;
+    $("ex-stats").innerHTML = [
+      item("HRVT1 / HRVT2", Exercise.thrText(d.all), "HR where α1 = 0.75 (~ aerobic threshold) and 0.5 (~ anaerobic), from the α1–HR fit of the whole exercise. In brackets: extrapolated beyond the measured HRs"),
+      item("first third", Exercise.thrText(d.first), "thresholds from the first third of the exercise"),
+      item("last third", Exercise.thrText(d.last), "thresholds from the last third"),
+      item("threshold drift", d.vt1Drift == null ? "–" : sg(d.vt1Drift) + " bpm", "HRVT1 last third − first third; only when both thirds cross α1 = 0.75. A fall of 5 bpm or more: fatigue (lost durability)"),
+      item("α1 at same HR", d.matched ? `${d.matched.first.toFixed(2)} → ${d.matched.last.toFixed(2)}` : "–", d.matched ? `mean α1 at ${d.matched.lo.toFixed(0)}–${d.matched.hi.toFixed(0)} bpm, first → last third; a drop of 0.1 or more: fatigue` : "the two thirds share no HR range"),
+      item("α1 at same cadence", d.matchedLoad ? `${d.matchedLoad.first.toFixed(2)} → ${d.matchedLoad.last.toFixed(2)}` : "–", d.matchedLoad ? `mean α1 at ${d.matchedLoad.spm.toFixed(0)} ± 8 % steps/min, first → last third (HR ${d.matchedLoad.hr1.toFixed(0)} → ${d.matchedLoad.hr2.toFixed(0)})` : "needs ≥ 15 min at a steady cadence (step counter)"),
+      item("decoupling", R.dec.decoupling != null ? R.dec.decoupling.toFixed(1) + " %" : "–", R.dec.decoupling != null ? `cadence/HR, second half against the first, at the typical cadence: HR ${R.dec.hr1.toFixed(0)} → ${R.dec.hr2.toFixed(0)}, cadence ${R.dec.spm1.toFixed(0)} → ${R.dec.spm2.toFixed(0)}. Under 5 %: good durability` : R.dec.hasSteps ? "needs ≥ 5 min at a steady cadence" : "no step data"),
+      item("HR drift", R.dec.hrDrift != null ? sg(R.dec.hrDrift) + " bpm" : "–", "mean HR, second half − first half (of the steady-cadence part when there is step data)"),
+      item("HRR60", hp.length ? hp.map((p) => p.hrr60.toFixed(0)).join(" · ") : "–", "heart rate recovery: HR drop in the 60 s after each bout (" + (hp.length && hp[0].confirmed ? "bouts from the step counter" : "bouts from HR peaks") + "). Getting smaller through a session: fatigue. Under 12 bpm at rest after exercise is low"),
+      item("TRIMP", `${L.banister.toFixed(0)} <small>Banister</small> · ${L.edwards.toFixed(0)} <small>Edwards</small>`, "training load. Banister: minutes × HR-reserve fraction, exponentially weighted; Edwards: minutes in the 5 zones of % HRmax × 1…5"),
+      item("zones (min)", L.zone.map((z) => z.toFixed(0)).join(" · "), "minutes at 50–60 · 60–70 · 70–80 · 80–90 · 90–100 % of HR max"),
+    ].join("");
+    drawExercise();
+  }
+  function drawExercise() {
+    if (!exR) return;
+    Exercise.renderA1($("ex-a1"), exR);
+    Exercise.renderTime($("ex-time"), exR);
+  }
+
   // ---------- summary of the selected period ----------
   function summary() {
     const t = ses.beats.t;
@@ -372,6 +410,7 @@
         `<span>H · C (Δ vs noise)</span><b>…</b></div>`,
     ].join("");
     selChaos(a, b);
+    exercise();
     let gaps = 0;
     for (let i = a + 1; i < b; i++) if (ses.beats.gap[i]) gaps++;
     setText("sum-note", gaps ? `⚠ the period spans ${gaps} break${gaps > 1 ? "s" : ""}: the parts are analysed joined together` : "");

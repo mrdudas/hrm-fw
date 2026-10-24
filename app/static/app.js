@@ -287,7 +287,7 @@
       setText("rr", Math.round(lastRr));
       stream("rr", msg.rr.slice());
       hrvAdd(msg.rr);
-      if (!msg.replay) RRHist.add(msg.t, msg.rr);
+      if (!msg.replay) { RRHist.add(msg.t, msg.rr); ExLive.add(msg.t, msg.rr); }
     }
   }
 
@@ -1733,7 +1733,7 @@
     switch (msg.type) {
       case "ecg": stream("ecg", msg); break;
       case "rr": onRr(msg); break;
-      case "accel": setText("steps", msg.steps); stream("accel", msg); break;
+      case "accel": setText("steps", msg.steps); stream("accel", msg); if (!msg.replay) ExLive.steps(msg.t, msg.steps); break;
       case "ectopy": onEctopy(msg); break;
       case "battery": onBattery(msg); break;
       case "status": onStatus(msg); break;
@@ -1775,6 +1775,7 @@
     makeAvg();
     makeHrvTrend();
     RRHist.init({ canvas: "rh-canvas", stats: "rh-stats", span: "rh-span", normal: "rh-normal" });
+    ExLive.init({ now: "ex-now", stats: "ex-stats", span: "ex-span", a1: "ex-a1", time: "ex-time", hrMax: "ex-hrmax", hrRest: "ex-hrrest" });
     initZoom();
     initPauseMeasure();
     initAvgTools();
