@@ -156,6 +156,17 @@ Over time (sliding windows, all charts share the time axis):
   Chhabra–Jensen (q = −q … +q, "MF window", default 5 min),
 - RMSSD and SDNN, and movement (SD of |a|, 10 s bins) for context.
 
+Chaos or noise (live under the RR histogram, and on the review page):
+- Lyapunov divergence curve (Rosenstein) against shuffled and phase-randomised
+  surrogates, with the RQA determinism (DET);
+- noise titration (Poon & Barahona): Volterra–Wiener models, linear against
+  nonlinear (F-test); the white noise (% of the RR SD) needed to hide the
+  nonlinearity is the noise limit, 0 = no chaos detected;
+- complexity–entropy plane (Bandt–Pompe, Rosso 2007, 4-beat order patterns)
+  with the 1/f^k noise curve and chaotic maps for reference.
+They run in a Web Worker; on the review page the noise limit and the
+complexity above the noise curve are also plotted over time (MF window).
+
 For the selected period: time-domain values, SD1/SD2, α1/α2, the Fq(n)
 log-log plot, the f(α) spectra of both methods, h(q) and the Poincaré plot.
 Chhabra–Jensen needs a positive measure: |ΔRR| (default) or the RR intervals

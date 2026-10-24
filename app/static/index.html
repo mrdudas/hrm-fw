@@ -120,6 +120,14 @@
       <span id="nl-stats" class="hint nl-stats"></span>
     </div>
     <canvas id="nl-canvas" class="chart-nl"></canvas>
+    <div class="card-head nl-head">
+      <h2 title="Noise titration (Poon & Barahona): linear and nonlinear (Volterra–Wiener, memory ≤ 5 beats, degree ≤ 3) autoregressive models are fitted to the RR series; when the nonlinear one predicts significantly better (F-test, p < 0.01) there is nonlinear determinism. White noise is then added until that disappears: the noise limit (% of the RR SD, median of 3 noise samples) is how much chaos there is. 0 = no chaos detected. Strongly periodic series are flagged instead (the test is not valid for them).">Chaos or noise · noise titration &amp; complexity–entropy plane</h2>
+      <span id="ch-stats" class="hint nl-stats"></span>
+    </div>
+    <div class="ch-grid">
+      <figure><figcaption class="hint" title="Complexity–entropy plane (Bandt–Pompe, Rosso 2007): the order patterns of 4 successive beats. H: their entropy (1 = all patterns equally likely, random). C: statistical complexity. Blue: correlated 1/f^k noises (k = 0 white … 3); orange: chaotic maps for comparison; dashed: the possible range. A point above the blue curve = more structured than any such noise. Red: now; green: earlier values.">complexity–entropy plane</figcaption><canvas id="ch-plane" class="chart-ch"></canvas></figure>
+      <figure><figcaption class="hint" title="Noise titration (Poon & Barahona): linear and nonlinear (Volterra–Wiener, memory ≤ 5 beats, degree ≤ 3) autoregressive models are fitted to the RR series; when the nonlinear one predicts significantly better (F-test, p < 0.01) there is nonlinear determinism. White noise is then added until that disappears: the noise limit (% of the RR SD, median of 3 noise samples) is how much chaos there is. 0 = no chaos detected. Strongly periodic series are flagged instead (the test is not valid for them).">noise limit over time (0 = no chaos detected)</figcaption><canvas id="ch-hist" class="chart-ch"></canvas></figure>
+    </div>
   </section>
 
   <!-- signal-averaged beat (ensemble average, R-aligned) -->
@@ -182,6 +190,7 @@
 <script src="/static/qrst.js"></script>
 <script src="/static/hrv.js"></script>
 <script src="/static/nonlin.js"></script>
+<script src="/static/chaos.js"></script>
 <script src="/static/rrhist.js"></script>
 <script src="/static/app.js"></script>
 </body>

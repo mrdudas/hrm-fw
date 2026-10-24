@@ -271,11 +271,43 @@
       busy = false; res = r;
       NonLin.render(cv(), st(), r, "updated " + new Date().toLocaleTimeString([], { hour12: false }));
     });
+    if (window.Chaos) chaos(cl.rrc);
+  }
+
+  // noise titration + complexity-entropy plane, history kept for this page
+  const chHist = { t: [], nl: [], pts: [] };
+  let chLast = null;
+  function chaos(rrc) {
+    Chaos.inWorker("live", { kind: "chaos", rr: Float64Array.from(rrc) }, (r) => {
+      if (!r) return;
+      chLast = r;
+      chHist.t.push(Date.now() / 1000); chHist.nl.push(r.ti && !r.ti.periodic ? r.ti.nl : null);
+      if (r.pl) chHist.pts.push({ H: r.pl.H, C: r.pl.C });
+      if (chHist.t.length > 2000) { chHist.t.shift(); chHist.nl.shift(); chHist.pts.shift(); }
+      drawChaos();
+    });
+  }
+  function drawChaos() {
+    const pl = document.getElementById("ch-plane"), hi = document.getElementById("ch-hist"), stc = document.getElementById("ch-stats");
+    if (!pl) return;
+    const n = chHist.pts.length;
+    Chaos.renderPlane(pl, chHist.pts.slice(0, -1).map((q, i) => ({ ...q, w: (i + 1) / n })), chLast && chLast.pl);
+    Chaos.renderSeries(hi, chHist.t, chHist.nl, { unit: " %", minTop: 20, empty: "first value after 300 beats" });
+    if (chLast) {
+      const ti = chLast.ti, p = chLast.pl;
+      stc.innerHTML = `<b class="nl-${chLast.verdict.kind === "chaos" ? "nonlinear" : chLast.verdict.kind === "noise" ? "linear" : chLast.verdict.kind}">${chLast.verdict.text}</b>` +
+        (ti && ti.nl != null ? ` · noise limit ${ti.nl.toFixed(0)} %` : "") +
+        (p ? ` · H ${p.H.toFixed(3)} · C ${p.C.toFixed(3)} (${p.dC >= 0 ? "+" : ""}${p.dC.toFixed(3)} vs noise)` : "") + ` · ${chLast.n} beats`;
+    }
   }
   window.addEventListener("load", () => {
     NonLin.render(cv(), st(), null, "collecting beats…");
     setTimeout(run, 3000);
     setInterval(run, 20000);
     new ResizeObserver(() => res && NonLin.render(cv(), st(), res)).observe(cv());
+    if (window.Chaos && document.getElementById("ch-plane")) {
+      drawChaos();
+      new ResizeObserver(drawChaos).observe(document.getElementById("ch-plane"));
+    }
   });
 })();

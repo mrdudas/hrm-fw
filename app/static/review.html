@@ -46,6 +46,7 @@
     <div class="card-head">
       <h2>Over time</h2>
       <span class="hint rv-tools">
+        <span id="ch-progress" class="rv-progress"></span>
         <label class="nowrap" title="DFA α1 / RMSSD / SDNN window, seconds (α1 is usually computed on 2 min)">window <input id="p-win" type="number" min="30" max="1800" step="10" value="120" class="avg-n"> s</label>
         <label class="nowrap" title="Multifractal (MFDFA, Chhabra–Jensen) and α2 window, seconds: these need several hundred beats">MF window <input id="p-mfwin" type="number" min="120" max="7200" step="30" value="300" class="avg-n"> s</label>
         <label class="nowrap" title="Moment orders q = −qmax … +qmax for the multifractal spectrum">q ± <input id="p-q" type="number" min="1" max="10" step="1" value="5" class="avg-n"></label>
@@ -59,6 +60,8 @@
     <div id="ln-a" class="rv-lane"></div>
     <div id="ln-mfw" class="rv-lane"></div>
     <div id="ln-mfa" class="rv-lane"></div>
+    <div id="ln-nl" class="rv-lane"></div>
+    <div id="ln-hc" class="rv-lane"></div>
     <div id="ln-hrv" class="rv-lane"></div>
     <div id="ln-act" class="rv-lane"></div>
     <div id="rv-busy" class="hint rv-busy" hidden>computing…</div>
@@ -89,6 +92,7 @@
       <figure><figcaption title="DFA / MFDFA fluctuation function Fq(n) against the box size n, log-log. The slope is the scaling exponent: α1 fitted on 4–16 beats, α2 on 16–64. Lines fanning out with q = multifractal.">Fluctuation function F<sub>q</sub>(n)</figcaption><canvas id="pl-dfa"></canvas></figure>
       <figure><figcaption title="Multifractal spectrum: MFDFA (Legendre transform of h(q)) and Chhabra–Jensen (direct). Width = degree of multifractality, peak position α0 = dominant scaling.">Singularity spectrum f(α)</figcaption><canvas id="pl-spec"></canvas></figure>
       <figure><figcaption title="Generalised Hurst exponent h(q) from MFDFA; flat = monofractal. h(2) is the DFA exponent over the whole fitted range.">Generalised Hurst exponent h(q)</figcaption><canvas id="pl-hq"></canvas></figure>
+      <figure><figcaption title="Complexity–entropy plane (Bandt–Pompe, Rosso 2007), order patterns of 4 successive beats. H: entropy (1 = random); C: statistical complexity. Blue: correlated 1/f^k noises; orange: chaotic maps; dashed: possible range. Above the blue curve = more structured than any such noise. Green: the MF windows inside the selected period (later = brighter); red: the whole period.">Complexity–entropy plane</figcaption><canvas id="pl-ce"></canvas></figure>
       <figure><figcaption title="Each beat's RR against the next one. SD1 (across the identity line): beat-to-beat variability; SD2 (along it): slower variability.">Poincaré plot</figcaption><canvas id="pl-poin"></canvas></figure>
     </div>
   </section>
@@ -98,6 +102,7 @@
 <script src="/static/hrv.js"></script>
 <script src="/static/rrhist.js"></script>
 <script src="/static/nonlin.js"></script>
+<script src="/static/chaos.js"></script>
 <script src="/static/review.js"></script>
 </body>
 </html>
