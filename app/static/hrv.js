@@ -136,8 +136,26 @@
       beats: N, dur: t[b - 1] - t[a], bad: nb, badPct: 100 * nb / N, missing: miss,
       meanRR: mean, hr: 60000 / mean, sdnn, rmssd, pnn50: nd ? 100 * n50 / nd : null,
       sd1, sd2, sd12: sd1 != null && sd2 ? sd1 / sd2 : null,
-      alpha1: alpha1(rrc, a, b), alpha2: alpha2(rrc, a, b),
+      alpha1: alpha1(rrc, a, b), alpha2: alpha2(rrc, a, b), dc: dc(cl, a, b),
     };
+  }
+
+  // Deceleration capacity (Bauer et al. 2006, phase-rectified signal
+  // averaging): anchor on every beat longer than the one before (by under 5 %,
+  // larger jumps are artifacts), average the RR around the anchors,
+  // DC = (X0 + X1 - X-1 - X-2) / 4 ms. How strongly the heart slows from beat
+  // to beat (vagal); robust to artifacts and slow trends. Same as
+  // recordings.deceleration_capacity on the server.
+  function dc(cl, a, b) {
+    const { rrc, bad, gap } = cl, s = [0, 0, 0, 0];
+    let n = 0;
+    for (let i = a + 2; i < b - 1; i++) {
+      if (!(rrc[i] > rrc[i - 1] && rrc[i] < 1.05 * rrc[i - 1])) continue;
+      if (bad[i - 2] || bad[i - 1] || bad[i] || bad[i + 1] || gap[i - 1] || gap[i] || gap[i + 1]) continue;
+      for (let k = 0; k < 4; k++) s[k] += rrc[i - 2 + k];
+      n++;
+    }
+    return n < 20 ? null : (s[2] + s[3] - s[1] - s[0]) / (4 * n);
   }
 
   // Values in time windows of winS seconds, one every stepS seconds, centred
@@ -347,7 +365,7 @@
     return out;
   }
 
-  const HRV = { clean, dfaF, slope, alpha1, alpha2, scalesFor, stats, rolling, S1, S2,
+  const HRV = { clean, dc, dfaF, slope, alpha1, alpha2, scalesFor, stats, rolling, S1, S2,
                 qRange, mfScales, mfdfa, legendre, chhabraJensen, rollingMF };
   if (typeof module !== "undefined" && module.exports) module.exports = HRV;
   else root.HRV = HRV;

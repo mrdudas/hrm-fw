@@ -15,6 +15,7 @@ Results are cached per file (path, size, mtime), so the session being
 recorded right now can be reviewed too -- it is re-read when it grew.
 """
 import json
+import math
 import os
 import re
 
@@ -179,3 +180,159 @@ def _activity(path):
         s += a
         ss += a * a
     return {"t": out_t, "v": out_v}
+
+
+# ---------- resting windows (daily summary page, /daily) ----------
+#
+# HRV from a random stretch of a recording says little: movement, posture and
+# talking change it more than recovery or stress do. The daily summary uses
+# only REST_WIN_S windows in which the accelerometer shows the strap lying
+# still -- for the whole window and SETTLE_S before it -- with no lost beats
+# and few corrected ones. Each window gives HR, RMSSD (lnRMSSD), SDNN and the
+# deceleration capacity; the page groups them into days.
+
+REST_WIN_S = 300          # window length (the usual short-term HRV recording)
+REST_STEP_S = 30          # a failed window: try again this much later
+SETTLE_S = 60             # still for this long before the window, too
+REST_G = 0.015            # activity (SD of |a| per 10 s, g) at or below = still
+REST_MAX_BAD = 0.05       # at most this share of corrected beats
+RR_MIN, RR_MAX = 250, 2500
+DEV_MAX = 0.2
+STALE_RUN = 5
+
+_rest_cache = {}
+
+
+def clean(rr, gap):
+    """Artifact / ectopic beats replaced by the local median of good beats --
+    the same rules as HRV.clean in static/hrv.js. Returns (rrc, bad)."""
+    n = len(rr)
+    bad = [not (RR_MIN <= v <= RR_MAX) for v in rr]
+    i = 0
+    while i < n:                                  # stale repeats (old firmware)
+        j = i + 1
+        while j < n and rr[j] == rr[i]:
+            j += 1
+        if j - i >= STALE_RUN:
+            for k in range(i, j):
+                bad[k] = True
+        i = j
+    W, SEARCH = 5, 40
+    med, dev = [0.0] * n, [False] * n
+    for i in range(n):
+        buf, c = [], 0
+        for j in range(i - 1, max(0, i - SEARCH) - 1, -1):
+            if not bad[j]:
+                buf.append(rr[j]); c += 1
+                if c == W:
+                    break
+        c = 0
+        for j in range(i + 1, min(n - 1, i + SEARCH) + 1):
+            if not bad[j]:
+                buf.append(rr[j]); c += 1
+                if c == W:
+                    break
+        if buf:
+            buf.sort()
+            m = buf[len(buf) >> 1]
+            med[i] = m
+            if not bad[i] and abs(rr[i] - m) > DEV_MAX * m:
+                dev[i] = True
+        else:
+            med[i] = min(RR_MAX, max(RR_MIN, rr[i]))
+    bad = [b or d for b, d in zip(bad, dev)]
+    return [med[i] if bad[i] else rr[i] for i in range(n)], bad
+
+
+def deceleration_capacity(rrc, bad, a, b):
+    """Deceleration capacity (Bauer et al. 2006, phase-rectified signal
+    averaging): anchor on every beat that is longer than the one before (by
+    under 5 %, larger jumps are artifacts), average the RR around the anchors,
+    DC = (X0 + X1 - X-1 - X-2) / 4 in ms. It measures how strongly the heart
+    slows from beat to beat -- vagal modulation -- and is robust to artifacts
+    and slow trends. Returns (dc, number of anchors)."""
+    s = [0.0, 0.0, 0.0, 0.0]               # sums of X(-2), X(-1), X(0), X(1)
+    n = 0
+    for i in range(a + 2, b - 1):
+        if not (rrc[i - 1] < rrc[i] < 1.05 * rrc[i - 1]):
+            continue
+        if bad[i - 2] or bad[i - 1] or bad[i] or bad[i + 1]:
+            continue
+        for k in range(4):
+            s[k] += rrc[i - 2 + k]
+        n += 1
+    if n < 20:
+        return None, n
+    return (s[2] + s[3] - s[1] - s[0]) / (4 * n), n
+
+
+def _session_rest(outdir, ses):
+    rr_path = os.path.join(outdir, f"rr_{ses}.csv")
+    acc_path = os.path.join(outdir, f"accel_{ses}.csv")
+    beats = _cached(rr_path, _beats)
+    act = _cached(acc_path, _activity) or {"t": [], "v": []}
+    t, rr, gap = beats["t"], beats["rr"], beats["gap"]
+    n = len(t)
+    out = []
+    if n < 100:
+        return out
+    rrc, bad = clean(rr, gap)
+    have_acc = len(act["t"]) > 0
+    at, av = act["t"], act["v"]
+    import bisect
+    nbins_need = 0.8 * (REST_WIN_S + SETTLE_S) / ACT_BIN_S
+
+    def still(t0, t1):
+        lo, hi = bisect.bisect_left(at, t0), bisect.bisect_left(at, t1)
+        if hi - lo < nbins_need:
+            return None                         # no accelerometer data there
+        return max(av[lo:hi]) <= REST_G
+
+    t0 = t[0]
+    while t0 + REST_WIN_S <= t[-1]:
+        a = bisect.bisect_left(t, t0)
+        b = bisect.bisect_left(t, t0 + REST_WIN_S)
+        st = still(t0 - SETTLE_S, t0 + REST_WIN_S) if have_acc else None
+        ok = (st is not False and b - a >= REST_WIN_S * 0.3
+              and not any(gap[a + 1:b])
+              and t[b - 1] - t[a] >= 0.9 * REST_WIN_S)
+        nb = sum(bad[a:b]) if ok else 0
+        if ok and nb <= REST_MAX_BAD * (b - a):
+            N = b - a
+            mean = sum(rrc[a:b]) / N
+            sdnn = (sum((v - mean) ** 2 for v in rrc[a:b]) / (N - 1)) ** 0.5
+            d2 = sum((rrc[i] - rrc[i - 1]) ** 2 for i in range(a + 1, b))
+            rmssd = (d2 / (N - 1)) ** 0.5
+            dc, anchors = deceleration_capacity(rrc, bad, a, b)
+            out.append({
+                "t": round(t0 + REST_WIN_S / 2, 1), "ses": ses, "beats": N,
+                "hr": round(60000 / mean, 2), "rmssd": round(rmssd, 2),
+                "ln": round(math.log(rmssd), 4) if rmssd > 0 else None,
+                "sdnn": round(sdnn, 2), "dc": None if dc is None else round(dc, 3),
+                "anchors": anchors, "bad": round(nb / N, 4), "still": st,
+            })
+            t0 += REST_WIN_S
+        else:
+            t0 += REST_STEP_S
+    return out
+
+
+def rest_windows(outdir):
+    """All resting windows of all sessions, oldest first (see above). Cached
+    per session on the rr and accel files' size and mtime."""
+    out = []
+    for s in sorted(list_sessions(outdir), key=lambda d: d["id"]):
+        ses = s["id"]
+        keys = []
+        for p in (f"rr_{ses}.csv", f"accel_{ses}.csv"):
+            try:
+                st = os.stat(os.path.join(outdir, p))
+                keys.append((st.st_size, st.st_mtime))
+            except OSError:
+                keys.append(None)
+        hit = _rest_cache.get(ses)
+        if not hit or hit[0] != keys:
+            hit = (keys, _session_rest(outdir, ses))
+            _rest_cache[ses] = hit
+        out.extend(hit[1])
+    return out

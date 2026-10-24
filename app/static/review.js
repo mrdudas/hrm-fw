@@ -357,6 +357,8 @@
       item("SDNN", f(st.sdnn, 1, " ms"), "standard deviation of RR: overall variability"),
       item("RMSSD", f(st.rmssd, 1, " ms"), "root mean square of successive differences: beat-to-beat (vagal) variability"),
       item("pNN50", f(st.pnn50, 1, " %"), "successive RR differences > 50 ms"),
+      item("lnRMSSD", st.rmssd ? f(Math.log(st.rmssd), 2) : "–", "natural log of RMSSD: the usual scale for tracking day to day (see the daily summary)"),
+      item("DC", f(st.dc, 1, " ms"), "deceleration capacity (Bauer 2006, phase-rectified signal averaging): how strongly the heart slows beat to beat, vagal. In 24 h post-infarction recordings > 4.5 ms low risk, < 2.5 ms high risk"),
       item("SD1 / SD2", `${f(st.sd1, 1)} / ${f(st.sd2, 1)}`, "Poincaré: short-term / long-term variability"),
       item("DFA α1", f(st.alpha1, 2), "4–16 beats. ~1 rest (fractal), 0.75 aerobic threshold, 0.5 random, < 0.5 anti-correlated"),
       item("DFA α2", f(st.alpha2, 2), "16–64 beats. ~1 healthy, → 1.5 more regular, lower more random"),
