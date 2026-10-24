@@ -1,7 +1,8 @@
 /* RR histogram of the live session: the distribution of the strap's RR
  * intervals over a chosen time span (1 min .. the whole session), refined
  * with every beat. Bars: % of beats per bin; curve: Gaussian kernel density
- * estimate; vertical line: the latest RR, with its percentile.
+ * estimate; vertical line: the latest RR, with its percentile. render() draws
+ * any distribution (the review page uses it for the selected period).
  *
  * On page load the span is filled from the session being recorded
  * (/api/current -> /api/sessions/<id>), so a reload does not start it over.
@@ -12,6 +13,7 @@
   "use strict";
 
   const RR_MIN = 250, RR_MAX = 2500;          // ms: outside is not a heartbeat
+  const BIN_MS = 10;                          // histogram bar width
   const SPANS = [[60, "1 min"], [300, "5 min"], [900, "15 min"], [1800, "30 min"], [3600, "1 h"],
                  [7200, "2 h"], [14400, "4 h"], [43200, "12 h"], [0, "∞ whole session"]];
   const COL = { bar: "rgba(75,209,160,0.28)", curve: "#4bd1a0", now: "#ff5470", med: "#8b96a5",
@@ -80,12 +82,12 @@
   }
 
   // ---------- drawing ----------
-  function percentile(v) {
+  function percentile(counts, n, v) {
     let below = 0;
     for (let i = RR_MIN; i < v; i++) below += counts[i];
     return n ? 100 * (below + counts[v] / 2) / n : null;
   }
-  function quantile(p) {
+  function quantile(counts, n, p) {
     let c = 0, k = p * n;
     for (let i = RR_MIN; i <= RR_MAX; i++) { c += counts[i]; if (c >= k) return i; }
     return null;
@@ -94,7 +96,16 @@
   function draw() {
     if (!el || !dirty) return;
     dirty = false;
-    const cv = el.canvas, W = cv.clientWidth, H = cv.clientHeight, k = window.devicePixelRatio || 1;
+    render(el.canvas, el.stats, { counts, n, sum, sum2, last,
+      spanS: beats.length > head ? beats[beats.length - 1].t - beats[head].t : 0 });
+  }
+
+  // Draw a distribution: h = { counts (Int32Array, beats per 1 ms), n, sum,
+  // sum2, last (RR to mark, or null), spanS (time covered, for the stats) }
+  function render(cv, stats, h) {
+    const { counts, n, sum, sum2, last } = h;
+    const quantile_ = (p) => quantile(counts, n, p);
+    const W = cv.clientWidth, H = cv.clientHeight, k = window.devicePixelRatio || 1;
     if (cv.width !== Math.round(W * k) || cv.height !== Math.round(H * k)) { cv.width = Math.round(W * k); cv.height = Math.round(H * k); }
     const ctx = cv.getContext("2d");
     ctx.setTransform(k, 0, 0, k, 0, 0);
@@ -102,16 +113,16 @@
     ctx.font = FONT;
     if (n < 2) {
       ctx.fillStyle = COL.text; ctx.fillText("waiting for beats…", 50, H / 2);
-      el.stats.textContent = "";
+      stats.textContent = "";
       return;
     }
     const mean = sum / n, sd = Math.sqrt(Math.max(0, sum2 / n - mean * mean));
-    const q01 = quantile(0.005), q25 = quantile(0.25), med = quantile(0.5), q75 = quantile(0.75), q99 = quantile(0.995);
+    const q01 = quantile_(0.005), q25 = quantile_(0.25), med = quantile_(0.5), q75 = quantile_(0.75), q99 = quantile_(0.995);
     // x range: the bulk of the distribution and the current beat, on 50 ms steps
-    let x0 = Math.min(q01, last) - Math.max(30, sd), x1 = Math.max(q99, last) + Math.max(30, sd);
+    const mark = last == null ? med : last;
+    let x0 = Math.min(q01, mark) - Math.max(30, sd), x1 = Math.max(q99, mark) + Math.max(30, sd);
     x0 = Math.max(RR_MIN, Math.floor(x0 / 50) * 50); x1 = Math.min(RR_MAX, Math.ceil(x1 / 50) * 50);
-    // bin width: finer as beats accumulate
-    const bw = n < 150 ? 20 : n < 1000 ? 10 : 5;
+    const bw = BIN_MS;
     const bins = [];
     for (let b = Math.floor(x0 / bw) * bw; b < x1; b += bw) {
       let c = 0;
@@ -120,14 +131,14 @@
     }
     // kernel density (Silverman's rule), scaled to % per bin like the bars
     const iqr = q75 - q25;
-    const h = Math.max(3, 0.9 * Math.min(sd, iqr > 0 ? iqr / 1.34 : sd) * Math.pow(n, -0.2));
+    const kh = Math.max(3, 0.9 * Math.min(sd, iqr > 0 ? iqr / 1.34 : sd) * Math.pow(n, -0.2));
     const step = Math.max(1, (x1 - x0) / 400), dens = [];
-    const lo = Math.max(RR_MIN, Math.floor(x0 - 4 * h)), hi = Math.min(RR_MAX, Math.ceil(x1 + 4 * h));
+    const lo = Math.max(RR_MIN, Math.floor(x0 - 4 * kh)), hi = Math.min(RR_MAX, Math.ceil(x1 + 4 * kh));
     for (let x = x0; x <= x1; x += step) {
       let s = 0;
-      const a = Math.max(lo, Math.floor(x - 4 * h)), b = Math.min(hi, Math.ceil(x + 4 * h));
-      for (let i = a; i <= b; i++) if (counts[i]) s += counts[i] * Math.exp(-0.5 * ((x - i) / h) ** 2);
-      dens.push([x, 100 * bw * s / (n * h * Math.sqrt(2 * Math.PI))]);
+      const a = Math.max(lo, Math.floor(x - 4 * kh)), b = Math.min(hi, Math.ceil(x + 4 * kh));
+      for (let i = a; i <= b; i++) if (counts[i]) s += counts[i] * Math.exp(-0.5 * ((x - i) / kh) ** 2);
+      dens.push([x, 100 * bw * s / (n * kh * Math.sqrt(2 * Math.PI))]);
     }
     let mode = null, dmax = 0;
     for (const [x, d] of dens) if (d > dmax) { dmax = d; mode = x; }
@@ -165,18 +176,18 @@
     ctx.setLineDash([4, 4]); ctx.strokeStyle = COL.med; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(X(med), T); ctx.lineTo(X(med), T + hh); ctx.stroke();
     ctx.setLineDash([]);
-    const pc = percentile(last);
-    ctx.strokeStyle = COL.now; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(X(last), T); ctx.lineTo(X(last), T + hh); ctx.stroke();
-    const lbl = `${last} ms · ${Math.round(pc)}. percentile`;
-    ctx.font = "600 " + FONT; ctx.fillStyle = COL.now;
-    const tw = ctx.measureText(lbl).width;
-    const right = X(last) + 6 + tw < L + w;
-    ctx.textAlign = right ? "left" : "right";
-    ctx.fillText(lbl, X(last) + (right ? 6 : -6), T + 12);
-
-    const spanTxt = beats.length > head ? fmtDur(beats[beats.length - 1].t - beats[head].t) : "";
-    el.stats.textContent = `${n} beats over ${spanTxt} · mean ${Math.round(mean)} ms · median ${med} · SD ${sd.toFixed(1)} · ` +
+    if (last != null) {
+      const pc = percentile(counts, n, last);
+      ctx.strokeStyle = COL.now; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(X(last), T); ctx.lineTo(X(last), T + hh); ctx.stroke();
+      const lbl = `${last} ms · ${Math.round(pc)}. percentile`;
+      ctx.font = "600 " + FONT; ctx.fillStyle = COL.now;
+      const tw = ctx.measureText(lbl).width;
+      const right = X(last) + 6 + tw < L + w;
+      ctx.textAlign = right ? "left" : "right";
+      ctx.fillText(lbl, X(last) + (right ? 6 : -6), T + 12);
+    }
+    stats.textContent = `${n} beats over ${fmtDur(h.spanS)} · mean ${Math.round(mean)} ms · median ${med} · SD ${sd.toFixed(1)} · ` +
       `IQR ${q25}–${q75} · peak ${Math.round(mode)} ms (${Math.round(60000 / mode)} bpm)`;
   }
 
@@ -231,5 +242,5 @@
     if (!raf) raf = setTimeout(() => { raf = 0; draw(); }, 200);
   }
 
-  root.RRHist = { init, add: addAndDraw };
+  root.RRHist = { init, add: addAndDraw, render, RR_MIN, RR_MAX };
 })(window);

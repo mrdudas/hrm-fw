@@ -262,7 +262,7 @@
 
   function readout(u) {
     const idx = u.cursor.idx;
-    if (idx == null || u.cursor.left < 0) { $("rv-readout").innerHTML = $("rv-readout").dataset.key || "&nbsp;"; return; }
+    if (idx == null || u.cursor.left < 0) { $("rv-readout").innerHTML = $("rv-readout").dataset.key || "&nbsp;"; drawHist(null); return; }
     const tv = u.posToVal(u.cursor.left, "x");
     const b = ses.beats, i = nearest(b.t, tv), r = nearest(roll.t, tv), m = nearest(mf.t, tv);
     const parts = [
@@ -276,6 +276,7 @@
       `corrected ${f(roll.badPct[r], 1)} %`,
     ];
     $("rv-readout").innerHTML = parts.join(" · ");
+    drawHist(b.rr[i]);
   }
 
   // ---------- selection ----------
@@ -336,10 +337,32 @@
     let gaps = 0;
     for (let i = a + 1; i < b; i++) if (ses.beats.gap[i]) gaps++;
     setText("sum-note", gaps ? `⚠ the period spans ${gaps} break${gaps > 1 ? "s" : ""}: the parts are analysed joined together` : "");
+    histSel = { a, b };
+    drawHist(null);
     plotDFA(a, b, m);
     plotSpectrum(m, j);
     plotHq(m);
     plotPoincare(a, b);
+  }
+
+  // ---------- RR distribution of the selected period (rrhist.js) ----------
+  let histSel = null, hist = null;
+  function drawHist(markRR) {
+    if (!histSel) return;
+    const key = `${ses.id}|${histSel.a}|${histSel.b}|${$("rh-normal").checked}`;
+    if (!hist || hist.key !== key) {
+      const counts = new Int32Array(RRHist.RR_MAX + 1), rr = ses.beats.rr, normal = $("rh-normal").checked;
+      let n = 0, s = 0, s2 = 0;
+      for (let i = histSel.a; i < histSel.b; i++) {
+        const v = Math.round(rr[i]);
+        if (v < RRHist.RR_MIN || v > RRHist.RR_MAX || (normal && cl.bad[i])) continue;
+        counts[v]++; n++; s += v; s2 += v * v;
+      }
+      const t = ses.beats.t;
+      hist = { key, counts, n, sum: s, sum2: s2, spanS: t[histSel.b - 1] - t[histSel.a] };
+    }
+    const m = markRR == null ? null : Math.round(markRR);
+    RRHist.render($("rh-canvas"), $("rh-stats"), { ...hist, last: m != null && m >= RRHist.RR_MIN && m <= RRHist.RR_MAX ? m : null });
   }
 
   // ---------- small x-y charts on a plain canvas ----------
@@ -502,6 +525,7 @@
   $("sel-prev").addEventListener("click", () => shift(-1));
   $("sel-next").addEventListener("click", () => shift(1));
   $("sel-all").addEventListener("click", () => ses && setRange(ses.beats.t[0], ses.beats.t[ses.beats.t.length - 1]));
+  $("rh-normal").addEventListener("change", () => drawHist(null));
   for (const id of PARAM_IDS) $(id).addEventListener("change", () => { saveParams(); recompute(); });
   loadList();
 })();
