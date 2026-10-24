@@ -92,7 +92,7 @@ def load_session(outdir, ses):
         raise FileNotFoundError(ses)
     beats = _cached(rr_path, _beats)
     ecto = _cached(os.path.join(outdir, f"ectopy_{ses}.csv"), _ectopy) or []
-    act = _cached(os.path.join(outdir, f"accel_{ses}.csv"), _activity) or {"t": [], "v": []}
+    act = _cached(os.path.join(outdir, f"accel_{ses}.csv"), _activity) or {"t": [], "v": [], "spm": []}
     meta = {}
     try:
         with open(os.path.join(outdir, f"meta_{ses}.json")) as f:
@@ -159,27 +159,43 @@ def _ectopy(path):
 
 
 def _activity(path):
-    """Movement per ACT_BIN_S: standard deviation of |a| in g (0 = still)."""
-    out_t, out_v = [], []
-    cur, n, s, ss = None, 0, 0.0, 0.0
+    """Per ACT_BIN_S: movement = standard deviation of |a| in g (0 = still),
+    and cadence = steps per minute from the strap's step counter (uint16,
+    wraps; a jump back that is not a wrap is a counter reset)."""
+    out_t, out_v, out_spm = [], [], []
+    cur, n, s, ss, st = None, 0, 0.0, 0.0, 0
+    prev = None
     for r in _rows(path):
         try:
             t = float(r[0])
             x, y, z = int(r[1]), int(r[2]), int(r[3])
         except (ValueError, IndexError):
             continue
+        try:
+            steps = int(r[4])
+        except (ValueError, IndexError):
+            steps = None
         b = int(t // ACT_BIN_S)
         if b != cur:
             if n > 5:
                 mean = s / n
                 out_t.append(cur * ACT_BIN_S + ACT_BIN_S / 2)
                 out_v.append(round(max(0.0, ss / n - mean * mean) ** 0.5, 4))
-            cur, n, s, ss = b, 0, 0.0, 0.0
+                out_spm.append(round(st * 60 / ACT_BIN_S, 1))
+            cur, n, s, ss, st = b, 0, 0.0, 0.0, 0
+        if steps is not None:
+            if prev is not None:
+                d = steps - prev
+                if d < 0:
+                    d += 65536
+                if d <= 500:                # more: the counter was reset (strap restart)
+                    st += d
+            prev = steps
         a = (x * x + y * y + z * z) ** 0.5 / ACC_G
         n += 1
         s += a
         ss += a * a
-    return {"t": out_t, "v": out_v}
+    return {"t": out_t, "v": out_v, "spm": out_spm}
 
 
 # ---------- resting windows (daily summary page, /daily) ----------

@@ -105,6 +105,24 @@
     </div>
   </section>
 
+  <!-- exercise: α1 thresholds, fatigue, recovery, load (exlive.js / exercise.js) -->
+  <section class="card wide">
+    <div class="card-head">
+      <h2 title="DFA α1 of the last 2 min (0.75 ≈ aerobic threshold HRVT1, 0.5 ≈ anaerobic HRVT2) and the signs of fatigue over the chosen span: threshold HR / α1 at the same HR or cadence drifting down, HR decoupling from cadence, slower heart rate recovery after bouts. TRIMP: training load. Recomputed every 10 s.">Exercise · fatigue</h2>
+      <span class="hint rh-tools">
+        <span id="ex-now" class="hrv-now"></span>
+        <label class="nowrap" title="How far back the analysis looks">last <select id="ex-span"></select></label>
+        <label class="nowrap" title="Your maximal heart rate">HR max <input id="ex-hrmax" type="number" min="120" max="230" step="1" class="avg-n"></label>
+        <label class="nowrap" title="Your resting heart rate">rest <input id="ex-hrrest" type="number" min="30" max="100" step="1" class="avg-n"></label>
+      </span>
+    </div>
+    <div id="ex-stats" class="ex-verdict">waiting for beats…</div>
+    <div class="ch-grid">
+      <figure><figcaption class="hint" title="α1 of 2-min windows against HR, blue early → orange late; lines: fits of the first and the last third; circles: HRVT1. Tired: the late line lies lower.">α1 against heart rate</figcaption><canvas id="ex-a1" class="chart-ch"></canvas></figure>
+      <figure><figcaption class="hint" title="HR (red), cadence (green bars, steps/min), and the HR drop 60 s after each bout (HRR60)">heart rate · cadence · recovery</figcaption><canvas id="ex-time" class="chart-ch"></canvas></figure>
+    </div>
+  </section>
+
   <!-- RR distribution over a chosen span, refined with every beat -->
   <section class="card wide">
     <div class="card-head">
@@ -192,6 +210,8 @@
 <script src="/static/hrv.js"></script>
 <script src="/static/nonlin.js"></script>
 <script src="/static/chaos.js"></script>
+<script src="/static/exercise.js"></script>
+<script src="/static/exlive.js"></script>
 <script src="/static/rrhist.js"></script>
 <script src="/static/app.js"></script>
 </body>

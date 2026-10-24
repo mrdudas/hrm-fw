@@ -97,6 +97,22 @@
       <figure><figcaption title="Each beat's RR against the next one. SD1 (across the identity line): beat-to-beat variability; SD2 (along it): slower variability.">Poincaré plot</figcaption><canvas id="pl-poin"></canvas></figure>
     </div>
   </section>
+  <section class="card wide">
+    <div class="card-head">
+      <h2 title="How the selected period's exercise tired you: DFA α1 against HR (thresholds and their drift), α1 at the same HR / cadence early and late, HR drift against cadence, heart rate recovery after bouts, and the training load. Select the workout on the charts above.">Exercise · fatigue</h2>
+      <span class="hint rv-tools">
+        <label class="nowrap" title="Your maximal heart rate (TRIMP, zones, recovery detection)">HR max <input id="ex-hrmax" type="number" min="120" max="230" step="1" class="avg-n"></label>
+        <label class="nowrap" title="Your resting heart rate (lying, morning)">HR rest <input id="ex-hrrest" type="number" min="30" max="100" step="1" class="avg-n"></label>
+        <label class="nowrap" title="Banister TRIMP uses a different weighting for women">sex <select id="ex-sex"><option value="m">m</option><option value="f">f</option></select></label>
+      </span>
+    </div>
+    <div id="ex-verdict" class="ex-verdict">&nbsp;</div>
+    <div id="ex-stats" class="rv-stats"></div>
+    <div class="rv-plots ex-plots">
+      <figure><figcaption title="DFA α1 of 2-min windows (every 10 s) against their HR, coloured by time (blue early → orange late). Windows where HR changed more than 15 bpm are left out (transients read high). Lines: linear fits of the first and the last third of the exercise; circles: where they cross α1 = 0.75 (HRVT1, ~ aerobic threshold). Tired: the late line lies lower, its threshold at a lower HR. Grey band: the HR range both thirds cover (α1 at matched HR).">DFA α1 against heart rate</figcaption><canvas id="ex-a1"></canvas></figure>
+      <figure><figcaption title="Heart rate (red) and cadence from the strap's step counter (green bars, right axis, steps/min). Dashed with a number: heart rate recovery, the drop in the 60 s after the end of a bout.">Heart rate · cadence · recovery</figcaption><canvas id="ex-time"></canvas></figure>
+    </div>
+  </section>
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
@@ -104,6 +120,7 @@
 <script src="/static/rrhist.js"></script>
 <script src="/static/nonlin.js"></script>
 <script src="/static/chaos.js"></script>
+<script src="/static/exercise.js"></script>
 <script src="/static/review.js"></script>
 </body>
 </html>
