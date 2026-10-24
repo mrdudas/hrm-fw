@@ -164,12 +164,30 @@
       for (let i = lim; i <= R - ms(10); i++) if (Math.abs(d[i]) < Math.abs(d[on])) on = i;
     }
     if (on == null) return null;
+    // The flat bottom of a Q wave passes the test above too (flat, and near the
+    // baseline when the PQ segment sits above it). If it is reached by a short
+    // downstroke steeper than "flat" (a P wave's tail is far less steep) from a
+    // level clearly higher, the QRS starts where that downstroke begins.
+    {
+      let top = on, steep = 0;
+      for (let k = on; k >= Math.max(lim, on - ms(40)); k--) if (xs[k] > xs[top]) top = k;
+      for (let k = top; k <= on; k++) steep = Math.max(steep, -d[k]);
+      const drop = xs[top] - xs[on];
+      if (top < on && drop > 0.03 * (Rv - xs[top]) && steep > 0.04 * dmax) {
+        let k = top;
+        while (k < on && xs[top] - xs[k] < 0.1 * drop) k++;
+        on = k;
+      }
+    }
     fid.qrsOn = T(on); fid.R = T(R); fid.qrsOff = T(off);
     let q = on, sIdx = R;
     for (let i = on; i <= R; i++) if (xs[i] < xs[q]) q = i;
     for (let i = R; i <= off; i++) if (xs[i] < xs[sIdx]) sIdx = i;
-    const hasQ = xs[q] < -0.03 * Rv && q > on && q < R;
-    const hasS = xs[sIdx] < -0.03 * Rv && sIdx > R && sIdx < off;
+    // Q and S: below the level the QRS starts from (the PQ segment), not below
+    // the TP baseline -- the PQ segment need not be at the TP level
+    const iso = xs[on], dip = 0.03 * (Rv - iso);
+    const hasQ = iso - xs[q] > dip && q > on && q < R;
+    const hasS = iso - xs[sIdx] > dip && sIdx > R && sIdx < off;
     if (hasQ) fid.Q = T(q);
     if (hasS) fid.S = T(sIdx);
 
