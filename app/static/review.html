@@ -70,6 +70,14 @@
       <span id="sum-note" class="hint"></span>
     </div>
     <div id="sum-stats" class="rv-stats"></div>
+    <figure class="rv-hist">
+      <figcaption>
+        <span title="Distribution of the RR intervals in the selected period, 10 ms bars; curve: smoothed density; dashed: median. Hover a chart above: the red line shows that beat and its percentile. Top axis: the same ticks in bpm.">RR distribution</span>
+        <span id="rh-stats" class="hint rh-stats"></span>
+        <label class="hint nowrap" title="Leave out the beats corrected as artifacts / ectopic (marked red on the RR chart)"><input id="rh-normal" type="checkbox"> normal beats only</label>
+      </figcaption>
+      <canvas id="rh-canvas" class="chart-rh"></canvas>
+    </figure>
     <div class="rv-plots">
       <figure><figcaption title="DFA / MFDFA fluctuation function Fq(n) against the box size n, log-log. The slope is the scaling exponent: α1 fitted on 4–16 beats, α2 on 16–64. Lines fanning out with q = multifractal.">Fluctuation function F<sub>q</sub>(n)</figcaption><canvas id="pl-dfa"></canvas></figure>
       <figure><figcaption title="Multifractal spectrum: MFDFA (Legendre transform of h(q)) and Chhabra–Jensen (direct). Width = degree of multifractality, peak position α0 = dominant scaling.">Singularity spectrum f(α)</figcaption><canvas id="pl-spec"></canvas></figure>
@@ -81,6 +89,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
 <script src="/static/hrv.js"></script>
+<script src="/static/rrhist.js"></script>
 <script src="/static/review.js"></script>
 </body>
 </html>

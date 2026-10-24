@@ -189,3 +189,5 @@ html{background:var(--bg); color-scheme:dark}
 .rh-tools{display:flex; align-items:center; gap:12px; flex-wrap:wrap; justify-content:flex-end}
 .rh-tools select{background:var(--panel-2); color:var(--text); border:1px solid var(--border); border-radius:6px; font:inherit; font-size:12px; height:22px}
 .rh-stats{font-variant-numeric:tabular-nums}
+.rv-hist{margin:0 0 14px; background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:8px}
+.rv-hist figcaption{display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--muted); margin:0 0 4px 4px}
