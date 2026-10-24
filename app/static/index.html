@@ -104,6 +104,19 @@
     </div>
   </section>
 
+  <!-- RR distribution over a chosen span, refined with every beat -->
+  <section class="card wide">
+    <div class="card-head">
+      <h2 title="Distribution of the RR intervals. Bars: % of beats per bin; curve: smoothed density; red line: the latest beat (with its percentile); dashed: median. Top axis: the same ticks in bpm.">RR distribution</h2>
+      <span class="hint rh-tools">
+        <span id="rh-stats" class="rh-stats"></span>
+        <label class="nowrap" title="How far back the beats are collected">last <select id="rh-span"></select></label>
+        <label class="nowrap" title="Leave out beats more than 20 % off the median of the previous ones (ectopic beats, artifacts)"><input id="rh-normal" type="checkbox"> normal beats only</label>
+      </span>
+    </div>
+    <canvas id="rh-canvas" class="chart-rh"></canvas>
+  </section>
+
   <!-- signal-averaged beat (ensemble average, R-aligned) -->
   <section class="card wide">
     <div class="card-head">
@@ -162,6 +175,7 @@
 <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
 <script src="/static/clock.js"></script>
 <script src="/static/qrst.js"></script>
+<script src="/static/rrhist.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
