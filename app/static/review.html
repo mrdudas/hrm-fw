@@ -78,6 +78,13 @@
       </figcaption>
       <canvas id="rh-canvas" class="chart-rh"></canvas>
     </figure>
+    <figure class="rv-hist">
+      <figcaption>
+        <span title="Lyapunov divergence curve (Rosenstein): how fast two similar stretches of RR intervals drift apart, beat by beat. Flat and low: periodic. Rising from low, then levelling off: deterministic (initial slope = largest Lyapunov exponent λ₁). At the top from the first beat: random. Compared with two surrogates of the same values: shuffled (no memory) and phase-randomised (same spectrum = correlated noise; band ±2 SD). Below the blue band: structure beyond linear correlations. DET: share of recurrences on diagonal lines. Slow heart-rate drifts can also look 'deterministic'. Up to 2000 beats from the middle of the period.">Determinism · Lyapunov divergence</span>
+        <span id="nl-stats" class="hint nl-stats"></span>
+      </figcaption>
+      <canvas id="nl-canvas" class="chart-nl"></canvas>
+    </figure>
     <div class="rv-plots">
       <figure><figcaption title="DFA / MFDFA fluctuation function Fq(n) against the box size n, log-log. The slope is the scaling exponent: α1 fitted on 4–16 beats, α2 on 16–64. Lines fanning out with q = multifractal.">Fluctuation function F<sub>q</sub>(n)</figcaption><canvas id="pl-dfa"></canvas></figure>
       <figure><figcaption title="Multifractal spectrum: MFDFA (Legendre transform of h(q)) and Chhabra–Jensen (direct). Width = degree of multifractality, peak position α0 = dominant scaling.">Singularity spectrum f(α)</figcaption><canvas id="pl-spec"></canvas></figure>
@@ -90,6 +97,7 @@
 <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
 <script src="/static/hrv.js"></script>
 <script src="/static/rrhist.js"></script>
+<script src="/static/nonlin.js"></script>
 <script src="/static/review.js"></script>
 </body>
 </html>

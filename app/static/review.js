@@ -339,6 +339,7 @@
     setText("sum-note", gaps ? `⚠ the period spans ${gaps} break${gaps > 1 ? "s" : ""}: the parts are analysed joined together` : "");
     histSel = { a, b };
     drawHist(null);
+    nonlin(a, b);
     plotDFA(a, b, m);
     plotSpectrum(m, j);
     plotHq(m);
@@ -363,6 +364,18 @@
     }
     const m = markRR == null ? null : Math.round(markRR);
     RRHist.render($("rh-canvas"), $("rh-stats"), { ...hist, last: m != null && m >= RRHist.RR_MIN && m <= RRHist.RR_MAX ? m : null });
+  }
+
+  // ---------- determinism of the selected period (nonlin.js, in a worker) ----------
+  const NL_MAX = 2000;
+  let nlRes = null;
+  function nonlin(a, b) {
+    let i0 = a, i1 = b;
+    if (b - a > NL_MAX) { i0 = a + Math.floor((b - a - NL_MAX) / 2); i1 = i0 + NL_MAX; }
+    if (i1 - i0 < NonLin.N_MIN) { nlRes = null; NonLin.render($("nl-canvas"), $("nl-stats"), null); return; }
+    setText("nl-stats", "computing…");
+    const note = i1 - i0 < b - a ? `the middle ${i1 - i0} of ${b - a} beats` : "";
+    NonLin.analyzeAsync(cl.rrc.slice(i0, i1), NL_MAX, (r) => { nlRes = r; NonLin.render($("nl-canvas"), $("nl-stats"), r, note); });
   }
 
   // ---------- small x-y charts on a plain canvas ----------
