@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>HRM Raw RR — Daily</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="review">
+<header>
+  <div class="brand">
+    <span class="logo">&#9829;</span>
+    <span>HRM Raw RR — Daily</span>
+  </div>
+  <div class="header-right">
+    <a class="tool-btn nav-link" href="/review">Recordings</a>
+    <a class="tool-btn nav-link" href="/">Live dashboard</a>
+  </div>
+</header>
+
+<main>
+  <section class="card wide">
+    <div class="card-head">
+      <h2 title="Only 5-minute windows in which the strap lay still (accelerometer) for the whole window and the minute before, with no lost beats and at most 5 % corrected beats. One value per day: the median of its windows.">Resting HRV, day by day</h2>
+      <span class="hint rv-tools">
+        <label class="nowrap" title="Which resting windows make up a day. Night: 21:00–09:00, counted to the morning's date (sleep: the most comparable condition). Daytime: 09:00–21:00. All: both, a day running from 18:00 to 18:00.">windows
+          <select id="d-mode"><option value="night">night (21–09)</option><option value="day">daytime (09–21)</option><option value="all">all</option></select></label>
+        <label class="nowrap" title="Recordings without accelerometer data (older firmware) cannot be checked for movement; their windows are shown hollow and are left out when this is ticked"><input id="d-acc" type="checkbox"> movement-checked only</label>
+        <label class="nowrap" title="A day needs at least this many resting windows to count">min windows <input id="d-min" type="number" min="1" max="50" step="1" value="2" class="avg-n"></label>
+        <span id="d-info"></span>
+      </span>
+    </div>
+    <div id="d-readout" class="rv-readout">&nbsp;</div>
+    <canvas id="c-ln" class="chart-day"></canvas>
+    <canvas id="c-dc" class="chart-day"></canvas>
+    <canvas id="c-hr" class="chart-day"></canvas>
+    <canvas id="c-n" class="chart-day short"></canvas>
+    <p class="hint">
+      Dots: the single 5-minute windows (spread over the day's slot in time order; click one to open it on the review page).
+      Large dot: the day's median — outside the normal range, <span class="d-key worse">the unfavourable</span> or <span class="d-key better">the favourable</span> way (for HR: higher is unfavourable).
+      Line: 7-day rolling mean. Band: normal range = mean ± 0.5 SD of the preceding 30 days (the smallest worthwhile change, Plews et al.); from 5 days of data.
+      A 7-day mean leaving the band is the signal worth acting on; single days scatter.
+    </p>
+  </section>
+
+  <section class="card wide">
+    <div class="card-head">
+      <h2>Days</h2>
+      <span class="hint">newest first · click a row: its first window on the review page</span>
+    </div>
+    <div class="table-wrap"><table id="d-table" class="d-table"></table></div>
+  </section>
+</main>
+
+<script src="/static/daily.js"></script>
+</body>
+</html>

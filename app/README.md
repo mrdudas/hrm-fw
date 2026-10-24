@@ -172,6 +172,29 @@ log-log plot, the f(α) spectra of both methods, h(q) and the Poincaré plot.
 Chhabra–Jensen needs a positive measure: |ΔRR| (default) or the RR intervals
 (those are nearly uniform, so the spectrum comes out very narrow).
 
+## Daily summary: resting HRV against your own baseline
+
+`http://localhost:8765/daily` (also linked from the dashboard and the review
+page). HRV from an arbitrary stretch says little — movement, posture and
+talking move it more than recovery does — so this page uses only **resting
+windows**: 5 minutes in which the accelerometer shows the strap still (and
+the minute before), with no lost beats and at most 5 % corrected beats.
+Recordings without accelerometer data (older firmware) are included but shown
+hollow; "movement-checked only" leaves them out.
+
+Per window: HR, RMSSD / **lnRMSSD**, SDNN and the **deceleration capacity**
+(DC, Bauer 2006: phase-rectified signal averaging of the beats where the
+heart slows; vagal, robust to artifacts and trends). Per day (night 21–09 by
+default, counted to the morning's date): the median of its windows (DC pooled
+over all anchors), a 7-day rolling mean, and the normal range = mean ± 0.5 SD
+of the preceding 30 days (from 5 days of data). Days outside it are coloured;
+the 7-day mean leaving the band is the meaningful signal. Click a window or a
+table row to open it on the review page, which also shows lnRMSSD and DC for
+any selected period.
+
+The windows are found on the server (`recordings.rest_windows`), cached per
+session; the first load reads all accelerometer files and takes a few seconds.
+
 ## Packaging (optional, later)
 
 Can be bundled into a single executable with PyInstaller, e.g.:
@@ -195,8 +218,8 @@ app/
 ├── hub.py            # fans events out to CSV + all WebSocket clients
 ├── ble_source.py     # scan / connect / subscribe / auto-reconnect (bleak)
 ├── demo_source.py    # synthetic data generator (--demo)
-├── webserver.py      # aiohttp: serves the dashboard + /ws, the review page + /api/sessions
-├── recordings.py     # reads saved sessions back for the review page (beats, lost-beat breaks)
+├── webserver.py      # aiohttp: serves the dashboard + /ws, the review page + /api/sessions, /daily + /api/rest
+├── recordings.py     # reads saved sessions back for the review page (beats, lost-beat breaks), resting windows for /daily
 ├── static/           # index.html + app.js + style.css (uPlot via CDN);
 │                     # review.html + review.js + hrv.js (HRV / DFA / MFDFA / Chhabra–Jensen)
 ├── recordings/       # CSV output (created on first run)

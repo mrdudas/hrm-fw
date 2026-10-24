@@ -206,3 +206,18 @@ html{background:var(--bg); color-scheme:dark}
 .nl-noise{color:#5aa2ff} .nl-chaos{color:#ffb454}
 .rv-progress{color:var(--warn)}
 .rv-stat small{font-size:11px; color:var(--muted); font-weight:400}
+
+/* daily summary page */
+.chart-day{width:100%; height:170px; display:block; margin-bottom:6px}
+.chart-day.short{height:78px}
+.d-key{font-style:normal; font-weight:600}
+.d-key.worse{color:var(--warn)}
+.d-key.better{color:var(--x)}
+.table-wrap{overflow-x:auto}
+.d-table{border-collapse:collapse; width:100%; font-size:12px; font-variant-numeric:tabular-nums}
+.d-table th{color:var(--muted); font-weight:500; text-align:right; padding:4px 8px; border-bottom:1px solid var(--border)}
+.d-table td{text-align:right; padding:4px 8px; border-bottom:1px solid var(--grid)}
+.d-table th:first-child, .d-table td:first-child{text-align:left}
+.d-table tbody tr{cursor:pointer}
+.d-table tbody tr:hover{background:var(--panel-2)}
+.d-table tr.d-few{opacity:.45}
