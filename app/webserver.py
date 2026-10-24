@@ -22,6 +22,7 @@ def make_app(hub, log=print):
     app.router.add_get("/", _index)
     app.router.add_get("/ws", _ws_handler)
     app.router.add_get("/review", _review)
+    app.router.add_get("/api/current", _current)
     app.router.add_get("/api/sessions", _sessions)
     app.router.add_get("/api/sessions/{id}", _session)
     app.router.add_static("/static/", STATIC_DIR, name="static")
@@ -54,6 +55,11 @@ async def _review(request):
 
 def _outdir(request):
     return request.app["hub"].recorder.outdir
+
+
+async def _current(request):
+    """The session being recorded now (the live RR histogram fills from it)."""
+    return web.json_response({"id": request.app["hub"].recorder.session})
 
 
 async def _sessions(request):

@@ -287,6 +287,7 @@
       setText("rr", Math.round(lastRr));
       stream("rr", msg.rr.slice());
       hrvAdd(msg.rr);
+      if (!msg.replay) RRHist.add(msg.t, msg.rr);
     }
   }
 
@@ -1773,6 +1774,7 @@
     makeStrip();
     makeAvg();
     makeHrvTrend();
+    RRHist.init({ canvas: "rh-canvas", stats: "rh-stats", span: "rh-span", normal: "rh-normal" });
     initZoom();
     initPauseMeasure();
     initAvgTools();
