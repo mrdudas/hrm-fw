@@ -98,8 +98,28 @@
     mf = HRV.rollingMF(t, cl, { winS: P.mfwin, stepS: Math.max(15, P.mfwin / 10), qMax: P.q, measure: P.cj, maxBad: P.bad });
     console.log(`[review] rolling analysis ${(performance.now() - T).toFixed(0)} ms`);
     $("rv-busy").hidden = true;
+    ch = null;
     drawLanes();
     setRange(sel[0], sel[1]);
+    rollChaos();
+  }
+
+  // noise titration + entropy plane in MF windows: slow, so in a worker,
+  // the lanes fill in as it goes
+  let ch = null;
+  function rollChaos() {
+    const b = ses.beats;
+    setText("ch-progress", "chaos analysis… 0 %");
+    Chaos.inWorker("roll", {
+      kind: "rollChaos", t: Float64Array.from(b.t), rrc: cl.rrc, bad: cl.bad, gap: cl.gap,
+      o: { winS: P.mfwin, stepS: Math.max(60, P.mfwin / 5), maxBad: P.bad },
+    }, (r) => { ch = r; updateChaosLanes(); setText("ch-progress", ""); summaryChaosPts(); },
+    (part, frac) => { ch = part; updateChaosLanes(); setText("ch-progress", `chaos analysis… ${Math.round(100 * frac)} %`); });
+  }
+  function updateChaosLanes() {
+    if (!ch || !laneNL) return;
+    laneNL.setData([ch.t, ch.nl], false); laneHC.setData([ch.t, ch.dC], false);
+    if (sel) for (const u of [laneNL, laneHC]) u.setScale("x", { min: sel[0], max: sel[1] });
   }
 
   // ---------- overview ----------
@@ -147,7 +167,7 @@
   }
 
   // ---------- lanes over time ----------
-  let lanes = [];
+  let lanes = [], laneNL = null, laneHC = null;
   const SYNC = uPlot.sync("rv");
   function lane(id, h, label, xs, series, opts = {}) {
     const bottom = !!opts.bottom;
@@ -227,6 +247,16 @@
       { stroke: COL.y, width: 1.5, points: { show: false } },
       { stroke: COL.x, width: 1.5, points: { show: false } },
     ], { data: [mf.mfA0, mf.cjA0] });
+    const cx = ch ? ch.t : [b.t[0], b.t[b.t.length - 1]], cn = (k) => (ch ? ch[k] : [null, null]);
+    laneNL = lane("ln-nl", 120, "noise limit %", cx, [
+      { stroke: COL.y, width: 1.5, points: { show: true, size: 3, fill: COL.y, stroke: COL.y } },
+    ], { data: [cn("nl")], range: (u, lo, hi) => [0, Math.max(20, (hi ?? 20) * 1.1)],
+         draw: (u) => { if (ch) return; u.ctx.save(); u.ctx.font = FONT; u.ctx.fillStyle = COL.text; u.ctx.textAlign = "left";
+                        u.ctx.fillText("noise titration running…", u.bbox.left + 8 * dpr(), u.bbox.top + 16 * dpr()); u.ctx.restore(); } });
+    laneHC = lane("ln-hc", 120, "C − noise", cx, [
+      { stroke: COL.x, width: 1.5, points: { show: true, size: 3, fill: COL.x, stroke: COL.x } },
+    ], { data: [cn("dC")], range: (u, lo, hi) => { const m = Math.max(0.02, Math.abs(lo ?? 0), Math.abs(hi ?? 0)) * 1.15; return [-m, m]; },
+         draw: refLines([[0, "1/f^k noise curve"]]) });
     lane("ln-hrv", 130, "ms", roll.t, [
       { stroke: COL.ecg, width: 1.5, points: { show: false } },
       { stroke: COL.hr, width: 1.2, points: { show: false } },
@@ -248,7 +278,7 @@
     const k = (c, s) => `<span class="rv-key"><i style="background:${c}"></i>${s}</span>`;
     $("rv-readout").dataset.key =
       k(COL.ecg, "RR / α1 / RMSSD") + k(COL.z, "α2") + k(COL.y, "MFDFA") + k(COL.x, "Chhabra–Jensen") +
-      k(COL.hr, "SDNN") + k(COL.pvc, "corrected beat · PVC") + k(COL.pac, "PAC");
+      k(COL.hr, "SDNN") + k(COL.y, "noise limit") + k(COL.x, "complexity above noise") + k(COL.pvc, "corrected beat · PVC") + k(COL.pac, "PAC");
     $("rv-readout").innerHTML = $("rv-readout").dataset.key;
   }
 
@@ -271,6 +301,7 @@
       `α1 ${f(roll.a1[r], 2)}`, `α2 ${f(roll.a2[r], 2)}`,
       `Δα MFDFA ${f(mf.mfW[m], 2)} · CJ ${f(mf.cjW[m], 2)}`,
       `α0 ${f(mf.mfA0[m], 2)} · ${f(mf.cjA0[m], 2)}`,
+      ...(ch && ch.t.length ? (() => { const c = nearest(ch.t, tv); return [`noise limit ${f(ch.nl[c], 0, " %")}`, `H ${f(ch.H[c], 3)} · C ${f(ch.C[c], 3)} (${f(ch.dC[c], 3)} vs noise)`]; })() : []),
       `RMSSD ${f(roll.rmssd[r], 1)} · SDNN ${f(roll.sdnn[r], 1)} ms`,
       `HR ${f(roll.hr[r])}`,
       `corrected ${f(roll.badPct[r], 1)} %`,
@@ -333,7 +364,12 @@
       item("MFDFA α0", m ? f(m.alpha0, 2) : "–", "where the MFDFA spectrum peaks"),
       item("CJ Δα", j ? f(j.width, 2) : "–", "width of the Chhabra–Jensen spectrum (" + (P.cj === "drr" ? "measure |ΔRR|" : "measure RR") + ")"),
       item("CJ α0", j ? f(j.alpha0, 2) : "–", "where the Chhabra–Jensen spectrum peaks"),
+      `<div class="rv-stat" id="st-nl" title="Noise titration (Poon & Barahona): white noise (% of the RR SD) needed to hide the nonlinear determinism; 0 = no chaos detected">` +
+        `<span>noise limit</span><b>…</b></div>`,
+      `<div class="rv-stat" id="st-ce" title="Complexity–entropy plane: H (entropy of the 4-beat order patterns) and C (complexity); Δ = C above the correlated-noise curve">` +
+        `<span>H · C (Δ vs noise)</span><b>…</b></div>`,
     ].join("");
+    selChaos(a, b);
     let gaps = 0;
     for (let i = a + 1; i < b; i++) if (ses.beats.gap[i]) gaps++;
     setText("sum-note", gaps ? `⚠ the period spans ${gaps} break${gaps > 1 ? "s" : ""}: the parts are analysed joined together` : "");
@@ -364,6 +400,36 @@
     }
     const m = markRR == null ? null : Math.round(markRR);
     RRHist.render($("rh-canvas"), $("rh-stats"), { ...hist, last: m != null && m >= RRHist.RR_MIN && m <= RRHist.RR_MAX ? m : null });
+  }
+
+  // ---------- chaos or noise in the selected period (chaos.js, in a worker) ----------
+  let chSel = null, chSelRange = null;
+  function selChaos(a, b) {
+    let i0 = a, i1 = b;
+    if (b - a > NL_MAX) { i0 = a + Math.floor((b - a - NL_MAX) / 2); i1 = i0 + NL_MAX; }
+    chSel = null; chSelRange = [a, b];
+    summaryChaosPts();
+    Chaos.inWorker("sel", { kind: "chaos", rr: cl.rrc.slice(i0, i1) }, (r) => {
+      chSel = r;
+      const set = (id, html, cls) => { const e = $(id); if (e) { const bb = e.querySelector("b"); bb.innerHTML = html; bb.className = cls || ""; } };
+      if (!r || !r.ti) { set("st-nl", "–"); set("st-ce", "–"); summaryChaosPts(); return; }
+      const ti = r.ti, pl = r.pl;
+      set("st-nl", ti.periodic ? "periodic" : `${ti.nl.toFixed(0)} %`, ti.periodic ? "" : "nl-" + (ti.detected ? "chaos" : "noise"));
+      set("st-ce", pl ? `${pl.H.toFixed(2)} · ${pl.C.toFixed(3)} <small>(${pl.dC >= 0 ? "+" : ""}${pl.dC.toFixed(3)})</small>` : "–");
+      const st = $("st-nl"); if (st) st.title = r.verdict.text + (i1 - i0 < b - a ? ` (the middle ${i1 - i0} of ${b - a} beats)` : "");
+      summaryChaosPts();
+    });
+  }
+  // the plane: the rolling windows inside the selection + the whole selection
+  function summaryChaosPts() {
+    const cv = $("pl-ce");
+    if (!cv || !sel) return;
+    const pts = [];
+    if (ch) {
+      const inSel = ch.t.map((tt, i) => i).filter((i) => ch.t[i] >= sel[0] && ch.t[i] <= sel[1] && ch.H[i] != null);
+      inSel.forEach((i, k) => pts.push({ H: ch.H[i], C: ch.C[i], w: (k + 1) / inSel.length }));
+    }
+    Chaos.renderPlane(cv, pts, chSel && chSel.pl);
   }
 
   // ---------- determinism of the selected period (nonlin.js, in a worker) ----------

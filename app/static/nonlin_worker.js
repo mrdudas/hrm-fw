@@ -1,9 +1,16 @@
-/* Runs NonLin.analyze off the main thread (it takes 0.1-1 s): post
- * { id, rr, maxN }, get back { id, res }. */
-importScripts("/static/nonlin.js");
+/* Heavy analyses off the main thread (0.1 s .. tens of seconds).
+ *   { id, rr, maxN }                       -> { id, res }  Lyapunov panel (nonlin.js)
+ *   { id, kind: "chaos", rr }              -> { id, res }  noise titration + entropy plane (chaos.js)
+ *   { id, kind: "rollChaos", t, rrc, bad, gap, o } -> { id, res, part, frac } ... { id, res } */
+importScripts("/static/nonlin.js", "/static/chaos.js");
 onmessage = (e) => {
-  const { id, rr, maxN } = e.data;
+  const m = e.data;
   let res = null;
-  try { res = NonLin.analyze(rr, 12345, maxN); } catch (err) { res = null; }
-  postMessage({ id, res });
+  try {
+    if (m.kind === "chaos") res = Chaos.analyze(Array.from(m.rr));
+    else if (m.kind === "rollChaos")
+      res = Chaos.rolling(m.t, m.rrc, m.bad, m.gap, m.o, (part, frac) => postMessage({ id: m.id, res: part, part: true, frac }));
+    else res = NonLin.analyze(m.rr, 12345, m.maxN);
+  } catch (err) { res = null; }
+  postMessage({ id: m.id, res });
 };

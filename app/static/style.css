@@ -197,3 +197,12 @@ html{background:var(--bg); color-scheme:dark}
 .nl-head{margin-top:14px; gap:16px; flex-wrap:wrap; justify-content:flex-start}
 .nl-stats{font-variant-numeric:tabular-nums}
 .nl-random{color:#8b96a5} .nl-linear{color:#5aa2ff} .nl-nonlinear{color:#4bd1a0} .nl-periodic{color:#ffb454}
+
+/* chaos or noise panel */
+.ch-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:14px}
+.ch-grid figure{margin:0}
+.ch-grid figcaption{margin:0 0 4px 44px}
+.chart-ch{width:100%; height:280px; display:block}
+.nl-noise{color:#5aa2ff} .nl-chaos{color:#ffb454}
+.rv-progress{color:var(--warn)}
+.rv-stat small{font-size:11px; color:var(--muted); font-weight:400}
