@@ -127,6 +127,80 @@ static void hp_recompute(void)
 	g_hp_a  = expf(k * ((float)g_hp_f0_x10 * 0.1f));
 	g_hpf_c = expf(k * ((float)g_hpf_x10   * 0.1f));
 }
+
+/* ---- Persist the CAP_CFG (a1b20005) HP-comp settings across reboot ---------
+ * g_hp_* live only in RAM, and wake from System OFF is a reboot, so without this
+ * every sleep cycle (and every reflash/battery swap) drops the user's tuning back
+ * to the compile-time defaults. We store a small record in the dedicated 4 KB
+ * "storage" flash page (0x2f000, outside slot0). The nRF SoC flash driver
+ * radio-syncs the write so it can't starve the BLE link; we still defer the save
+ * to the system workqueue so the GATT write returns immediately, and we only
+ * rewrite when the bytes actually change (flash wear). */
+#include <zephyr/storage/flash_map.h>
+#define HPCFG_MAGIC0  'H'
+#define HPCFG_MAGIC1  'P'
+#define HPCFG_VER     1
+#define HPCFG_RECLEN  10              /* magic0, magic1, ver, flags, fc(2), f0(2), hpf(2) */
+#define HP_FLAG_RESET 0x80            /* a CAP_CFG write with this flag bit set -> restore defaults */
+
+static void hpcfg_pack(uint8_t *r)
+{
+	r[0] = HPCFG_MAGIC0; r[1] = HPCFG_MAGIC1; r[2] = HPCFG_VER;
+	r[3] = g_hp_flags;
+	sys_put_le16(g_hp_fc_x10, &r[4]);
+	sys_put_le16(g_hp_f0_x10, &r[6]);
+	sys_put_le16(g_hpf_x10,   &r[8]);
+}
+
+static void hpcfg_defaults(void)
+{
+	g_hp_flags  = HP_FLAG_SHELF | HP_FLAG_HPF;
+	g_hp_fc_x10 = HP_COMP_FC_X10;
+	g_hp_f0_x10 = HP_COMP_F0_X10;
+	g_hpf_x10   = HP_HPF_X10;
+}
+
+static void hpcfg_save_fn(struct k_work *w)
+{
+	const struct flash_area *fa;
+	if (flash_area_open(FIXED_PARTITION_ID(storage_partition), &fa) != 0) return;
+	uint8_t cur[HPCFG_RECLEN], want[HPCFG_RECLEN];
+	hpcfg_pack(want);
+	if (flash_area_read(fa, 0, cur, HPCFG_RECLEN) == 0 &&
+	    memcmp(cur, want, HPCFG_RECLEN) == 0) {    /* unchanged -> skip, spare flash */
+		flash_area_close(fa);
+		return;
+	}
+	if (flash_area_erase(fa, 0, fa->fa_size) == 0)
+		(void)flash_area_write(fa, 0, want, HPCFG_RECLEN);
+	flash_area_close(fa);
+}
+static K_WORK_DEFINE(hpcfg_save_work, hpcfg_save_fn);
+
+/* Load at boot (before sampling). Missing/bad record -> keep the defaults. */
+static void hpcfg_load(void)
+{
+	const struct flash_area *fa;
+	if (flash_area_open(FIXED_PARTITION_ID(storage_partition), &fa) != 0) return;
+	uint8_t r[HPCFG_RECLEN];
+	int rc = flash_area_read(fa, 0, r, HPCFG_RECLEN);
+	flash_area_close(fa);
+	if (rc != 0) return;
+	if (r[0] != HPCFG_MAGIC0 || r[1] != HPCFG_MAGIC1 || r[2] != HPCFG_VER) return;
+	uint8_t  flags = r[3] & (HP_FLAG_SHELF | HP_FLAG_HPF);
+	uint16_t fc = sys_get_le16(&r[4]);
+	uint16_t f0 = sys_get_le16(&r[6]);
+	uint16_t hf = sys_get_le16(&r[8]);
+	/* re-apply the same clamps as write_cap_cfg, in case the record is from an
+	 * older/looser build or got corrupted */
+	if (fc < 1)    fc = 1;
+	if (fc > 2000) fc = 2000;
+	if (f0 < 1)    f0 = 1;
+	if (f0 > fc)   f0 = fc;
+	if (hf > 2000) hf = 2000;
+	g_hp_flags = flags; g_hp_fc_x10 = fc; g_hp_f0_x10 = f0; g_hpf_x10 = hf;
+	hp_recompute();
+}
 #endif
 
 /* 8-22 Hz band-pass (Butterworth order 2 -> 4th order section) @500 Hz */
@@ -427,11 +501,16 @@ static ssize_t write_cap_cfg(struct bt_conn *c, const struct bt_gatt_attr *a,
 	if (f0 < 1)    f0 = 1;
 	if (f0 > fc)   f0 = fc;          /* pole at/below the zero (no negative boost) */
 	if (hf > 2000) hf = 2000;        /* hf may be set with the bit cleared to bypass */
-	g_hp_flags  = p[0] & (HP_FLAG_SHELF | HP_FLAG_HPF);
-	g_hp_fc_x10 = fc;
-	g_hp_f0_x10 = f0;
-	g_hpf_x10   = hf;
+	if (p[0] & HP_FLAG_RESET) {      /* reset-to-defaults sentinel (GATT format unchanged) */
+		hpcfg_defaults();
+	} else {
+		g_hp_flags  = p[0] & (HP_FLAG_SHELF | HP_FLAG_HPF);
+		g_hp_fc_x10 = fc;
+		g_hp_f0_x10 = f0;
+		g_hpf_x10   = hf;
+	}
 	hp_recompute();
+	k_work_submit(&hpcfg_save_work);   /* persist (off-thread, only if changed) */
 	return len;
 }
 #endif
@@ -1153,6 +1232,10 @@ int main(void)
 		return -1;
 	}
 	battery_update_mv(adc_read_vdd_mv());   /* one-shot VDD read per wake */
+
+#if HP_COMP
+	hpcfg_load();   /* restore persisted HP-comp tuning before sampling (defaults if none) */
+#endif
 
 	dev_name_init();   /* build "Govinda-XXXX" into dev_name + ad[2] before advertising */
 	if (bt_enable(bt_ready)) {
