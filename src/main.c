@@ -144,7 +144,10 @@ static void hp_recompute(void)
 #define HPCFG_MAGIC0  'H'
 #define HPCFG_MAGIC1  'P'
 #define HPCFG_VER     1
-#define HPCFG_RECLEN  10              /* magic0, magic1, ver, flags, fc(2), f0(2), hpf(2) */
+/* 10 bytes of payload (magic0, magic1, ver, flags, fc(2), f0(2), hpf(2)) padded
+ * to 12: the nRF NVMC write-block size is 4 B and flash_area_write rejects a
+ * length that is not a multiple of it (-EINVAL), so the record must be 4-aligned. */
+#define HPCFG_RECLEN  12
 #define HP_FLAG_RESET 0x80            /* a CAP_CFG write with this flag bit set -> restore defaults */
 
 static void hpcfg_pack(uint8_t *r)
@@ -154,6 +157,7 @@ static void hpcfg_pack(uint8_t *r)
 	sys_put_le16(g_hp_fc_x10, &r[4]);
 	sys_put_le16(g_hp_f0_x10, &r[6]);
 	sys_put_le16(g_hpf_x10,   &r[8]);
+	r[10] = 0; r[11] = 0;            /* pad to the 4 B NVMC write-block size */
 }
 
 static void hpcfg_defaults(void)
