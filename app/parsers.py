@@ -66,11 +66,20 @@ def parse_hp_cfg(b: bytes) -> dict:
             "fc_hz": fc / 10, "f0_hz": f0 / 10, "hpf_hz": hpf / 10}
 
 
+# the strap's compile-time defaults (src/main.c HP_COMP_FC_X10 etc.)
+HP_CFG_DEFAULTS = {"shelf": True, "hpf": True, "fc_hz": 5.0, "f0_hz": 0.5, "hpf_hz": 0.5}
+HP_CFG_RESET = 0x80     # flags bit7 in a write: back to the defaults (firmware that persists the setting)
+
+
 def build_hp_cfg(d: dict) -> bytes:
-    """Inverse of parse_hp_cfg (the strap clamps the corners to its own limits)."""
+    """Inverse of parse_hp_cfg (the strap clamps the corners to its own limits).
+    reset=True: set the reset bit and send the defaults as well, so firmware
+    from before the reset bit (which masks it off) ends up on the defaults too."""
+    if d.get("reset"):
+        d = {**HP_CFG_DEFAULTS, "reset": True}
     x10 = lambda v: max(0, min(65535, round(float(v) * 10)))
-    return struct.pack("<BHHH", (1 if d.get("shelf") else 0) | (2 if d.get("hpf") else 0),
-                       x10(d["fc_hz"]), x10(d["f0_hz"]), x10(d["hpf_hz"]))
+    flags = (1 if d.get("shelf") else 0) | (2 if d.get("hpf") else 0) | (HP_CFG_RESET if d.get("reset") else 0)
+    return struct.pack("<BHHH", flags, x10(d["fc_hz"]), x10(d["f0_hz"]), x10(d["hpf_hz"]))
 
 
 def parse_link(b: bytes) -> dict:

@@ -122,6 +122,9 @@ class BLESource:
             self.log("UI: take over raw ECG")
             return
         elif cmd == "hp_cfg":            # retune the strap's front-end HP compensation
+            if msg.get("reset"):         # back to the strap's defaults
+                self._hp_cfg_req = {**parsers.HP_CFG_DEFAULTS, "reset": True}
+                return
             try:
                 self._hp_cfg_req = {"shelf": bool(msg.get("shelf")), "hpf": bool(msg.get("hpf")),
                                     **{k: float(msg[k]) for k in ("fc_hz", "f0_hz", "hpf_hz")}}
@@ -456,7 +459,7 @@ class BLESource:
     async def _write_hp_cfg(self, c, req):
         """Write new HP-compensation settings, then read back what the strap applied
         (it clamps the corners) and the stream info whose comp flag follows it."""
-        self.log(f"UI: HP comp -> {self._hp_cfg_text(req)}")
+        self.log(f"UI: HP comp -> {'reset to defaults: ' if req.get('reset') else ''}{self._hp_cfg_text(req)}")
         try:
             await c.write_gatt_char(HP_CFG_UUID, parsers.build_hp_cfg(req), response=True)
         except asyncio.CancelledError:

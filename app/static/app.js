@@ -815,6 +815,9 @@
                       f0_hz: Math.min(hpCfg.f0_hz, fc), hpf: hpCfg.hpf, hpf_hz: hpCfg.hpf_hz });
     if (ok) $("strap-hp").classList.add("busy");     // until the strap's read-back arrives
   }
+  function resetHpCfg() {
+    if (hpCfg && send({ cmd: "hp_cfg", reset: true })) $("strap-hp").classList.add("busy");
+  }
   try {
     qrstOn = localStorage.getItem("hrm.qrst") !== "0";
     qrstHp = Math.max(0, parseFloat(localStorage.getItem("hrm.qrstHp")) || 0);
@@ -1717,6 +1720,7 @@
     $("strap-hp-fc").addEventListener("input", (e) => setText("strap-hp-val", (+e.target.value).toFixed(1) + " Hz"));
     $("strap-hp-fc").addEventListener("change", sendHpCfg);
     $("strap-hp-on").addEventListener("change", sendHpCfg);
+    $("strap-hp-reset").addEventListener("click", resetHpCfg);
     $("avg-csv").addEventListener("click", downloadAvg);
     const ns = $("notch-sel");
     ns.value = String(notch.f0 || 0);

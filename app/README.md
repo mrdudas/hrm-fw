@@ -29,6 +29,7 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
   | HR / RR  | `0x2A37`            | flags + HR + RR intervals (1/1024 s → ms) |
   | Raw ECG  | `a1b20002-…`        | uint16 seq + 20× int16 @ 250 or 1024 Hz |
   | ECG info | `a1b20003-…` (read) | u16 sample_hz, u16 raw_batch, u8 sample_bytes, u8 fmt_ver [, u16 acc_div] [, u8 flags: bit0 mains-notched, bit1 60 Hz, bit2 front-end high-pass already compensated] [, u8 compensated corner in 0.1 Hz] — read on connect; absent on older firmware → 250 Hz |
+  | HP comp  | `a1b20005-…` (read + write) | u8 flags (bit0 shelf comp, bit1 0.5 Hz high-pass; bit7 in a write = reset to defaults), u16 fc, u16 f0, u16 hpf in 0.1 Hz — read on connect, written only from the dashboard's "strap comp" control (↺ = defaults). Current firmware keeps it in flash across reboots and sleep; older firmware falls back to 5.0 Hz on every reboot |
   | Accel    | `a1b30002-…`        | ~25 Hz; legacy int16 x/y/z + u16 steps (8 B), or batched `u8 n, n×(x,y,z), u16 steps[, u16 ecg_seq, u8 ecg_off]` — v2 carries the ECG position of the last sample, so accel is drawn on the ECG clock |
   | Ectopy   | `a1b40002-…`        | PVC/PAC/artifact classifier + burden |
   | Battery  | `0x2A19`            | 1 byte percent (read + notify) |
