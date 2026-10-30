@@ -81,6 +81,10 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 #define MAX_ACTIVE_MS  (3LL*60*60*1000)   /* 3 h max session -> sleep           */
 #define PROBATION_MS   60000              /* advertise this long after wake; not worn -> sleep */
 #define ASSIST_MS      5000               /* P0.12 pull-up assist window while the AFE latches on */
+#ifndef AFE_DRIVE
+#define AFE_DRIVE      1                  /* HW_DIFF: CPU drives P0.14 high while awake to power the AFE
+                                          * (shared with the accel INT1 wake line). -DAFE_DRIVE=0 to A/B. */
+#endif
 #if HW_DIFF
 #define OB_FLOOR       150                /* peak-hold AC-envelope below this = off-body. Worn env >=430, off-body ~20. */
 #endif
@@ -934,11 +938,11 @@ static bool acc_detect(void)
  * still wakes it (raise THS / shrink TWIN). */
 /* Timings are in 1/ODR units. ODR is 400 Hz (CTRL1 0x77) -> 1 unit = 2.5 ms:
  * the 100 Hz / 10 ms resolution was too coarse for reliable double-click pairing. */
-#define TAP_THS_CNT  0x18   /* ~0.375 g: catch a finger knock                            */
-#define TAP_TLIM     0x0A   /* ~25 ms: max over-threshold time per tap -- SHARP only, so */
+#define TAP_THS_CNT  0x10   /* ~0.25 g: catch a gentle finger knock (lowered: woke too hard) */
+#define TAP_TLIM     0x0E   /* ~35 ms: max over-threshold time per tap -- still SHARP, so */
                             /*         a sustained shake (longer over-threshold) is rejected */
-#define TAP_TLAT     0x10   /* ~40 ms: dead time after the first tap (skip its ring)     */
-#define TAP_TWIN     0xB4   /* ~450 ms: window to receive the second tap                 */
+#define TAP_TLAT     0x0C   /* ~30 ms: dead time after the first tap (skip its ring)     */
+#define TAP_TWIN     0xFF   /* ~640 ms: generous window to receive the second tap        */
 
 /* Fallback: the original any-axis motion INT (~290 mg, no min duration). Used
  * only if the CLICK engine is absent on this accel (see accel_init_tap_wake). */
@@ -1213,6 +1217,20 @@ int main(void)
 	accel_present = acc_detect();
 	if (accel_present) accel_init_tap_wake();   /* arm SC7A20 double-tap INT -> P0.14 wake */
 	accel_ready = true;        /* release the accel thread (it exits if no accel) */
+
+#if HW_DIFF && AFE_DRIVE
+	/* AFE power now rides the shared P0.14 line (accel INT1 via a series R +
+	 * an active-high AFE switch; the old body-sense P-FET gate is gone, so no
+	 * more DC-bias artifact). The double-tap that woke us pulsed P0.14 high --
+	 * that both woke the CPU and kicked the AFE on. Now the CPU takes over and
+	 * drives P0.14 high to HOLD the AFE powered for the whole awake session.
+	 * The series R lets this output safely override the accel INT1, which idles
+	 * low between clicks. Set the level before switching to output so there is
+	 * no low glitch. enter_deep_sleep() reverts P0.14 to input + SENSE-High,
+	 * which drops the drive -> AFE off and the pin re-armed for the next tap. */
+	nrf_gpio_pin_set(ACC_INT_PIN);
+	nrf_gpio_cfg_output(ACC_INT_PIN);
+#endif
 
 	/* Keep HFXO (16 MHz crystal) running so the SAADC internal sample timer is
 	 * crystal-accurate: the BLE stack only requests HFXO around radio events,
