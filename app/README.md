@@ -152,7 +152,8 @@ any chart above moves it there, and its window is marked on the heart-rate
 chart. Scroll to zoom (2–60 s), drag to scroll, ← → or ◀ ▶ step one window,
 M measures a time span, and there is a display-only mains notch. The session's
 beats sit as dots on their QRS peaks with the RR in ms; a hollow dot is a
-corrected beat. This makes it easy to see whether a strange RR is a real beat
+corrected beat. The beat-to-beat HR (bpm, right-hand axis) runs over the
+ECG on the same time axis, breaking at corrected and lost beats. This makes it easy to see whether a strange RR is a real beat
 or an artifact. The server serves only the window you look at
 (`/api/sessions/<id>/ecg?a=&b=`, at most 200 s), found by bisecting the CSV
 on its arrival-time column, so it is instant even in multi-GB files. The

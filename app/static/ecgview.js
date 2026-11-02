@@ -1,7 +1,9 @@
 /* Raw ECG of a saved session (review page): a strip like the live one, browsed
  * instead of following the stream. ECG + accelerometer (X/Y/Z, |a|) on one
  * time axis, ECG-paper grid, display-only mains notch, the session's beats as
- * dots on their QRS peaks (corrected beats hollow), measure tool.
+ * dots on their QRS peaks (corrected beats hollow), measure tool. The beat-
+ * to-beat HR (60000 / RR, corrected beats and lost-beat gaps left out) is drawn
+ * over the ECG on its own right-hand axis, as on the overview chart.
  *
  * Data: /api/sessions/<id>/ecg?a=&b= serves a window (up to 200 s) of the raw
  * CSV on the strap's sample clock (recordings.raw_window); a bit more than the
@@ -12,7 +14,7 @@
 (function (root) {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  const COL = { ecg: "#4bd1a0", beat: "#ff2d2d", bad: "#ffb454", x: "#5aa2ff", y: "#ffb454", z: "#c792ea",
+  const COL = { ecg: "#4bd1a0", hr: "#ff5470", beat: "#ff2d2d", bad: "#ffb454", x: "#5aa2ff", y: "#ffb454", z: "#c792ea",
                 mag: "#7fdbca", grid: "#232936", gridMinor: "#1b2029", text: "#8b96a5", label: "#e6edf3",
                 meas: "#f2f5f8", measFill: "rgba(242,245,248,0.07)", measBox: "rgba(14,17,22,0.85)" };
   const FONT = "11px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif";
@@ -20,6 +22,7 @@
   const FETCH_MAX = 200;                              // server limit (recordings.RAW_MAX_S)
   const SNAP_BACK = 0.35, SNAP_FWD = 0.12;            // beat -> R peak search (s), as live
   const LABEL_WIN = 20;                               // RR labels on the dots up to this window
+  const HR_MIN_SPAN = 10;                             // bpm: the HR axis spans at least this
   const ACC_GAP = 0.5;                                // accel samples further apart: a break
   const LW = 1 / (window.devicePixelRatio || 1);
 
@@ -151,18 +154,23 @@
         size: L.bottom ? 26 : 0 },
       { ...axisBase, scale: "y", label: L.label, labelSize: 14, labelFont: FONT, size: 50, space: L.h < 100 ? 22 : 35,
         grid: { stroke: COL.grid, width: 1 } },
+      // right: HR bpm on the ECG lane; the same gutter, empty, on the others so the time axes line up
+      L.key === "ecg"
+        ? { ...axisBase, scale: "hr", side: 1, label: "HR bpm", labelSize: 14, labelFont: FONT, size: 44, space: 35,
+            stroke: COL.hr, grid: { show: false } }
+        : { scale: "y", side: 1, size: 44, grid: { show: false }, ticks: { show: false }, values: (u, s) => s.map(() => "") },
     ];
     if (L.paper) {   // ECG-paper fine grid: 40 ms / 200 ms as zoom allows
       axes.unshift({ scale: "x", side: 2, size: 0, incrs: [0.04, 0.2, 1, 5], space: 8,
                      grid: { stroke: COL.gridMinor, width: 1 }, ticks: { show: false }, values: () => [] });
     }
     const draw = [drawMeasure];
-    if (L.key === "ecg") draw.unshift(drawDots);
+    if (L.key === "ecg") draw.unshift(drawHr, drawDots);
     if (L.legend) draw.unshift((u) => drawLegend(u, L));
     return {
-      width, height: L.h, legend: { show: false }, pxAlign: 0, padding: [4, 8, L.bottom ? 0 : 4, 0],
+      width, height: L.h, legend: { show: false }, pxAlign: 0, padding: [4, 0, L.bottom ? 0 : 4, 0],
       cursor: { sync: { key: "rvecg" }, y: false, points: { show: false }, drag: { x: false, y: false, setScale: false } },
-      scales: { x: { time: false, auto: false }, y: { auto: false } },
+      scales: { x: { time: false, auto: false }, y: { auto: false }, hr: { auto: false } },
       axes, series: [{}, ...L.color.map((c) => ({ stroke: c, width: LW, spanGaps: false, points: { show: false } }))],
       hooks: { draw, setCursor: [(u) => hover(u)] },
     };
@@ -206,6 +214,7 @@
       }
     }
     set("ecg", [ex, ey], xr, lo, hi);
+    lanes.ecg.setScale("hr", hrRange(a, b));
     // accelerometer: X/Y/Z and |a|, a break where samples are missing
     const ax = [], X = [], Y = [], Z = [], M = [];
     let alo = Infinity, ahi = -Infinity, mlo = Infinity, mhi = -Infinity;
@@ -238,6 +247,44 @@
     });
   }
 
+  // beat-to-beat HR of the beats in [a, b] (one beyond each end, so the line reaches the edges);
+  // null = a break (corrected beat, or beats lost before this one)
+  function hrPoints(a, b) {
+    const bt = ses.beats.t, rr = ses.beats.rr, gap = ses.beats.gap, pts = [];
+    for (let i = Math.max(0, lowerBound(bt, a) - 1); i < bt.length; i++) {
+      if (gap[i] && pts.length) pts.push(null);
+      pts.push(cl.bad[i] ? null : { t: bt[i], v: 60000 / rr[i] });
+      if (bt[i] > b) break;
+    }
+    return pts;
+  }
+  function hrRange(a, b) {
+    let lo = Infinity, hi = -Infinity;
+    if (ses && cl) for (const p of hrPoints(a, b)) if (p && p.t >= a && p.t <= b) { lo = Math.min(lo, p.v); hi = Math.max(hi, p.v); }
+    if (!(hi >= lo)) return { min: 40, max: 120 };
+    const mid = (lo + hi) / 2, half = Math.max(hi - lo, HR_MIN_SPAN) * 0.6;
+    return { min: mid - half, max: mid + half };
+  }
+  function drawHr(u) {
+    if (!ses || !cl || tc == null) return;
+    const ctx = u.ctx, { left, top, width, height } = u.bbox, dpr = devicePixelRatio;
+    const pts = hrPoints(tc - win / 2, tc + win / 2);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(left, top, width, height); ctx.clip();
+    ctx.strokeStyle = COL.hr; ctx.lineWidth = 1.5 * dpr; ctx.globalAlpha = 0.85;
+    ctx.beginPath();
+    let pen = false;
+    for (const p of pts) {
+      if (!p) { pen = false; continue; }
+      const x = u.valToPos(p.t, "x", true), y = u.valToPos(p.v, "hr", true);
+      if (pen) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+      pen = true;
+    }
+    ctx.stroke();
+    ctx.fillStyle = COL.hr;            // a small mark on each beat
+    for (const p of pts) if (p) ctx.fillRect(u.valToPos(p.t, "x", true) - 1.5 * dpr, u.valToPos(p.v, "hr", true) - 1.5 * dpr, 3 * dpr, 3 * dpr);
+    ctx.restore();
+  }
   function drawDots(u) {
     if (!data || data.ses !== ses.id || !data.dots) return;
     const ctx = u.ctx, { left, top, width, height } = u.bbox, dpr = devicePixelRatio;
