@@ -177,7 +177,7 @@
       L.key === "ecg"
         ? { ...axisBase, scale: "hr", side: 1, label: "HR bpm", labelSize: 14, labelFont: FONT, size: 44, space: 35,
             stroke: COL.hr, grid: { show: false } }
-        : { scale: "y", side: 1, size: 44, grid: { show: false }, ticks: { show: false }, values: (u, s) => s.map(() => "") },
+        : { scale: "y", side: 1, size: 44, label: "", labelSize: 14, grid: { show: false }, ticks: { show: false }, values: (u, s) => s.map(() => "") },
     ];
     if (L.paper) {   // ECG-paper fine grid: 40 ms / 200 ms as zoom allows
       axes.unshift({ scale: "x", side: 2, size: 0, incrs: [0.04, 0.2, 1, 5], space: 8,
