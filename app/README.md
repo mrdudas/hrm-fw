@@ -38,7 +38,10 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
   packet so a crash loses at most the last one:
   - `ecg_<session>.csv` — `unix_time, sample_index, adc, rx_time` (`rx_time` = host
     arrival time of the sample's BLE packet; lets `tools/analyze_recording.py`
-    measure the real sample rate)
+    measure the real sample rate). `sample_index` counts on past the strap's
+    16-bit packet seq, so it only grows (a strap reboot makes it jump).
+    Recordings made before this wrap every 65536 packets (~65 min at 500 Hz),
+    together with `unix_time`, which is derived from it.
   - `rr_<session>.csv` — `unix_time, hr_bpm, rr_ms`
   - `accel_<session>.csv` — `unix_time, x, y, z, steps, ecg_index` (`ecg_index` =
     the sample's position in the ECG `sample_index` space, with v2 firmware)
@@ -143,6 +146,19 @@ chart below it) to select a period; ◀ ▶ step by the same length, the URL kee
 the session and the period. The session being recorded can be opened too
 (⟳ Reload re-reads it).
 
+**Raw ECG** (under the heart-rate chart): the recorded ECG and accelerometer
+(X/Y/Z, |a|), browsable like the live strip. A click (without dragging) on
+any chart above moves it there, and its window is marked on the heart-rate
+chart. Scroll to zoom (2–60 s), drag to scroll, ← → or ◀ ▶ step one window,
+M measures a time span, and there is a display-only mains notch. The session's
+beats sit as dots on their QRS peaks with the RR in ms; a hollow dot is a
+corrected beat. This makes it easy to see whether a strange RR is a real beat
+or an artifact. The server serves only the window you look at
+(`/api/sessions/<id>/ecg?a=&b=`, at most 200 s), found by bisecting the CSV
+on its arrival-time column, so it is instant even in multi-GB files. The
+samples are placed on the strap's own clock, anchored to the least-delayed
+packets around the window, so there is no BLE jitter.
+
 Before any analysis the beats are checked: out-of-range RRs, runs of 5+
 identical RRs (the strap repeating a stale value) and RRs more than 20 % off
 the local median (artifacts, ectopic beats) are replaced by the median of the
@@ -242,10 +258,10 @@ app/
 ├── hub.py            # fans events out to CSV + all WebSocket clients
 ├── ble_source.py     # scan / connect / subscribe / auto-reconnect (bleak)
 ├── demo_source.py    # synthetic data generator (--demo)
-├── webserver.py      # aiohttp: serves the dashboard + /ws, the review page + /api/sessions, /daily + /api/rest
-├── recordings.py     # reads saved sessions back for the review page (beats, lost-beat breaks, activity + cadence), resting windows for /daily
+├── webserver.py      # aiohttp: serves the dashboard + /ws, the review page + /api/sessions (+ /ecg raw window), /daily + /api/rest
+├── recordings.py     # reads saved sessions back for the review page (beats, lost-beat breaks, activity + cadence, raw ECG windows), resting windows for /daily
 ├── static/           # index.html + app.js + style.css (uPlot via CDN);
-│                     # review.html + review.js + hrv.js (HRV / DFA / MFDFA / Chhabra–Jensen)
+│                     # review.html + review.js + hrv.js (HRV / DFA / MFDFA / Chhabra–Jensen), ecgview.js (raw ECG strip)
 ├── recordings/       # CSV output (created on first run)
 ├── requirements.txt
 ├── install.sh / run.sh                 # Linux + macOS installer / launcher

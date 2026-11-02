@@ -70,6 +70,7 @@
 
   async function loadSession(id, range) {
     setText("ses-info", "loading…");
+    const h = hashParams(), e = h.s === id ? h.e : null;     // strip position from the URL
     const r = await fetch("/api/sessions/" + id);
     if (!r.ok) { setText("ses-info", "could not load: " + r.status); return; }
     ses = await r.json();
@@ -82,8 +83,10 @@
     if (!b.t.length) return;
     const t0 = b.t[0], t1 = b.t[b.t.length - 1];
     sel = range && range[0] >= t0 - 1 && range[1] <= t1 + 1 && range[1] > range[0] ? range : [t0, t1];
+    EcgView.setSession(ses, cl);
     drawOverview();
     await recompute();
+    EcgView.goTo(e >= t0 && e <= t1 ? e : sel[0] + 3);
   }
 
   // ---------- analysis ----------
@@ -150,10 +153,52 @@
           ctx.save(); ctx.fillStyle = "rgba(90,162,255,0.13)";
           ctx.fillRect(x0, u.bbox.top, Math.max(1, x1 - x0), u.bbox.height); ctx.restore();
         }],
+        draw: [ecgMark],
       },
     }, [b.t, withBreaks(hr, b.gap)], $("ov-chart"));
+    clickToEcg(ov);
     ov.over.addEventListener("dblclick", () => setRange(b.t[0], b.t[b.t.length - 1]));
   }
+  // where the raw ECG strip is: a line (or band, when wide enough) on a chart
+  function ecgMark(u) {
+    const v = EcgView.view();
+    if (!v) return;
+    const ctx = u.ctx, dpr = devicePixelRatio, x0 = u.valToPos(v[0], "x", true), x1 = u.valToPos(v[1], "x", true);
+    if (x1 < u.bbox.left || x0 > u.bbox.left + u.bbox.width) return;
+    ctx.save();
+    ctx.fillStyle = "rgba(255,180,84,0.35)";
+    ctx.fillRect(Math.min(x0, (x0 + x1) / 2 - dpr), u.bbox.top, Math.max(2 * dpr, x1 - x0), u.bbox.height);
+    ctx.restore();
+  }
+  // a click (no drag) on a chart moves the raw ECG strip there
+  function clickToEcg(u) {
+    let x0 = null;
+    u.over.addEventListener("mousedown", (e) => { x0 = e.clientX; });
+    u.over.addEventListener("mouseup", (e) => {
+      if (x0 == null || Math.abs(e.clientX - x0) > 3) { x0 = null; return; }
+      x0 = null;
+      EcgView.goTo(u.posToVal(e.clientX - u.over.getBoundingClientRect().left, "x"));
+      const r = $("ecg-card").getBoundingClientRect();
+      if (r.bottom < 0 || r.top > innerHeight) $("ecg-card").scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+  // the strip moved: redraw its mark (once per frame) and keep it in the URL
+  let markRaf = 0;
+  function ecgMoved() {
+    if (markRaf) return;
+    markRaf = requestAnimationFrame(() => {
+      markRaf = 0;
+      if (ov) ov.redraw(false, false);
+      writeHash();
+    });
+  }
+  function writeHash() {
+    if (!ses || !sel) return;
+    const v = EcgView.view();
+    history.replaceState(null, "", `#s=${ses.id}&a=${sel[0].toFixed(1)}&b=${sel[1].toFixed(1)}` +
+      (v ? `&e=${((v[0] + v[1]) / 2).toFixed(1)}` : ""));
+  }
+
   // a null at every break so lines are not drawn across lost beats
   function withBreaks(y, gap) {
     return y.map((v, i) => (i + 1 < gap.length && gap[i + 1] ? null : v));
@@ -192,6 +237,7 @@
         draw: opts.draw ? [opts.draw] : [],
       },
     }, [xs, ...opts.data], $(id));
+    clickToEcg(u);
     lanes.push(u);
     return u;
   }
@@ -321,7 +367,9 @@
     for (const u of lanes) u.setScale("x", { min: a, max: b });
     if (ov) ov.redraw(false);
     setText("sel-text", `${fmtTime(a, true)} – ${fmtTime(b, true)} · ${fmtDur(b - a)}`);
-    history.replaceState(null, "", `#s=${ses.id}&a=${a.toFixed(1)}&b=${b.toFixed(1)}`);
+    const v = EcgView.view();
+    if (v && (v[1] < a || v[0] > b)) EcgView.goTo(a + (v[1] - v[0]) / 2);
+    writeHash();
     clearTimeout(sumTimer);
     sumTimer = setTimeout(summary, 120);
   }
@@ -334,7 +382,7 @@
   }
   function hashParams() {
     const h = new URLSearchParams(location.hash.slice(1));
-    return { s: h.get("s"), a: +h.get("a"), b: +h.get("b") };
+    return { s: h.get("s"), a: +h.get("a"), b: +h.get("b"), e: h.has("e") ? +h.get("e") : null };
   }
 
   // ---------- exercise / fatigue of the selected period (exercise.js) ----------
@@ -635,6 +683,7 @@
     clearTimeout(rzTimer);
     rzTimer = setTimeout(() => {
       if (ov) ov.setSize({ width: $("ov-chart").clientWidth, height: 150 });
+      EcgView.resize();
       for (const u of lanes) u.setSize({ width: u.root.parentElement.clientWidth, height: u.height });
       if (sel) summary();
     }, 150);
@@ -647,5 +696,6 @@
   $("sel-all").addEventListener("click", () => ses && setRange(ses.beats.t[0], ses.beats.t[ses.beats.t.length - 1]));
   $("rh-normal").addEventListener("change", () => drawHist(null));
   for (const id of PARAM_IDS) $(id).addEventListener("change", () => { saveParams(); recompute(); });
+  EcgView.init({ onView: ecgMoved });
   loadList();
 })();

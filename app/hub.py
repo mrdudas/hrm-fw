@@ -22,6 +22,10 @@ class Hub:
         # ECG time anchor for reconstructing a continuous sample index/time axis
         self._ecg_seq0 = None
         self._ecg_t0 = None
+        # the packet seq is 16 bits (wraps every ~65 min at 500 Hz): count packets
+        # since seq0 without wrapping, so the CSV sample index only ever grows
+        self._ecg_seq_prev = None     # last packet's seq (kept across reconnects)
+        self._ecg_pkt = 0             # packets since seq0, unwrapped
         self.ecg_fs = 250             # set per connection from the a1b20003 info char
         self._ecg_last_seq = None
         self.ecg_duplicates = 0       # packets dropped as exact seq repeats
@@ -131,7 +135,14 @@ class Hub:
         if self._ecg_seq0 is None:
             self._ecg_seq0 = seq
             self._ecg_t0 = t
-        base = ((seq - self._ecg_seq0) & 0xFFFF) * len(samples)
+            self._ecg_pkt = 0
+        else:
+            # packets lost over a link drop longer than a wrap are not counted (the
+            # CSV rx_time shows them); a strap reboot restarts seq at an arbitrary
+            # point of this count
+            self._ecg_pkt += (seq - self._ecg_seq_prev) & 0xFFFF
+        self._ecg_seq_prev = seq
+        base = self._ecg_pkt * len(samples)
         self.recorder.write_ecg(self._ecg_t0, base, samples, rx_time=t)
         self._emit({"type": "ecg", "t": t, "seq": seq, "fs": self.ecg_fs,
                     "base": base, "samples": samples})
@@ -150,7 +161,9 @@ class Hub:
         n, now = len(samples), time.time()
         last_idx = None
         if ecg_seq is not None and self._ecg_seq0 is not None:
-            last_idx = ((ecg_seq - self._ecg_seq0) & 0xFFFF) * self._ecg_batch + ecg_off
+            # ecg_seq is next to the latest ECG packet's seq: signed 16-bit difference
+            d = ((ecg_seq - self._ecg_seq_prev + 0x8000) & 0xFFFF) - 0x8000
+            last_idx = (self._ecg_pkt + d) * self._ecg_batch + ecg_off
         for k, (x, y, z) in enumerate(samples):
             back = (n - 1 - k) * self._acc_div          # ECG ticks before the last sample
             idx = last_idx - back if last_idx is not None else None

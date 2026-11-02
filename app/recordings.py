@@ -352,3 +352,179 @@ def rest_windows(outdir):
             _rest_cache[ses] = hit
         out.extend(hit[1])
     return out
+
+
+# ---------- raw signal of a time window (the review page's ECG strip) ----------
+# The ECG CSV of a long session is gigabytes, so a window is found by bisecting
+# the file on a time column instead of reading it. rx_time (host arrival of the
+# packet) only grows. The unix_time column is derived from the sample index,
+# which in recordings made before the hub counted packets past the 16-bit seq
+# wraps every 65536 packets (~65 min at 500 Hz), and jumps on a strap reboot;
+# it is used only by the old files that have no rx_time.
+#
+# Sample clock: like the beat floor above, (arrival - sample index / fs) of a
+# packet is only ever late, so its minimum over the packets around the window
+# anchors the strap's sample clock to the host's: smooth inside a run, no BLE
+# jitter. A run ends where the index jumps back without wrapping (strap reboot).
+
+RAW_MAX_S = 200        # longest window served at once (s)
+RAW_ANCHOR_S = 20      # packets this far either side of the window anchor the clock
+
+
+def _line_time(line, col):
+    try:
+        return float(line.split(b",")[col])
+    except (ValueError, IndexError):
+        return None
+
+
+def _seek(f, size, start, col, target):
+    """Offset of a line start at or before the first row whose time >= target."""
+    lo, hi = start, size
+    while hi - lo > 65536:
+        mid = (lo + hi) // 2
+        f.seek(mid)
+        f.readline()                       # torn line
+        t = None
+        while t is None:
+            line = f.readline()
+            if not line.endswith(b"\n"):
+                break
+            t = _line_time(line, col)
+        if t is None or t >= target:
+            hi = mid
+        else:
+            lo = mid
+    if lo == start:
+        return start
+    f.seek(lo)
+    f.readline()
+    return f.tell()
+
+
+def _read_window(path, col, a, b):
+    """Rows (lists of str) with a <= time column <= b."""
+    out = []
+    try:
+        f = open(path, "rb")
+    except OSError:
+        return out
+    with f:
+        size = os.fstat(f.fileno()).st_size
+        f.readline()                       # header
+        f.seek(_seek(f, size, f.tell(), col, a))
+        for line in f:
+            if not line.endswith(b"\n"):
+                break
+            t = _line_time(line, col)
+            if t is None or t < a:
+                continue
+            if t > b:
+                break
+            out.append(line.decode("ascii", "replace").rstrip("\r\n").split(","))
+    return out
+
+
+def _header(path):
+    try:
+        with open(path) as f:
+            return f.readline().strip().split(",")
+    except OSError:
+        return []
+
+
+def _ecg_window(path, fs, a, b):
+    """Samples of [a, b] as contiguous segments [{t, v}] on the strap's clock."""
+    if "rx_time" not in _header(path):     # old file: unix_time is the sample clock
+        rows = _read_window(path, 0, a, b)
+        segs, prev = [], None
+        for r in rows:
+            try:
+                t, i, v = float(r[0]), int(r[1]), int(r[2])
+            except (ValueError, IndexError):
+                continue
+            if prev is None or i != prev + 1:
+                segs.append({"t": round(t, 4), "v": []})
+            segs[-1]["v"].append(v)
+            prev = i
+        return segs
+
+    rows = _read_window(path, 3, a - RAW_ANCHOR_S, b + RAW_ANCHOR_S)
+    packets = []                           # [rx, first index, values]
+    for r in rows:
+        try:
+            i, v, rx = int(r[1]), int(r[2]), float(r[3])
+        except (ValueError, IndexError):
+            continue
+        if packets and packets[-1][0] == rx and i == packets[-1][1] + len(packets[-1][2]):
+            packets[-1][2].append(v)
+        else:
+            packets.append([rx, i, [v]])
+    if not packets:
+        return []
+    lens = sorted(len(p[2]) for p in packets)
+    wrap = 65536 * lens[len(lens) // 2]    # the index wraps every 65536 packets
+
+    runs, cur, k = [], None, 0             # run: {"pk": [(rx, index, values)], "off": min}
+    for rx, i, vals in packets:
+        i += k
+        if cur is not None:
+            last_i, last_rx = cur["end"]
+            if i < last_i:
+                if abs((i + wrap - last_i) / fs - (rx - last_rx)) < 2:
+                    k += wrap
+                    i += wrap
+                else:
+                    cur = None             # restarted: a new run, index from 0
+                    k = 0
+        if cur is None:
+            cur = {"pk": [], "off": math.inf}
+            runs.append(cur)
+        cur["pk"].append((i, vals))
+        cur["end"] = (i + len(vals), rx)
+        cur["off"] = min(cur["off"], rx - (i + len(vals) - 1) / fs)
+
+    segs = []
+    for run in runs:
+        prev = None
+        for i, vals in run["pk"]:
+            for j, v in enumerate(vals):
+                t = run["off"] + (i + j) / fs
+                if t < a or t > b:
+                    prev = None
+                    continue
+                if prev is None or i + j != prev + 1:
+                    segs.append({"t": round(t, 4), "v": []})
+                segs[-1]["v"].append(v)
+                prev = i + j
+    segs.sort(key=lambda s: s["t"])
+    return segs
+
+
+def raw_window(outdir, ses, a, b):
+    """Raw ECG and accelerometer of [a, b] (unix s), at most RAW_MAX_S long."""
+    if not SESSION_RE.match(ses):
+        raise ValueError("bad session id")
+    b = min(b, a + RAW_MAX_S)
+    meta = {}
+    try:
+        with open(os.path.join(outdir, f"meta_{ses}.json")) as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        pass
+    fs = meta.get("ecg_fs") or 250
+    ecg_path = os.path.join(outdir, f"ecg_{ses}.csv")
+    if not os.path.exists(ecg_path):
+        raise FileNotFoundError(ses)
+    acc = {"t": [], "x": [], "y": [], "z": []}
+    for r in _read_window(os.path.join(outdir, f"accel_{ses}.csv"), 0, a - 1, b + 1):
+        try:
+            t, x, y, z = float(r[0]), int(r[1]), int(r[2]), int(r[3])
+        except (ValueError, IndexError):
+            continue
+        acc["t"].append(round(t, 3))
+        for key, v in (("x", x), ("y", y), ("z", z)):
+            acc[key].append(round(v / ACC_G, 4))
+    info = meta.get("ecg_info") or {}
+    return {"a": a, "b": b, "fs": fs, "ecg": _ecg_window(ecg_path, fs, a, b), "acc": acc,
+            "notched_hz": info.get("notched_hz", 0), "hp_comp": bool(info.get("hp_comp"))}

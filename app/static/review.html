@@ -43,6 +43,35 @@
     </div>
   </section>
 
+  <section id="ecg-card" class="card wide">
+    <div class="card-head">
+      <h2 title="The recorded raw ECG and accelerometer, browsable. Dots: the session's beats on their R peaks (hollow: corrected beat), with the RR in ms">Raw ECG <span id="ecg-fs" class="fs-label"></span></h2>
+      <span class="hint zoom">
+        <span id="ecg-status" class="raw-note"></span>
+        <span id="ecg-meas" class="meas-readout"></span>
+        <select id="ecg-notch" class="tool-sel">
+          <option value="0">Notch off</option><option value="50">Notch 50 Hz</option><option value="60">Notch 60 Hz</option>
+          <option value="strap" hidden>Notch in strap</option>
+        </select>
+        <button id="ecg-measure" class="tool-btn" title="Measure time (M): click start, click end. Esc clears.">📏 Measure</button>
+        <span class="sep"></span>
+        <button id="ecg-prev" class="tool-btn" title="Back one window (←)">◀</button>
+        <span id="ecg-pos" class="rv-seltext"></span>
+        <button id="ecg-next" class="tool-btn" title="Forward one window (→)">▶</button>
+        <span class="sep"></span>
+        <button id="ecg-zoom-out" class="zoom-btn" title="Zoom out (longer window)">−</button>
+        <span id="ecg-win" class="win-label">6 s</span>
+        <button id="ecg-zoom-in" class="zoom-btn" title="Zoom in (shorter window)">+</button>
+      </span>
+    </div>
+    <div id="ecg-hover" class="rv-readout">&nbsp;</div>
+    <div id="ecg-chart" class="chart-strip"></div>
+    <div class="strip-help">
+      click any chart above: jump here · scroll: zoom · drag: scroll · double-click: reset zoom ·
+      <kbd>←</kbd> <kbd>→</kbd> one window · <kbd>M</kbd> measure · <kbd>Esc</kbd> clear
+    </div>
+  </section>
+
   <section class="card wide">
     <div class="card-head">
       <h2>Over time</h2>
@@ -121,6 +150,7 @@
 <script src="/static/nonlin.js"></script>
 <script src="/static/chaos.js"></script>
 <script src="/static/exercise.js"></script>
+<script src="/static/ecgview.js"></script>
 <script src="/static/review.js"></script>
 </body>
 </html>

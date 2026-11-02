@@ -26,6 +26,7 @@ def make_app(hub, log=print):
     app.router.add_get("/api/current", _current)
     app.router.add_get("/api/sessions", _sessions)
     app.router.add_get("/api/sessions/{id}", _session)
+    app.router.add_get("/api/sessions/{id}/ecg", _session_ecg)
     app.router.add_get("/api/rest", _rest)
     app.router.add_static("/static/", STATIC_DIR, name="static")
     app.on_response_prepare.append(_no_cache)
@@ -81,6 +82,21 @@ async def _session(request):
         raise web.HTTPBadRequest(text="bad session id")
     except FileNotFoundError:
         raise web.HTTPNotFound(text="no such session")
+    return web.json_response(data, dumps=lambda o: json.dumps(o, separators=(",", ":")))
+
+
+async def _session_ecg(request):
+    """Raw ECG + accelerometer of a time window ?a=&b= (unix s) of a session (review strip)."""
+    try:
+        a, b = float(request.query["a"]), float(request.query["b"])
+    except (KeyError, ValueError):
+        raise web.HTTPBadRequest(text="a and b (unix seconds) needed")
+    try:
+        data = await asyncio.to_thread(recordings.raw_window, _outdir(request), request.match_info["id"], a, b)
+    except ValueError:
+        raise web.HTTPBadRequest(text="bad session id")
+    except FileNotFoundError:
+        raise web.HTTPNotFound(text="no ECG for this session")
     return web.json_response(data, dumps=lambda o: json.dumps(o, separators=(",", ":")))
 
 
