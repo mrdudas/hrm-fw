@@ -682,6 +682,20 @@ static volatile uint32_t sample_idx, led_off_idx;
 static inline void led_on(void)  { nrf_gpio_pin_set(LED_PIN); }
 static inline void led_off(void) { nrf_gpio_pin_clear(LED_PIN); }
 
+/* Non-blocking ~0.5 Hz "awake / advertising" blink (60 ms on every 2 s). Called
+ * once per main-loop iteration so it never stalls the 10 ms ADC drain the way the
+ * old blocking k_msleep blink would. `active` is true only while advertising with
+ * no live heartbeat flashing the LED; when false it just makes sure the LED is off
+ * so the per-beat heartbeat flash (process_adc_buffer) can own the LED cleanly. */
+static void idle_blink(bool active)
+{
+	static int64_t t; static bool on;
+	if (!active) { if (on) { led_off(); on = false; } return; }
+	int64_t now = k_uptime_get();
+	if (!on && now - t >= 1940)      { led_on();  on = true;  t = now; }
+	else if (on && now - t >= 60)    { led_off(); on = false; t = now; }
+}
+
 /* Direct Form II transposed IIR; n = tap count (order+1), z sized n-1 */
 static float iir(const float *b, const float *a, float *z, int n, float x)
 {
@@ -1174,9 +1188,11 @@ static void process_adc_buffer(const nrf_saadc_value_t *buf)
 }
 
 /* Start / stop hardware-timed continuous ECG sampling (advanced mode, 8 kHz
- * internal timer -> DMA). Gated on an active BLE connection so the ADC + AFE
- * DSP draw nothing while merely advertising. Re-configuring the channel each
- * start is fine: the blocking VDD read already reconfigures the SAADC. */
+ * internal timer -> DMA). Started once on wake and left running for the whole
+ * awake session (advertising AND connected), so the detector is already locked
+ * before a central subscribes; ecg_stop() runs only just before System OFF.
+ * Re-configuring the channel each start is fine: the blocking VDD read already
+ * reconfigures the SAADC. */
 static volatile bool ecg_running;
 static void ecg_start(void)
 {
@@ -1267,46 +1283,54 @@ int main(void)
 	bt_set_name(dev_name);   /* keep the GAP Device Name characteristic consistent with adv */
 	k_work_init_delayable(&tx_dwork, tx_work_fn);
 
-	/* ---- Power lifecycle: a BLE connection drives sleep/wake ---------------
-	 * The on-body check is OUT of the sleep/wake logic. On wake we advertise
-	 * immediately; the connection state decides everything from there. */
+	/* ---- Power lifecycle: measure whenever awake --------------------------
+	 * We sample and run the detector continuously while awake (advertising OR
+	 * connected), NOT only once a central connects. Reason: the front end +
+	 * detector take ~8 s (WARMUP_SAMPLES) to settle and lock onto beats, and many
+	 * HR centrals drop the link if they don't see a valid HR/RR notification
+	 * within a second or two of connecting. Starting the ADC only on connect put
+	 * that whole warm-up AFTER the connection, so centrals gave up first. Now the
+	 * detector is already locked by the time a central subscribes, so HR/RR flows
+	 * immediately. Notifies are CCC-gated, so while nobody is subscribed the
+	 * detector just runs with no one to send to. */
 	last_beat_ms   = k_uptime_get();
 	last_motion_ms = k_uptime_get();
 #if HW_DIFF
-	/* HW_DIFF (accel-equipped): ECG samples only while a central is connected.
-	 *   wake -> advertise; nobody connects within PROBATION_MS -> sleep
-	 *   connected  -> stream, never sleep while connected
-	 *   disconnect -> keep advertising PROBATION_MS, then        -> sleep
-	 * A double-tap on the SC7A20 (INT1 -> P0.14) wakes from System OFF. */
+	/* HW_DIFF (accel-equipped):
+	 *   wake -> advertise + sample; nobody connects within PROBATION_MS -> sleep
+	 *   connected  -> keep sampling, never sleep while connected
+	 *   disconnect -> keep advertising + sampling PROBATION_MS, then    -> sleep
+	 * A double-tap on the SC7A20 (INT1 -> P0.14) wakes from System OFF. The AFE is
+	 * already powered (P0.14 held high above), so start measuring straight away. */
+	ecg_start();                 /* measure now -- do not wait for a connection */
 	idle_since = k_uptime_get_32();
 	for (;;) {
-		/* ADVERTISE: idle, waiting for a connection (~0.5 Hz LED blink). */
-		while (conn_count == 0) {
-			if ((uint32_t)(k_uptime_get_32() - idle_since) > PROBATION_MS)
+		nrf_saadc_value_t *buf;
+		if (k_msgq_get(&adc_doneq, &buf, K_MSEC(100)) == 0)
+			process_adc_buffer(buf);   /* detector runs; notifies only if subscribed */
+
+		if (conn_count == 0) {
+			/* ADVERTISE: idle. Sleep when no connection arrives in time.
+			 * (disconnected() re-arms idle_since on the last disconnect.) */
+			if ((uint32_t)(k_uptime_get_32() - idle_since) > PROBATION_MS) {
+				ecg_stop();
 				enter_deep_sleep();   /* no connection in time -> System OFF */
-			led_on(); k_msleep(60); led_off(); k_msleep(1940);
+			}
+			idle_blink(k_uptime_get() - last_beat_ms > 2000);
+		} else {
+			idle_blink(false);        /* connected: let the heartbeat flash own the LED */
 		}
-		/* STREAM: connected -> run the ADC and drain buffers until disconnect.
-		 * The 100 ms get timeout lets us notice a disconnect promptly. */
-		ecg_start();
-		while (conn_count > 0) {
-			nrf_saadc_value_t *buf;
-			if (k_msgq_get(&adc_doneq, &buf, K_MSEC(100)) == 0)
-				process_adc_buffer(buf);
-		}
-		ecg_stop();   /* disconnected() has armed the grace window via idle_since */
 	}
 #else
-	/* Standard board (no accel): same connection-driven lifecycle as HW_DIFF,
-	 * but the wake source is the P0.12 on-body signal (armed in enter_deep_sleep)
-	 * instead of a double-tap -- it wakes when put on.
-	 *
-	 * We woke because on-body went high, so first give the AFE its ~5 s pull-up
-	 * assist to latch on (as before), then advertise + stream-on-connect.
+	/* Standard board (no accel): wake source is the P0.12 on-body signal (armed in
+	 * enter_deep_sleep) -- it wakes when put on. We woke because on-body went high,
+	 * so first give the AFE its ~5 s pull-up assist to latch on, THEN start the ADC
+	 * and measure continuously while awake (same measure-whenever-awake rule as
+	 * HW_DIFF; see the lifecycle note above).
 	 *
 	 * Sleep is gated on OFF-body here, NOT on a pure no-connection timer: the
 	 * on-body wake is level-sensitive, so sleeping while still worn (P0.12 high)
-	 * would wake us again instantly. So: worn -> stay up (advertise/stream);
+	 * would wake us again instantly. So: worn -> stay up (advertise + sample);
 	 * taken off + no connection for PROBATION_MS -> sleep (and a fresh put-on
 	 * wakes it). Connected -> never sleep, exactly like HW_DIFF. */
 	nrf_gpio_cfg_input(CONTACT_PIN, NRF_GPIO_PIN_PULLUP);   /* AFE latch assist, NOT a drive */
@@ -1314,29 +1338,30 @@ int main(void)
 		led_on(); k_msleep(100); led_off(); k_msleep(400);
 	}
 	nrf_gpio_cfg_input(CONTACT_PIN, NRF_GPIO_PIN_NOPULL);   /* back to read-only */
+	ecg_start();                 /* AFE latched -> measure now, do not wait for a connection */
 
 	int64_t offbody_since = 0;   /* when we last went off-body while not connected */
 	for (;;) {
-		/* ADVERTISE: idle. Sleep only after PROBATION_MS continuously OFF-body. */
-		while (conn_count == 0) {
+		nrf_saadc_value_t *buf;
+		if (k_msgq_get(&adc_doneq, &buf, K_MSEC(100)) == 0)
+			process_adc_buffer(buf);   /* detector runs; notifies only if subscribed */
+
+		if (conn_count == 0) {
+			/* ADVERTISE: idle. Sleep only after PROBATION_MS continuously OFF-body. */
 			if (nrf_gpio_pin_read(CONTACT_PIN)) {
 				offbody_since = 0;                 /* worn -> stay up */
 			} else {
 				if (offbody_since == 0) offbody_since = k_uptime_get();
-				if (k_uptime_get() - offbody_since > PROBATION_MS)
+				if (k_uptime_get() - offbody_since > PROBATION_MS) {
+					ecg_stop();
 					enter_deep_sleep();        /* off-body 1 min -> System OFF */
+				}
 			}
-			led_on(); k_msleep(60); led_off(); k_msleep(1940);
+			idle_blink(k_uptime_get() - last_beat_ms > 2000);
+		} else {
+			offbody_since = 0;
+			idle_blink(false);        /* connected: let the heartbeat flash own the LED */
 		}
-		/* STREAM: connected -> run the ADC until disconnect. */
-		offbody_since = 0;
-		ecg_start();
-		while (conn_count > 0) {
-			nrf_saadc_value_t *buf;
-			if (k_msgq_get(&adc_doneq, &buf, K_MSEC(100)) == 0)
-				process_adc_buffer(buf);
-		}
-		ecg_stop();
 	}
 #endif
 }
