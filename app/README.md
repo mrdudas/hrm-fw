@@ -149,7 +149,8 @@ the session and the period. The session being recorded can be opened too
 **Raw ECG** (under the heart-rate chart): the recorded ECG and accelerometer
 (X/Y/Z, |a|), browsable like the live strip. A click (without dragging) on
 any chart above moves it there, and its window is marked on the heart-rate
-chart. Scroll to zoom (2–60 s), drag to scroll, ← → or ◀ ▶ step one window,
+chart. Scroll to zoom (from 2 s out to the whole recording; "all" jumps there —
+wider than 200 s shows only the HR line), drag to scroll, ← → or ◀ ▶ step one window,
 M measures a time span, and there is a display-only mains notch. The session's
 beats sit as dots on their QRS peaks with the RR in ms; a hollow dot is a
 corrected beat. The beat-to-beat HR (bpm, right-hand axis) runs over the

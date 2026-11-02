@@ -166,7 +166,8 @@
     const ctx = u.ctx, dpr = devicePixelRatio, x0 = u.valToPos(v[0], "x", true), x1 = u.valToPos(v[1], "x", true);
     if (x1 < u.bbox.left || x0 > u.bbox.left + u.bbox.width) return;
     ctx.save();
-    ctx.fillStyle = "rgba(255,180,84,0.35)";
+    // a faint band when the strip is zoomed far out, so it does not cover the chart
+    ctx.fillStyle = x1 - x0 > 0.1 * u.bbox.width ? "rgba(255,180,84,0.10)" : "rgba(255,180,84,0.35)";
     ctx.fillRect(Math.min(x0, (x0 + x1) / 2 - dpr), u.bbox.top, Math.max(2 * dpr, x1 - x0), u.bbox.height);
     ctx.restore();
   }

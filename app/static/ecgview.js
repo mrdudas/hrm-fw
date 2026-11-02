@@ -18,8 +18,10 @@
                 mag: "#7fdbca", grid: "#232936", gridMinor: "#1b2029", text: "#8b96a5", label: "#e6edf3",
                 meas: "#f2f5f8", measFill: "rgba(242,245,248,0.07)", measBox: "rgba(14,17,22,0.85)" };
   const FONT = "11px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif";
-  const WIN_DEFAULT = 6, WIN_MIN = 2, WIN_MAX = 60;   // visible window (s), as on the live strip
-  const FETCH_MAX = 200;                              // server limit (recordings.RAW_MAX_S)
+  const WIN_DEFAULT = 6, WIN_MIN = 2;                // visible window (s); at most the whole session
+  const FETCH_MAX = 200;                              // server limit (recordings.RAW_MAX_S): wider shows HR only
+  const PAPER_MAX = 60;                               // ECG-paper fine grid up to this window
+  const HR_MARK_MAX = 120;                            // a mark on each HR beat up to this window
   const SNAP_BACK = 0.35, SNAP_FWD = 0.12;            // beat -> R peak search (s), as live
   const LABEL_WIN = 20;                               // RR labels on the dots up to this window
   const HR_MIN_SPAN = 10;                             // bpm: the HR axis spans at least this
@@ -37,7 +39,19 @@
   try { win = clamp(parseFloat(localStorage.getItem("hrm.rvwin")) || WIN_DEFAULT); } catch (e) {}
   try { const f = localStorage.getItem("hrm.notch"); if (f != null) notchPref = +f; } catch (e) {}
 
-  function clamp(w) { return Math.min(WIN_MAX, Math.max(WIN_MIN, w)); }
+  function winMax() {
+    if (!ses || !ses.beats.t.length) return 86400;
+    const [t0, t1] = bounds();
+    return Math.max(WIN_MIN, t1 - t0);
+  }
+  function clamp(w) { return Math.min(winMax(), Math.max(WIN_MIN, w)); }
+  const rawOk = () => win <= FETCH_MAX;               // the raw ECG / accelerometer can be shown
+  function fmtWin(w) {
+    if (w < 10) return w.toFixed(1) + " s";
+    if (w < 120) return Math.round(w) + " s";
+    if (w < 7200) return Math.round(w / 60) + " min";
+    return (w / 3600).toFixed(1) + " h";
+  }
   const pad = (v) => String(v).padStart(2, "0");
   function fmtClock(t, dec) {
     const d = new Date(t * 1000);
@@ -71,6 +85,11 @@
   function ensure() {
     draw();
     if (!ses || covered()) return;
+    if (!rawOk()) {
+      clearTimeout(fetchTimer); reqId++;
+      setText("ecg-status", `raw ECG and motion: zoom in to ${Math.floor(FETCH_MAX / 60)} min ${FETCH_MAX % 60} s or less`);
+      return;
+    }
     clearTimeout(fetchTimer);
     fetchTimer = setTimeout(load, 60);
   }
@@ -149,7 +168,7 @@
   function laneOpts(L, width) {
     const axisBase = { stroke: COL.text, font: FONT, ticks: { show: false } };
     const axes = [
-      { ...axisBase, scale: "x", side: 2, space: L.bottom ? 80 : 60, incrs: [0.2, 0.5, 1, 2, 5, 10, 15, 30],
+      { ...axisBase, scale: "x", side: 2, space: L.bottom ? 80 : 60, incrs: [0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800],
         grid: { stroke: COL.grid, width: 1 }, values: L.bottom ? clockValues : (u, s) => s.map(() => ""),
         size: L.bottom ? 26 : 0 },
       { ...axisBase, scale: "y", label: L.label, labelSize: 14, labelFont: FONT, size: 50, space: L.h < 100 ? 22 : 35,
@@ -162,6 +181,12 @@
     ];
     if (L.paper) {   // ECG-paper fine grid: 40 ms / 200 ms as zoom allows
       axes.unshift({ scale: "x", side: 2, size: 0, incrs: [0.04, 0.2, 1, 5], space: 8,
+                     splits: (u, ai, min, max, incr) => {   // none when zoomed far out
+                       if (win > PAPER_MAX) return [];
+                       const out = [];
+                       for (let v = Math.ceil(min / incr) * incr; v <= max; v += incr) out.push(v);
+                       return out;
+                     },
                      grid: { stroke: COL.gridMinor, width: 1 }, ticks: { show: false }, values: () => [] });
     }
     const draw = [drawMeasure];
@@ -194,7 +219,7 @@
     // ECG: min/max per bucket when zoomed out (~1 bucket per pixel keeps every R peak)
     const ex = [], ey = [];
     let lo = Infinity, hi = -Infinity;
-    if (data && data.ses === ses.id) {
+    if (rawOk() && data && data.ses === ses.id) {
       const dt = 1 / data.fs, px = lanes.ecg.bbox.width || 1000;
       for (const s of data.segs) {
         const n = s.f.length;
@@ -218,7 +243,7 @@
     // accelerometer: X/Y/Z and |a|, a break where samples are missing
     const ax = [], X = [], Y = [], Z = [], M = [];
     let alo = Infinity, ahi = -Infinity, mlo = Infinity, mhi = -Infinity;
-    if (data && data.ses === ses.id) {
+    if (rawOk() && data && data.ses === ses.id) {
       const A = data.acc;
       for (let i = Math.max(0, lowerBound(A.t, a) - 1); i < A.t.length && (i === 0 || A.t[i - 1] <= b); i++) {
         if (ax.length && A.t[i] - ax[ax.length - 1] > ACC_GAP) {
@@ -235,7 +260,7 @@
     set("acc", [ax, X, Y, Z], xr, alo, ahi);
     set("mag", [ax, M], xr, mlo, mhi);
     setText("ecg-pos", `${fmtClock(a, 1)} – ${fmtClock(b, 1)}`);
-    setText("ecg-win", `${win < 10 ? win.toFixed(1) : Math.round(win)} s`);
+    setText("ecg-win", fmtWin(win));
     onView(a, b);
   }
   function set(key, d, xr, lo, hi) {
@@ -282,11 +307,11 @@
     }
     ctx.stroke();
     ctx.fillStyle = COL.hr;            // a small mark on each beat
-    for (const p of pts) if (p) ctx.fillRect(u.valToPos(p.t, "x", true) - 1.5 * dpr, u.valToPos(p.v, "hr", true) - 1.5 * dpr, 3 * dpr, 3 * dpr);
+    if (win <= HR_MARK_MAX) for (const p of pts) if (p) ctx.fillRect(u.valToPos(p.t, "x", true) - 1.5 * dpr, u.valToPos(p.v, "hr", true) - 1.5 * dpr, 3 * dpr, 3 * dpr);
     ctx.restore();
   }
   function drawDots(u) {
-    if (!data || data.ses !== ses.id || !data.dots) return;
+    if (!rawOk() || !data || data.ses !== ses.id || !data.dots) return;
     const ctx = u.ctx, { left, top, width, height } = u.bbox, dpr = devicePixelRatio;
     const a = tc - win / 2, b = tc + win / 2, labels = win <= LABEL_WIN;
     ctx.save();
@@ -365,10 +390,10 @@
     }
     if (hoverT == null) { setText("ecg-hover", ""); return; }
     let txt = fmtClock(hoverT, 2);
-    if (data && data.dots && data.dots.length) {     // the beat ending at / after the cursor
-      const i = lowerBound(data.dots.map((d) => d.t), hoverT);
-      const d = data.dots[Math.min(i, data.dots.length - 1)];
-      if (Math.abs(d.t - hoverT) < 2) txt += ` · RR ${Math.round(d.rr)} ms${d.bad ? " (corrected)" : ""} · ${(60000 / d.rr).toFixed(0)} bpm`;
+    if (ses && ses.beats.t.length) {                // the beat ending at / after the cursor
+      const bt = ses.beats.t, i = Math.min(lowerBound(bt, hoverT), bt.length - 1);
+      const rr = ses.beats.rr[i], bad = cl.bad[i];
+      if (Math.abs(bt[i] - hoverT) < 2) txt += ` · RR ${Math.round(rr)} ms${bad ? " (corrected)" : ""} · ${(60000 / rr).toFixed(0)} bpm`;
     }
     setText("ecg-hover", txt);
   }
@@ -381,7 +406,9 @@
   function goTo(t) {
     if (!ses || !ses.beats.t.length) return;
     const [t0, t1] = bounds();
-    tc = Math.min(t1, Math.max(t0, t));
+    win = clamp(win);
+    // keep the window inside the session (centred when it is the whole session)
+    tc = t1 - t0 <= win ? (t0 + t1) / 2 : Math.min(t1 - win / 2, Math.max(t0 + win / 2, t));
     ensure();
   }
   function setWin(w, anchor) {
@@ -447,6 +474,7 @@
     $("ecg-next").addEventListener("click", () => step(1));
     $("ecg-zoom-out").addEventListener("click", () => setWin(win * 1.5));
     $("ecg-zoom-in").addEventListener("click", () => setWin(win / 1.5));
+    $("ecg-zoom-all").addEventListener("click", () => setWin(winMax()));
     $("ecg-measure").addEventListener("click", () => setMeasureMode(!measureMode));
     $("ecg-notch").addEventListener("change", (e) => {
       notchPref = +e.target.value || 0;
