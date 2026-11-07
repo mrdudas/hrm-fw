@@ -229,3 +229,9 @@ html{background:var(--bg); color-scheme:dark}
 .ex-verdict b.ex-some{color:var(--warn)}
 .ex-verdict b.ex-fresh{color:var(--ok)}
 .ex-plots canvas{height:280px}
+
+/* beat timing (DTW) page */
+.dtw-params{display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; margin-top:10px}
+.dtw-lane{width:100%; line-height:0}
+.dtw-sub{margin-top:14px}
+.dtw-legend{font-variant-numeric:tabular-nums}

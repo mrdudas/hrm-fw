@@ -191,6 +191,35 @@ log-log plot, the f(α) spectra of both methods, h(q) and the Poincaré plot.
 Chhabra–Jensen needs a positive measure: |ΔRR| (default) or the RR intervals
 (those are nearly uniform, so the spectrum comes out very narrow).
 
+## Beat timing: each beat warped onto the averaged beat (DTW)
+
+`/morph` (or **Beat DTW** on the review page's raw-ECG card: the 2 minutes
+around the strip). For a chosen period (up to 10 min) of a recording:
+
+- **Beats from the ECG itself.** The R peaks are found in the raw ECG
+  (5–25 Hz QRS energy, adaptive threshold, then the R extreme refined to a
+  fraction of a sample). The strap's beat times are not used: they are placed
+  from BLE arrival times and can be off by a few hundred ms when the link
+  stalls. The app's artifact / ectopy rules run on the RR of these beats.
+- **Reference beat.** Every beat is cut out from R − before to R + after
+  (default: a third and 60 % of the median RR), aligned on its R by
+  cross-correlating the QRS, its PR segment set to zero and its amplitude
+  scaled to the reference's QRS. The mean (or median) of the clean beats is
+  the reference. Beats whose neighbouring QRS falls inside the window stay
+  out of it. All filtering is zero-phase, so nothing shifts in time.
+- **DTW.** Each beat is warped onto the reference (amplitude and/or slope,
+  within ± max shift, with a cost per warping step — *stiffness* — so noise
+  does not bend the path). For every point of the reference cycle, the timing
+  deviation Δ(t) = (where it is in this beat) − (where it is in the
+  reference), both from R. Positive: later in this beat; a later T wave means
+  a longer QT.
+- **Charts.** The beat against the reference, with the matching lines and the
+  warped beat. Δ(t) of the beat against the period's median and middle half.
+  A heat map of Δ for every beat (x: time, y: ms from R) with RR and the DTW
+  distance under it. Δ at a chosen phase (click; default the T-wave peak)
+  against the RR before the beat: its slope is the QT–RR relation, if the
+  phase is on the T wave.
+
 ## Daily summary: resting HRV against your own baseline
 
 `http://localhost:8765/daily` (also linked from the dashboard and the review
@@ -260,10 +289,11 @@ app/
 ├── hub.py            # fans events out to CSV + all WebSocket clients
 ├── ble_source.py     # scan / connect / subscribe / auto-reconnect (bleak)
 ├── demo_source.py    # synthetic data generator (--demo)
-├── webserver.py      # aiohttp: serves the dashboard + /ws, the review page + /api/sessions (+ /ecg raw window), /daily + /api/rest
+├── webserver.py      # aiohttp: serves the dashboard + /ws, the review page + /api/sessions (+ /ecg raw window), /daily + /api/rest, /morph
 ├── recordings.py     # reads saved sessions back for the review page (beats, lost-beat breaks, activity + cadence, raw ECG windows), resting windows for /daily
 ├── static/           # index.html + app.js + style.css (uPlot via CDN);
 │                     # review.html + review.js + hrv.js (HRV / DFA / MFDFA / Chhabra–Jensen), ecgview.js (raw ECG strip)
+│                     # morph.html + morph.js + dtw.js (beat timing against the averaged beat, DTW)
 ├── recordings/       # CSV output (created on first run)
 ├── requirements.txt
 ├── install.sh / run.sh                 # Linux + macOS installer / launcher

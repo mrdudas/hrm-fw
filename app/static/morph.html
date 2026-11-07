@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>HRM Raw RR — Beat timing</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="review">
+<header>
+  <div class="brand">
+    <span class="logo">&#9829;</span>
+    <span>HRM Raw RR — Beat timing (DTW)</span>
+  </div>
+  <div class="header-right">
+    <div class="device">
+      <select id="ses-select" title="Saved session"></select>
+    </div>
+    <a id="nav-review" class="tool-btn nav-link" href="/review">Recordings</a>
+    <a class="tool-btn nav-link" href="/daily">Daily</a>
+    <a class="tool-btn nav-link" href="/">Live dashboard</a>
+  </div>
+</header>
+
+<main>
+  <section class="card wide">
+    <div class="card-head">
+      <h2 title="Heart rate over the whole recording. Drag to choose the period to analyse (at most 10 min: its raw ECG is loaded)">Period</h2>
+      <span class="hint rv-tools"><span id="ses-info"></span></span>
+    </div>
+    <div id="ov-chart" class="rv-overview"></div>
+    <div class="rv-selbar">
+      <button id="sel-prev" class="tool-btn" title="Previous period of the same length">◀</button>
+      <span id="sel-text" class="rv-seltext">–</span>
+      <button id="sel-next" class="tool-btn" title="Next period of the same length">▶</button>
+      <select id="sel-len" class="tool-sel" title="Length of the period">
+        <option value="60">1 min</option><option value="120" selected>2 min</option>
+        <option value="300">5 min</option><option value="600">10 min</option>
+      </select>
+      <span class="sep"></span>
+      <span class="hint">drag on the chart: choose the period · click: move it there</span>
+    </div>
+    <div class="dtw-params hint">
+      <label class="nowrap" title="Window before the R peak, ms. Empty: a third of the median RR, at most 250">before R <input id="p-pre" type="number" min="60" max="400" step="10" placeholder="auto" class="avg-n"> ms</label>
+      <label class="nowrap" title="Window after the R peak, ms. Empty: 60 % of the median RR, at most 500 (reaches past the T wave, short of the next P)">after R <input id="p-post" type="number" min="150" max="800" step="10" placeholder="auto" class="avg-n"> ms</label>
+      <label class="nowrap" title="Largest time shift the warping may use (Sakoe–Chiba band), ms">max shift ± <input id="p-band" type="number" min="4" max="200" step="2" value="50" class="avg-n"> ms</label>
+      <label class="nowrap" title="What the warping matches: the amplitude, the slope (derivative DTW: insensitive to baseline and amplitude), or both">match
+        <select id="p-feat" class="tool-sel"><option value="both">amplitude + slope</option><option value="amp">amplitude</option><option value="slope">slope</option></select></label>
+      <label class="nowrap" title="Cost of each warping step (in units of the mean point cost). Higher: the path stays straighter and noise warps it less; 0: free warping">stiffness <input id="p-pen" type="number" min="0" max="20" step="0.1" value="0.5" class="avg-n"></label>
+      <label class="nowrap" title="Smoothing of the timing curve, ms (moving average)">smooth <input id="p-smooth" type="number" min="0" max="60" step="2" value="10" class="avg-n"> ms</label>
+      <label class="nowrap" title="Reference: the mean or the median of the clean beats of the period (the median ignores odd beats better)">reference
+        <select id="p-ref" class="tool-sel"><option value="mean">mean beat</option><option value="median">median beat</option></select></label>
+      <select id="p-notch" class="tool-sel" title="Mains-hum notch before the analysis (zero-phase)">
+        <option value="0">Notch off</option><option value="50">Notch 50 Hz</option><option value="60">Notch 60 Hz</option>
+        <option value="strap" hidden>Notch in strap</option>
+      </select>
+      <span id="status" class="raw-note"></span>
+    </div>
+  </section>
+
+  <section class="card wide">
+    <div class="card-head">
+      <h2 title="Grey: the reference (averaged) beat. Green: this beat, scaled to the reference's QRS amplitude and aligned on its R peak. Thin lines: which point of the beat the warping matched to which point of the reference. Orange dashed: the beat warped onto the reference's time.">Beat vs reference</h2>
+      <span class="hint zoom">
+        <label class="nowrap" title="Draw the beat below the reference so the matching lines are visible"><input id="b-offset" type="checkbox" checked> apart</label>
+        <span class="sep"></span>
+        <button id="b-prev" class="tool-btn" title="Previous beat (←)">◀</button>
+        <span id="b-text" class="rv-seltext">–</span>
+        <button id="b-next" class="tool-btn" title="Next beat (→)">▶</button>
+      </span>
+    </div>
+    <div id="b-chart" class="dtw-lane"></div>
+    <div class="card-head dtw-sub">
+      <h2 title="Where each part of this beat lies against the same part of the reference, in ms, after the best warping. 0: same time from the R peak; above 0: later in this beat (e.g. a later T wave: longer QT); below: earlier. White: median of the period's clean beats, band: their middle half (25–75 %). Click to choose the phase for the charts below.">Timing deviation Δ(t)</h2>
+      <span id="d-readout" class="hint"></span>
+    </div>
+    <div id="d-chart" class="dtw-lane"></div>
+  </section>
+
+  <section class="card wide">
+    <div class="card-head">
+      <h2 title="Each column is a beat (x: its time), each row a point of the cycle (y: ms from R). Colour: its timing deviation Δ — red: later than the reference, blue: earlier. Hatched: beats left out of the reference (corrected, or the neighbouring QRS inside the window). Click: show that beat; the dashed line is the chosen phase.">Timing over the period</h2>
+      <span class="hint zoom">
+        <label class="nowrap" title="Colour scale: ± this many ms is full colour">scale ±
+          <select id="h-scale" class="tool-sel"><option>5</option><option>10</option><option selected>20</option><option>40</option></select> ms</label>
+        <span id="h-legend" class="dtw-legend"></span>
+      </span>
+    </div>
+    <div id="h-chart" class="dtw-lane"></div>
+    <div id="h-lane" class="dtw-lane"></div>
+  </section>
+
+  <section class="card wide">
+    <div class="card-head">
+      <h2 title="The timing deviation at the chosen phase against the RR interval before the beat, one dot per clean beat. A slope means this part of the cycle follows the heart rate (the T wave: the QT–RR relation).">Δ at the chosen phase vs RR</h2>
+      <span id="s-readout" class="hint"></span>
+    </div>
+    <div id="s-chart" class="dtw-lane"></div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+<script src="/static/hrv.js"></script>
+<script src="/static/dtw.js"></script>
+<script src="/static/morph.js"></script>
+</body>
+</html>

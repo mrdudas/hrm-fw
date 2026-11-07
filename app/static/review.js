@@ -198,6 +198,10 @@
     const v = EcgView.view();
     history.replaceState(null, "", `#s=${ses.id}&a=${sel[0].toFixed(1)}&b=${sel[1].toFixed(1)}` +
       (v ? `&e=${((v[0] + v[1]) / 2).toFixed(1)}` : ""));
+    if (v) {   // beat-timing page on the 2 minutes around the strip
+      const c = (v[0] + v[1]) / 2;
+      $("ecg-dtw").href = `/morph#s=${ses.id}&a=${(c - 60).toFixed(1)}&b=${(c + 60).toFixed(1)}&k=${c.toFixed(2)}`;
+    }
   }
 
   // a null at every break so lines are not drawn across lost beats
