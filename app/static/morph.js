@@ -47,7 +47,7 @@
   }
 
   // ---------- parameters ----------
-  const PARAM_IDS = ["p-method", "p-kn", "p-causal", "p-pre", "p-post", "p-band", "p-feat", "p-pen", "p-smooth", "p-ref", "h-scale", "sel-len"];
+  const PARAM_IDS = ["p-method", "p-kn", "p-causal", "p-base", "p-art", "p-pre", "p-post", "p-band", "p-feat", "p-pen", "p-smooth", "p-ref", "h-scale", "sel-len"];
   try {
     const saved = JSON.parse(localStorage.getItem("hrm.morph") || "{}");
     for (const id of PARAM_IDS) if (saved[id] != null) $(id).value = saved[id];
@@ -78,6 +78,8 @@
       method: $("p-method").value,
       kn: Math.max(2, Math.round(num("p-kn", 30))),
       causal: $("p-causal").value === "before",
+      baseline: $("p-base").value,
+      artZ: Math.max(0, num("p-art", 5)),
     };
   }
 
@@ -131,7 +133,7 @@
   // ---------- raw ECG (in chunks the server allows) ----------
   async function fetchEcg(id) {
     if (ecg && ecg.ses === ses.id && ecg.a <= sel[0] && ecg.b >= sel[1]) return ecg;
-    const segs = [];
+    const segs = [], acc = { t: [], x: [], y: [], z: [] };
     let fs = null, notched = 0;
     for (let a = sel[0] - OVERLAP; a < sel[1] + OVERLAP; a += CHUNK) {
       if (id !== runId) return null;
@@ -141,6 +143,10 @@
       if (!r.ok) throw new Error(r.status === 404 ? "no raw ECG in this session" : "HTTP " + r.status);
       const d = await r.json();
       fs = d.fs; notched = d.notched_hz || 0;
+      if (d.acc && d.acc.t) for (let i = 0; i < d.acc.t.length; i++) {
+        if (acc.t.length && d.acc.t[i] <= acc.t[acc.t.length - 1]) continue;     // overlap of the chunks
+        acc.t.push(d.acc.t[i]); acc.x.push(d.acc.x[i]); acc.y.push(d.acc.y[i]); acc.z.push(d.acc.z[i]);
+      }
       for (const g of d.ecg) {                 // chunks overlap: join a segment onto the one it continues
         const p = segs[segs.length - 1], pEnd = p ? p.t + (p.v.length - 1) / fs : -Infinity;
         if (p && g.t <= pEnd + 1.5 / fs && g.t + (g.v.length - 1) / fs > pEnd) {
@@ -149,7 +155,7 @@
         } else if (!p || g.t > pEnd) segs.push({ t: g.t, v: g.v });
       }
     }
-    return { ses: ses.id, a: sel[0], b: sel[1], fs, segs, notched };
+    return { ses: ses.id, a: sel[0], b: sel[1], fs, segs, notched, acc };
   }
 
   function schedule(refetch) {
@@ -179,13 +185,13 @@
     // R peaks from the ECG itself; the app's artifact / ectopy rules on their RR
     const clean = (rr, gap) => HRV.clean(rr, Uint8Array.from(gap)).bad;
     res = P.method === "kernel"
-      ? BeatDTW.kernelAnalyse(ecg.segs, { ...P, from: sel[0], to: sel[1], clean })
+      ? BeatDTW.kernelAnalyse(ecg.segs, { ...P, from: sel[0], to: sel[1], clean, fw: ses.beats.t, acc: ecg.acc })
       : BeatDTW.analyse(ecg.segs, { ...P, from: sel[0], to: sel[1], clean });
     const fw = lowerBound(ses.beats.t, sel[1]) - lowerBound(ses.beats.t, sel[0]);
     const nUse = res ? res.beats.filter((x) => x.fits).length : 0, ms = Math.round(performance.now() - T);
     setText("status", !res ? "no beats with raw ECG here"
       : res.method === "kernel"
-        ? `${res.beats.length} beats found in the ECG (strap: ${fw}) · ${res.nClean} clean R–R cycles · kernel: ${res.kn} cycles ${P.causal ? "before" : "around"} each · ${ms} ms`
+        ? `${res.beats.length} beats found in the ECG (strap: ${fw}) · ${res.nClean} clean R–R cycles · ${res.nArt} artifact cycles · kernel: ${res.kn} cycles ${P.causal ? "before" : "around"} each · ${ms} ms`
         : `${res.beats.length} beats found in the ECG (strap: ${fw}) · ${nUse} in the reference · window ${res.win[0]}+${res.win[1]} ms · ${ms} ms`);
     if (res) {
       // restore the beat / phase from the URL, else the first clean beat and the T-wave peak
@@ -569,6 +575,8 @@
     return [0, 1, 2].map((j) => Math.round(COL.mid[j] + (c[j] - COL.mid[j]) * a));
   }
   let heatImg = null;
+  let hideArt = true;
+  try { hideArt = localStorage.getItem("hrm.morph.hideart") !== "0"; } catch (e) {}
   function buildHeat() {
     const n = res.n, B = res.beats.length, m = +$("h-scale").value;
     const cv = document.createElement("canvas");
@@ -576,7 +584,9 @@
     const ctx = cv.getContext("2d"), img = ctx.createImageData(B, n);
     res.beats.forEach((b, k) => {
       for (let i = 0; i < n; i++) {
-        const [r, g, bl] = heatColor(b.delta[i], m), p = ((n - 1 - i) * B + k) * 4;
+        const p = ((n - 1 - i) * B + k) * 4;
+        if (b.art && hideArt) { img.data[p] = 42; img.data[p + 1] = 48; img.data[p + 2] = 59; img.data[p + 3] = 255; continue; }   // artifact: blank
+        const [r, g, bl] = heatColor(b.delta[i], m);
         const dim = !b.fits && ((i >> 2) & 1) ? 0.45 : 1;     // left out of the reference: striped
         img.data[p] = r * dim; img.data[p + 1] = g * dim; img.data[p + 2] = bl * dim; img.data[p + 3] = 255;
       }
@@ -631,16 +641,27 @@
       },
     }, [xs, xs.map(() => null)], $("h-chart"));
     // RR and the DTW distance under it, same time axis
-    const rr = res.beats.map((b) => (b.bad ? null : b.rr)), dist = res.beats.map((b) => b.dist);
+    const kern = res.method === "kernel";
+    const rr = res.beats.map((b) => (b.bad ? null : b.rr)), dist = res.beats.map((b) => (kern ? b.q : b.dist));
     lU = new uPlot({
       width: W("h-lane"), height: 130, legend: { show: false }, pxAlign: 0, padding: [6, 0, 0, 0],
       cursor: { sync: hsync, y: false, points: { show: false }, drag: { x: false, y: false } },
-      scales: { x: { time: true, auto: false, range: () => [sel[0], sel[1]] }, y: { auto: true }, d: { auto: true } },
+      scales: { x: { time: true, auto: false, range: () => [sel[0], sel[1]] }, y: { auto: true },
+                d: kern && res.artZ > 0 ? { auto: false, range: () => [0, 3 * res.artZ] } : { auto: true } },   // the score clipped at 3x the threshold
       axes: [axis({ space: 90 }), axis({ label: "RR ms", size: 50 }),
-             axis({ scale: "d", side: 1, label: "DTW dist", size: 50, grid: { show: false }, stroke: COL.dist })],
+             axis({ scale: "d", side: 1, label: kern ? "artifact z" : "DTW dist", size: 50, grid: { show: false }, stroke: COL.dist })],
       series: [{}, { stroke: COL.ecg, width: 1.2, spanGaps: false, points: { show: false } },
                { stroke: COL.dist, width: 1, scale: "d", points: { show: false } }],
-      hooks: { setCursor: [(u) => hoverBeat(u)] },
+      hooks: { setCursor: [(u) => hoverBeat(u)], draw: [(u) => {
+        if (!kern || !(res.artZ > 0)) return;
+        const ctx = u.ctx, dpr = devicePixelRatio, y = u.valToPos(res.artZ, "d", true);
+        ctx.save();
+        ctx.strokeStyle = COL.dist; ctx.globalAlpha = 0.6; ctx.lineWidth = dpr; ctx.setLineDash([4 * dpr, 3 * dpr]);
+        if (y >= u.bbox.top) { ctx.beginPath(); ctx.moveTo(u.bbox.left, y); ctx.lineTo(u.bbox.left + u.bbox.width, y); ctx.stroke(); }
+        ctx.globalAlpha = 1; ctx.fillStyle = COL.hr;                // artifact beats: a red tick at the bottom
+        for (const b of res.beats) if (b.art) ctx.fillRect(u.valToPos(b.r, "x", true) - dpr, u.bbox.top + u.bbox.height - 6 * dpr, 2 * dpr, 6 * dpr);
+        ctx.restore();
+      }] },
     }, [xs, rr, dist], $("h-lane"));
     const pick = (t, y, u) => {
       selectBeat(nearestBeat(t));
@@ -653,7 +674,8 @@
     const l = u.cursor.left;
     if (l == null || l < 0) { setText("d-readout", ""); deltaReadout(); return; }
     const k = nearestBeat(u.posToVal(l, "x")), b = res.beats[k];
-    let txt = `${clock(b.r, 2)} · RR ${Math.round(b.rr)} ms · DTW dist ${b.dist.toFixed(3)}`;
+    let txt = `${clock(b.r, 2)} · RR ${Math.round(b.rr)} ms · DTW dist ${b.dist.toFixed(3)}` +
+      (b.q != null ? ` · artifact z ${b.q.toFixed(1)}${b.art ? " (" + b.why.join(", ") + ")" : ""}` : "");
     if (u === hU && u.cursor.top != null && u.cursor.top >= 0) {
       const ms = u.posToVal(u.cursor.top, "y"), i = Math.max(0, Math.min(res.n - 1, Math.round(ms * res.fs / 1000) + res.pre));
       txt += ` · ${sg(res.tms[i], 0)} ms from R: Δ ${sg(b.delta[i])} ms`;
@@ -672,7 +694,7 @@
     hU.redraw(false, false);
     if (recentre) showTrain(true); else if (kU) { kU.redraw(false, false); kL.redraw(false, false); }
     const why = res.method === "kernel"
-      ? (b.fits ? ` · kernels of ${b.cp.nN} + ${b.cn.nN} cycles` : " · a cycle next to it is not clean (corrected beat or a break): not in the kernels")
+      ? (b.art ? ` · artifact: ${b.why.join(", ")} (left out of the kernels)` : b.fits ? ` · kernels of ${b.cp.nN} + ${b.cn.nN} cycles` : " · a cycle next to it is not clean (corrected beat or a break): not in the kernels")
       : b.bad ? " · corrected beat (not in the reference)" : !b.fits ? " · neighbouring QRS in the window (not in the reference)" : "";
     setText("b-text", `${kb + 1} / ${res.beats.length} · ${clock(b.r, 2)} · RR ${Math.round(b.rr)} ms · DTW dist ${b.dist.toFixed(3)}${why}`);
     deltaReadout(); scatterData();
@@ -742,13 +764,19 @@
   }
   methodUi();
   $("p-method").addEventListener("change", methodUi);
-  for (const id of ["p-method", "p-kn", "p-causal", "p-pre", "p-post", "p-band", "p-feat", "p-pen", "p-smooth", "p-ref"]) {
+  for (const id of ["p-method", "p-kn", "p-causal", "p-base", "p-art", "p-pre", "p-post", "p-band", "p-feat", "p-pen", "p-smooth", "p-ref"]) {
     $(id).addEventListener("change", () => { saveParams(); if (res) want = { k: res.beats[kb].r, p: res.tms[ip] }; schedule(false); });
   }
   $("p-notch").addEventListener("change", (e) => {
     try { localStorage.setItem("hrm.notch", e.target.value); } catch (err) {}
     if (res) want = { k: res.beats[kb].r, p: res.tms[ip] };
     schedule(false);
+  });
+  $("h-hide").checked = hideArt;
+  $("h-hide").addEventListener("change", (e) => {
+    hideArt = e.target.checked;
+    try { localStorage.setItem("hrm.morph.hideart", hideArt ? "1" : "0"); } catch (err) {}
+    if (res) { buildHeat(); hU.redraw(false, false); }
   });
   $("h-scale").addEventListener("change", () => { saveParams(); if (res) { buildHeat(); hU.redraw(false, false); } });
   $("b-offset").addEventListener("change", () => { saveParams(); if (res) showBeat(); });

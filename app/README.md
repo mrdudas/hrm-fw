@@ -225,6 +225,18 @@ around the strip). For a chosen period (up to 10 min) of a recording:
   ECG against the kernels laid at the real R peaks, with the deviation along
   the signal. *Fixed reference* is the earlier method: one averaged beat for
   the whole period.
+- **Baseline and artifacts (kernel method).** The baseline is a cubic spline
+  through the isoelectric level before every R (PR segment), subtracted from
+  the ECG (no high-pass ringing after a DC step; ST and T untouched); a 0.5 Hz
+  high-pass is the alternative. Every cycle gets quality scores, each a robust
+  z against the period (median ± MAD): distance to its kernel, correlation
+  with it, R amplitude (and > 25 % off), baseline step between its R peaks
+  (and > 10 % of the R), high-frequency (> 40 Hz) noise; a raw value stuck at
+  the rail is saturation. Weaker evidence (0.6 × the threshold) counts when
+  the strap's own beat disagrees with the ECG R or the accelerometer shows
+  movement. Artifact cycles leave the kernels (which are then rebuilt) and the
+  statistics; on the heat map they are blank (or shown), the lane under it
+  plots the score with the threshold and red ticks.
 - **Charts.** The beat against the reference, with the matching lines and the
   warped beat. Δ(t) of the beat against the period's median and middle half.
   A heat map of Δ for every beat (x: time, y: ms from R) with RR and the DTW

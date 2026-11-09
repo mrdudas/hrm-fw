@@ -46,7 +46,7 @@
   function prep(v, fs, o = {}) {
     let x = Float64Array.from(v);
     if (o.notch && o.notch < fs / 2) x = filtfilt(x, biquad("notch", o.notch, fs, 30));
-    x = filtfilt(x, biquad("hp", o.hp || 0.5, fs, Math.SQRT1_2));
+    if (o.hp !== 0) x = filtfilt(x, biquad("hp", o.hp || 0.5, fs, Math.SQRT1_2));   // hp: 0 = none
     if ((o.lp || 40) < fs / 2) x = filtfilt(x, biquad("lp", o.lp || 40, fs, Math.SQRT1_2));
     return x;
   }
@@ -383,7 +383,7 @@
    */
   function kernelAnalyse(segs, o) {
     const fs = o.fs;
-    const f = segs.filter((s) => s.v.length > 3 * fs).map((s) => ({ t: s.t, x: prep(s.v, fs, { notch: o.notch }) }));
+    const f = segs.filter((s) => s.v.length > 3 * fs).map((s) => ({ t: s.t, v: s.v, x: prep(s.v, fs, { notch: o.notch }) }));
     const det = detect(f, fs);
     det.beats = det.beats.filter((b) => b.r >= (o.from ?? -Infinity) - 2 && b.r <= (o.to ?? Infinity) + 2);
     if (det.beats.length < 5) return null;
@@ -393,20 +393,39 @@
     const bad = o.clean ? o.clean(rr.map((v) => (isFinite(v) ? v : rrMed)), gap) : gap;
     const pol = det.pol;
 
+    // ---- baseline: the isoelectric level before each R (PR segment, R-90 ... R-50 ms) ----
+    // g: the ECG without high-pass (notch + 40 Hz low-pass); hf: what the low-pass removed (EMG)
+    const I0 = Math.round(0.09 * fs), I1 = Math.round(0.05 * fs);
+    for (const s of f) {
+      const nt = prep(s.v, fs, { notch: o.notch, hp: 0, lp: fs });
+      s.g = prep(s.v, fs, { notch: o.notch, hp: 0 });
+      s.hf = nt.map((v, i) => v - s.g[i]);
+      s.kx = []; s.ky = [];
+    }
+    for (const b of det.beats) {
+      const s = b.seg, p = Math.round(b.p);
+      b.iso = p - I0 >= 0 ? median(s.g.subarray(p - I0, p - I1)) : NaN;
+      if (isFinite(b.iso)) { s.kx.push(p - (I0 + I1) / 2); s.ky.push(b.iso); }
+    }
+    // analysis signal: g minus a cubic spline through those levels (follows wander and DC steps
+    // without the ringing a high-pass leaves after a step), or the high-passed ECG
+    const spl = o.baseline !== "hp";
+    for (const s of f) s.a = spl && s.kx.length >= 2 ? (() => { const bl = splineEval(s.kx, s.ky, s.g.length); return s.g.map((v, i) => v - bl[i]); })() : s.x;
+
     // ---- cycles: R(k) -> R(k+1) in one segment ----
     const cyc = [];
     for (let k = 0; k + 1 < det.beats.length; k++) {
       const a = det.beats[k], b = det.beats[k + 1];
       if (a.seg !== b.seg || !isFinite(b.rr)) continue;
       const m = Math.max(2, Math.round(b.p - a.p) + 1), y = new Float64Array(m), step = (b.p - a.p) / (m - 1);
-      for (let i = 0; i < m; i++) y[i] = at(a.seg.x, a.p + i * step);
+      for (let i = 0; i < m; i++) y[i] = at(a.seg.a, a.p + i * step);
       cyc.push({ k0: k, k1: k + 1, r0: a.r, r1: b.r, len: (b.p - a.p) / fs * 1000, step, seg: a.seg, p0: a.p, y,
                  clean: !bad[k] && !bad[k + 1] });
     }
     if (cyc.length < 4) return null;
     // level and amplitude: the cycle's median set to 0, its R (both ends) scaled to the typical R
     for (const c of cyc) {
-      c.off = median(c.y);
+      c.off = spl ? 0 : median(c.y);
       c.amp = pol * ((c.y[0] + c.y[c.y.length - 1]) / 2 - c.off);
     }
     const ampMed = median(cyc.filter((c) => c.clean && c.amp > 0).map((c) => c.amp)) || 1;
@@ -439,9 +458,12 @@
     }
 
     // ---- local kernel of each cycle: mean shape and timing of its kn neighbours (not itself) ----
-    const ok = cyc.filter((c) => c.clean && c.g);
-    const idx = new Map(ok.map((c, i) => [c, i]));
     const kn = Math.max(2, o.kn | 0);
+    const sp = Math.max(0, Math.min(L0 - 2, L0 - Math.round((o.pre ?? Math.min(250, rrMed / 3)) * fs / 1000)));   // split: head 0..sp, tail sp..L0
+    let ok = [];
+    const localPass = () => {
+    ok = cyc.filter((c) => c.clean && c.g);
+    const idx = new Map(ok.map((c, i) => [c, i]));
     // prefix sums over the clean cycles of their warped shape and time map on K0's grid
     const PW = [new Float64Array(N0)], PT = [new Float64Array(N0)], PL = [0];
     for (const c of ok) {
@@ -449,7 +471,6 @@
       for (let i = 0; i < N0; i++) { w[i] = lw[i] + c.g.warped[i]; t[i] = lt[i] + c.g.map[i]; }
       PW.push(w); PT.push(t); PL.push(PL[PL.length - 1] + c.y.length - 1);
     }
-    const sp = Math.max(0, Math.min(L0 - 2, L0 - Math.round((o.pre ?? Math.min(250, rrMed / 3)) * fs / 1000)));   // split: head 0..sp, tail sp..L0
     for (const c of cyc) {
       // neighbours among the clean cycles: the kn nearest in time (centred) or the kn before
       let pos = idx.has(c) ? idx.get(c) : lowerBoundBy(ok, c.r0);
@@ -494,6 +515,11 @@
       c.dt = smooth(dt, sm).map((v) => v * 1000 / fs);
       c.spK = c.T[sp];                                          // the split on the kernel grid
     }
+    };
+    localPass();
+    // ---- artifacts: score every cycle, leave the bad ones out of the kernels, redo ----
+    const nArt = scoreArtifacts(cyc, det, { ...o, fs, pol, ampMed }) ;
+    if (nArt) { for (const c of cyc) if (c.art) c.clean = false; localPass(); }
 
     // ---- beats: tail of the cycle before + head of the cycle after, rows on K0's grid ----
     const rows = L0, pre = L0 - sp;                             // tail rows sp..L0-1, then head rows 0..sp-1
@@ -512,7 +538,9 @@
         if (q < pre) delta[q] = at(cp.dt, cp.T[sp + q]);
         else delta[q] = at(cn.dh, cn.T[q - pre]);
       }
+      const why = [...new Set([...(cp.why || []), ...(cn.why || [])])];
       beats.push({ k, t: b.r, r: b.r, rr: cp.len, rrNext: cn.len, bad: !!bad[k], fits: cp.clean && cn.clean,
+                   art: !!(cp.art || cn.art), why, q: Math.max(cp.z || 0, cn.z || 0),
                    delta, dist: (cp.dist + cn.dist) / 2, cp, cn, gain: cn.gain });
     });
     if (!beats.length) return null;
@@ -524,7 +552,128 @@
       med[q] = s[Math.floor(0.5 * (m - 1))]; q1[q] = s[Math.floor(0.25 * (m - 1))]; q3[q] = s[Math.floor(0.75 * (m - 1))];
     }
     return { method: "kernel", fs, pre, n: rows, tms, ref, pol, beats, stats: { med, q1, q3 }, win: [Math.round(pre * 1000 / fs), Math.round(sp * 1000 / fs)],
-             rrMed, L0, sp, K0, cycles: cyc, segs: f, kn, nClean: ok.length };
+             rrMed, L0, sp, K0, cycles: cyc, segs: f, kn, nClean: ok.length, nArt, artZ: o.artZ ?? 5 };
+  }
+  // natural cubic spline through (xs, ys) (xs increasing), evaluated at 0 ... n-1; flat outside
+  function splineEval(xs, ys, n) {
+    const k = xs.length, out = new Float64Array(n);
+    const h = new Float64Array(k - 1), al = new Float64Array(k), l = new Float64Array(k), mu = new Float64Array(k), z = new Float64Array(k);
+    const c = new Float64Array(k), b = new Float64Array(k - 1), d = new Float64Array(k - 1);
+    for (let i = 0; i < k - 1; i++) h[i] = Math.max(1e-9, xs[i + 1] - xs[i]);
+    for (let i = 1; i < k - 1; i++) al[i] = 3 / h[i] * (ys[i + 1] - ys[i]) - 3 / h[i - 1] * (ys[i] - ys[i - 1]);
+    l[0] = 1;
+    for (let i = 1; i < k - 1; i++) {
+      l[i] = 2 * (xs[i + 1] - xs[i - 1]) - h[i - 1] * mu[i - 1];
+      mu[i] = h[i] / l[i]; z[i] = (al[i] - h[i - 1] * z[i - 1]) / l[i];
+    }
+    l[k - 1] = 1;
+    for (let j = k - 2; j >= 0; j--) {
+      c[j] = z[j] - mu[j] * c[j + 1];
+      b[j] = (ys[j + 1] - ys[j]) / h[j] - h[j] * (c[j + 1] + 2 * c[j]) / 3;
+      d[j] = (c[j + 1] - c[j]) / (3 * h[j]);
+    }
+    let j = 0;
+    for (let i = 0; i < n; i++) {
+      if (i <= xs[0]) { out[i] = ys[0]; continue; }
+      if (i >= xs[k - 1]) { out[i] = ys[k - 1]; continue; }
+      while (j < k - 2 && xs[j + 1] < i) j++;
+      const dx = i - xs[j];
+      out[i] = ys[j] + b[j] * dx + c[j] * dx * dx + d[j] * dx * dx * dx;
+    }
+    return out;
+  }
+  // robust z-scores: (x - median) / (1.4826 MAD); NaN stays NaN
+  function robustZ(xs) {
+    const f = xs.filter(isFinite), m = median(f), mad = median(f.map((v) => Math.abs(v - m))) * 1.4826 || 1e-9;
+    return xs.map((v) => (isFinite(v) ? (v - m) / mad : NaN));
+  }
+
+  /**
+   * Signal quality of every cycle (Clifford-style SQIs), each as a robust z
+   * against the period's cycles; c.z = the largest, c.why = the reasons,
+   * c.art = artifact. Strong alone (z > artZ): distance to its kernel, poor
+   * correlation with it, odd R amplitude, a baseline (DC) step, high-frequency
+   * noise; saturation (the raw ADC stuck). Weaker evidence (z > 0.6 artZ) counts
+   * when the strap's own beat disagrees with the ECG R or the strap moved.
+   */
+  function scoreArtifacts(cyc, det, o) {
+    const fs = o.fs, thr = o.artZ ?? 5;
+    for (const c of cyc) { c.art = false; c.z = 0; c.why = []; }
+    if (!(thr > 0)) return 0;
+    const live = cyc.filter((c) => c.kernel && c.warped);
+    if (live.length < 8) return 0;
+    const val = (fn) => robustZ(live.map(fn));
+    const corr = (x, y) => {
+      let mx = 0, my = 0;
+      for (let i = 0; i < x.length; i++) { mx += x[i]; my += y[i]; }
+      mx /= x.length; my /= y.length;
+      let sxy = 0, sxx = 0, syy = 0;
+      for (let i = 0; i < x.length; i++) { const a = x[i] - mx, b = y[i] - my; sxy += a * b; sxx += a * a; syy += b * b; }
+      return sxx && syy ? sxy / Math.sqrt(sxx * syy) : 0;
+    };
+    const rms = (s, p0, m) => { let t = 0; for (let i = 0; i < m; i++) { const v = at(s.hf, p0 + i); t += v * v; } return Math.sqrt(t / m); };
+    const zs = {
+      "kernel distance": val((c) => Math.log(c.dist + 1e-9)),
+      "low correlation": val((c) => Math.log(1 - corr(c.warped, c.kernel) + 1e-4)),
+      "R amplitude": val((c) => Math.log(Math.max(1e-6, c.amp / o.ampMed))).map(Math.abs),
+      "baseline step": val((c) => Math.abs(det.beats[c.k1].iso - det.beats[c.k0].iso) / o.ampMed),
+      "HF noise": val((c) => Math.log(rms(c.seg, c.p0, c.y.length) / o.ampMed + 1e-6)),
+    };
+    // the strap's beat at each R (after the typical offset; its times can drift with BLE)
+    let fwMis = null;
+    if (o.fw && o.fw.length) {
+      const fw = o.fw, off = det.beats.map((b) => {
+        let lo = 0, hi = fw.length;
+        while (lo < hi) { const m = (lo + hi) >> 1; if (fw[m] < b.r) lo = m + 1; else hi = m; }
+        const c = [fw[lo - 1], fw[lo]].filter((v) => v != null);
+        return c.length ? c.reduce((p, v) => (Math.abs(v - b.r) < Math.abs(p - b.r) ? v : p)) - b.r : NaN;
+      });
+      fwMis = off.map((d, i) => {
+        const w = off.slice(Math.max(0, i - 20), i + 21).filter(isFinite);
+        return !isFinite(d) || Math.abs(d - median(w)) > 0.15;
+      });
+    }
+    // movement: spread of |a| in the cycle
+    let mz = null;
+    if (o.acc && o.acc.t && o.acc.t.length) {
+      const A = o.acc, mag = A.t.map((_, i) => Math.hypot(A.x[i], A.y[i], A.z[i]));
+      mz = robustZ(live.map((c) => {
+        let s = 0, s2 = 0, n = 0;
+        for (let i = 0; i < A.t.length; i++) if (A.t[i] >= c.r0 && A.t[i] <= c.r1) { s += mag[i]; s2 += mag[i] * mag[i]; n++; }
+        return n > 1 ? Math.sqrt(Math.max(0, s2 / n - (s / n) ** 2)) : NaN;
+      }));
+    }
+    // a quiet recording makes the spread tiny: also require a size that matters
+    const floor = {
+      "baseline step": (c) => Math.abs(det.beats[c.k1].iso - det.beats[c.k0].iso) > 0.1 * o.ampMed,   // > 10 % of the R
+      "R amplitude": (c) => c.amp < 0.75 * o.ampMed || c.amp > 1.33 * o.ampMed,
+    };
+    const runMax = Math.max(5, Math.round(0.02 * fs));
+    let n = 0;
+    live.forEach((c, i) => {
+      let z = 0;
+      for (const [k, arr] of Object.entries(zs)) if (isFinite(arr[i]) && arr[i] > 0) {
+        if (floor[k] && !floor[k](c)) continue;             // statistically odd but too small to matter
+        if (arr[i] > z) z = arr[i];
+        if (arr[i] > thr) c.why.push(k);
+      }
+      // saturation: the raw value stuck at the segment's extreme (a rail) for runMax samples;
+      // quiet signal repeats values too, so a run elsewhere means nothing
+      const v = c.seg.v, p0 = Math.floor(c.p0), p1 = Math.min(v.length - 1, Math.ceil(c.p0 + (c.y.length - 1) * c.step));
+      if (c.seg.vlo == null) { let lo = Infinity, hi = -Infinity; for (const x of v) { if (x < lo) lo = x; if (x > hi) hi = x; } c.seg.vlo = lo; c.seg.vhi = hi; }
+      const tol = 0.01 * (c.seg.vhi - c.seg.vlo);
+      for (let j = p0 + 1, run = 1; j <= p1; j++) {
+        run = v[j] === v[j - 1] ? run + 1 : 1;
+        if (run >= runMax && (v[j] >= c.seg.vhi - tol || v[j] <= c.seg.vlo + tol)) { c.why.push("saturation"); break; }
+      }
+      const weak = z > 0.6 * thr;
+      if (weak && fwMis && (fwMis[c.k0] || fwMis[c.k1])) c.why.push("strap beat disagrees");
+      if (weak && mz && mz[i] > 3) c.why.push("movement");
+      c.z = z;
+      c.art = c.why.length > 0;
+      if (c.art) n++;
+    });
+    return n;
   }
   function lowerBoundBy(cs, t) {
     let lo = 0, hi = cs.length;

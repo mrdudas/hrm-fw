@@ -48,6 +48,9 @@
       <label class="nowrap only-kernel" title="The kernel is the DTW average of this many clean R–R cycles">kernel <input id="p-kn" type="number" min="2" max="300" step="1" value="30" class="avg-n"> cycles</label>
       <label class="nowrap only-kernel" title="Around: the cycles before and after the beat (best for a recording, no lag). Before: only the ones before (as it would run live)">
         <select id="p-causal" class="tool-sel"><option value="around">around the beat</option><option value="before">before the beat</option></select></label>
+      <label class="nowrap only-kernel" title="Baseline removal. Spline: a cubic spline through the isoelectric level before every R (PR segment) is subtracted — follows wander and DC steps, leaves the ST segment and T wave as they are. High-pass: 0.5 Hz zero-phase (rings after a step)">baseline
+        <select id="p-base" class="tool-sel"><option value="spline">spline (PR points)</option><option value="hp">high-pass 0.5 Hz</option></select></label>
+      <label class="nowrap only-kernel" title="Artifact threshold, robust z (median ± MAD of the period's cycles). A cycle above it on any of: distance to its kernel, poor correlation with it, odd R amplitude, baseline (DC) step, high-frequency noise — or a stuck (saturated) ADC; above 0.6× it when the strap's own beat disagrees or the strap moved. Artifact cycles stay out of the kernels and the statistics. 0: off">artifact z <input id="p-art" type="number" min="0" max="50" step="0.5" value="5" class="avg-n"></label>
       <label class="nowrap" title="Shown before the R peak, ms (in the kernel method: this last part of the R–R cycle belongs to the next beat, timed from its R). Empty: a third of the median RR, at most 250">before R <input id="p-pre" type="number" min="60" max="400" step="10" placeholder="auto" class="avg-n"> ms</label>
       <label class="nowrap only-ref" title="Window after the R peak, ms. Empty: 60 % of the median RR, at most 500 (reaches past the T wave, short of the next P)">after R <input id="p-post" type="number" min="150" max="800" step="10" placeholder="auto" class="avg-n"> ms</label>
       <label class="nowrap" title="Largest time shift the warping may use (Sakoe–Chiba band), ms">max shift ± <input id="p-band" type="number" min="4" max="200" step="2" value="50" class="avg-n"> ms</label>
@@ -103,6 +106,8 @@
     <div class="card-head">
       <h2 title="Each column is a beat (x: its time), each row a point of the cycle (y: ms from R). Colour: its timing deviation Δ — red: later than the reference, blue: earlier. Hatched: beats left out of the reference (corrected, or the neighbouring QRS inside the window). Click: show that beat; the dashed line is the chosen phase.">Timing over the period</h2>
       <span class="hint zoom">
+        <label class="nowrap" title="Artifact beats (see the artifact score in the lane below, red ticks) blank on the heat map"><input id="h-hide" type="checkbox" checked> hide artifacts</label>
+        <span class="sep"></span>
         <label class="nowrap" title="Colour scale: ± this many ms is full colour">scale ±
           <select id="h-scale" class="tool-sel"><option>5</option><option>10</option><option selected>20</option><option>40</option></select> ms</label>
         <span id="h-legend" class="dtw-legend"></span>
