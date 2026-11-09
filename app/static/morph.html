@@ -43,14 +43,19 @@
       <span class="hint">drag on the chart: choose the period · click: move it there</span>
     </div>
     <div class="dtw-params hint">
-      <label class="nowrap" title="Window before the R peak, ms. Empty: a third of the median RR, at most 250">before R <input id="p-pre" type="number" min="60" max="400" step="10" placeholder="auto" class="avg-n"> ms</label>
-      <label class="nowrap" title="Window after the R peak, ms. Empty: 60 % of the median RR, at most 500 (reaches past the T wave, short of the next P)">after R <input id="p-post" type="number" min="150" max="800" step="10" placeholder="auto" class="avg-n"> ms</label>
+      <label class="nowrap" title="Kernel: an R–R cycle is one beat; each is warped onto the DTW average (DBA) of the cycles around it (not itself), so slow changes (exercise, calming down) are followed and nothing slips from beat to beat. Fixed reference: one averaged beat for the whole period.">method
+        <select id="p-method" class="tool-sel"><option value="kernel">kernel (R–R, sliding)</option><option value="ref">fixed reference</option></select></label>
+      <label class="nowrap only-kernel" title="The kernel is the DTW average of this many clean R–R cycles">kernel <input id="p-kn" type="number" min="2" max="300" step="1" value="30" class="avg-n"> cycles</label>
+      <label class="nowrap only-kernel" title="Around: the cycles before and after the beat (best for a recording, no lag). Before: only the ones before (as it would run live)">
+        <select id="p-causal" class="tool-sel"><option value="around">around the beat</option><option value="before">before the beat</option></select></label>
+      <label class="nowrap" title="Shown before the R peak, ms (in the kernel method: this last part of the R–R cycle belongs to the next beat, timed from its R). Empty: a third of the median RR, at most 250">before R <input id="p-pre" type="number" min="60" max="400" step="10" placeholder="auto" class="avg-n"> ms</label>
+      <label class="nowrap only-ref" title="Window after the R peak, ms. Empty: 60 % of the median RR, at most 500 (reaches past the T wave, short of the next P)">after R <input id="p-post" type="number" min="150" max="800" step="10" placeholder="auto" class="avg-n"> ms</label>
       <label class="nowrap" title="Largest time shift the warping may use (Sakoe–Chiba band), ms">max shift ± <input id="p-band" type="number" min="4" max="200" step="2" value="50" class="avg-n"> ms</label>
       <label class="nowrap" title="What the warping matches: the amplitude, the slope (derivative DTW: insensitive to baseline and amplitude), or both">match
         <select id="p-feat" class="tool-sel"><option value="both">amplitude + slope</option><option value="amp">amplitude</option><option value="slope">slope</option></select></label>
       <label class="nowrap" title="Cost of each warping step (in units of the mean point cost). Higher: the path stays straighter and noise warps it less; 0: free warping">stiffness <input id="p-pen" type="number" min="0" max="20" step="0.1" value="0.5" class="avg-n"></label>
       <label class="nowrap" title="Smoothing of the timing curve, ms (moving average)">smooth <input id="p-smooth" type="number" min="0" max="60" step="2" value="10" class="avg-n"> ms</label>
-      <label class="nowrap" title="Reference: the mean or the median of the clean beats of the period (the median ignores odd beats better)">reference
+      <label class="nowrap only-ref" title="Reference: the mean or the median of the clean beats of the period (the median ignores odd beats better)">reference
         <select id="p-ref" class="tool-sel"><option value="mean">mean beat</option><option value="median">median beat</option></select></label>
       <select id="p-notch" class="tool-sel" title="Mains-hum notch before the analysis (zero-phase)">
         <option value="0">Notch off</option><option value="50">Notch 50 Hz</option><option value="60">Notch 60 Hz</option>
@@ -77,6 +82,18 @@
       <span id="d-readout" class="hint"></span>
     </div>
     <div id="d-chart" class="dtw-lane"></div>
+  </section>
+
+  <section id="k-card" class="card wide" hidden>
+    <div class="card-head">
+      <h2 title="Grey: the train of kernels, one started at each real R peak (the R peaks are pinned, so no error builds up from beat to beat); green: the real ECG; thin lines: the warping. Below: the timing deviation along the real signal — the part after an R is timed from that R, the part before the next R (P wave, PR) from that one; the step between them is the R–R difference against the kernel. Click: show that beat.">Signal vs kernel train</h2>
+      <span class="hint zoom">
+        <label class="nowrap" title="Length of the shown stretch">window
+          <select id="k-win" class="tool-sel"><option value="4">4 s</option><option value="8" selected>8 s</option><option value="16">16 s</option></select></label>
+      </span>
+    </div>
+    <div id="k-chart" class="dtw-lane"></div>
+    <div id="k-lane" class="dtw-lane"></div>
   </section>
 
   <section class="card wide">

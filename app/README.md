@@ -213,6 +213,18 @@ around the strip). For a chosen period (up to 10 min) of a recording:
   deviation Δ(t) = (where it is in this beat) − (where it is in the
   reference), both from R. Positive: later in this beat; a later T wave means
   a longer QT.
+- **Kernel method (default).** One beat = one R–R cycle. Every clean cycle
+  is warped onto the period's DTW average (DBA, 3 passes); the *kernel* of a
+  cycle is the mean shape and timing of its `n` clean neighbours (around it,
+  or only before it), never itself, so it follows slow changes (exercise,
+  calming down). Each cycle is then warped onto its own kernel with both R
+  peaks pinned, so nothing slips from beat to beat. A beat is shown as usual
+  (P before R, T after): the part after its R from the cycle that starts
+  there, timed from that R; the last part before it (P, PR) from the cycle
+  before, timed back from the same R. *Signal vs kernel train* shows the real
+  ECG against the kernels laid at the real R peaks, with the deviation along
+  the signal. *Fixed reference* is the earlier method: one averaged beat for
+  the whole period.
 - **Charts.** The beat against the reference, with the matching lines and the
   warped beat. Δ(t) of the beat against the period's median and middle half.
   A heat map of Δ for every beat (x: time, y: ms from R) with RR and the DTW

@@ -47,7 +47,7 @@
   }
 
   // ---------- parameters ----------
-  const PARAM_IDS = ["p-pre", "p-post", "p-band", "p-feat", "p-pen", "p-smooth", "p-ref", "h-scale", "sel-len"];
+  const PARAM_IDS = ["p-method", "p-kn", "p-causal", "k-win", "p-pre", "p-post", "p-band", "p-feat", "p-pen", "p-smooth", "p-ref", "h-scale", "sel-len"];
   try {
     const saved = JSON.parse(localStorage.getItem("hrm.morph") || "{}");
     for (const id of PARAM_IDS) if (saved[id] != null) $(id).value = saved[id];
@@ -75,6 +75,9 @@
       pen: Math.max(0, num("p-pen", 0.5)),
       smoothMs: Math.max(0, num("p-smooth", 10)),
       median: $("p-ref").value === "median",
+      method: $("p-method").value,
+      kn: Math.max(2, Math.round(num("p-kn", 30))),
+      causal: $("p-causal").value === "before",
     };
   }
 
@@ -174,12 +177,16 @@
     const P = params();
     const T = performance.now();
     // R peaks from the ECG itself; the app's artifact / ectopy rules on their RR
-    res = BeatDTW.analyse(ecg.segs, { ...P, from: sel[0], to: sel[1],
-      clean: (rr, gap) => HRV.clean(rr, Uint8Array.from(gap)).bad });
+    const clean = (rr, gap) => HRV.clean(rr, Uint8Array.from(gap)).bad;
+    res = P.method === "kernel"
+      ? BeatDTW.kernelAnalyse(ecg.segs, { ...P, from: sel[0], to: sel[1], clean })
+      : BeatDTW.analyse(ecg.segs, { ...P, from: sel[0], to: sel[1], clean });
     const fw = lowerBound(ses.beats.t, sel[1]) - lowerBound(ses.beats.t, sel[0]);
-    const nUse = res ? res.beats.filter((x) => x.fits).length : 0;
+    const nUse = res ? res.beats.filter((x) => x.fits).length : 0, ms = Math.round(performance.now() - T);
     setText("status", !res ? "no beats with raw ECG here"
-      : `${res.beats.length} beats found in the ECG (strap: ${fw}) · ${nUse} in the reference · window ${res.win[0]}+${res.win[1]} ms · ${Math.round(performance.now() - T)} ms`);
+      : res.method === "kernel"
+        ? `${res.beats.length} beats found in the ECG (strap: ${fw}) · ${res.nClean} clean R–R cycles · kernel: ${res.kn} cycles ${P.causal ? "before" : "around"} each · ${ms} ms`
+        : `${res.beats.length} beats found in the ECG (strap: ${fw}) · ${nUse} in the reference · window ${res.win[0]}+${res.win[1]} ms · ${ms} ms`);
     if (res) {
       // restore the beat / phase from the URL, else the first clean beat and the T-wave peak
       kb = Math.max(0, res.beats.findIndex((x) => x.fits));
@@ -262,19 +269,58 @@
 
   // ---------- charts ----------
   function drawAll() {
-    for (const u of [bU, dU, hU, lU, sU]) if (u) u.destroy();
-    bU = dU = hU = lU = sU = null;
-    for (const id of ["b-chart", "d-chart", "h-chart", "h-lane", "s-chart"]) $(id).innerHTML = "";
+    for (const u of [bU, dU, hU, lU, sU, kU, kL]) if (u) u.destroy();
+    bU = dU = hU = lU = sU = kU = kL = null;
+    for (const id of ["b-chart", "d-chart", "h-chart", "h-lane", "s-chart", "k-chart", "k-lane"]) $(id).innerHTML = "";
+    const kern = !!(res && res.method === "kernel");
+    $("k-card").hidden = !kern;
     if (!res) { setText("b-text", "–"); setText("d-readout", ""); setText("s-readout", ""); return; }
     makeBeat(); makeDelta(); makeHeat(); makeScatter();
+    if (kern) makeTrain();
     showBeat();
   }
   const W = (id) => $(id).clientWidth;
   const sync = { key: "dtwcyc" };
 
+  // beat chart data: [x, reference / kernel, beat, warped] and the matching lines [x0, y0, x1, y1]
+  let bLinks = [];
   function beatData() {
-    const b = res.beats[kb], off = $("b-offset").checked ? offset() : 0;
+    if (res.method === "kernel") return beatDataK();
+    const b = res.beats[kb], off = $("b-offset").checked ? offset() : 0, fs = res.fs;
+    const step = Math.max(1, Math.round(res.n / 70));
+    bLinks = [];
+    for (let i = 0; i < res.n; i += step) {
+      const j = i + b.delta[i] * fs / 1000;
+      bLinks.push([res.tms[i], res.ref[i], (j - res.pre) * 1000 / fs, interp(b.y, j) - off]);
+    }
     return [Array.from(res.tms), Array.from(res.ref), b.y.map((v) => v - off), Array.from(b.warped)];
+  }
+  // kernel method: the tail of the cycle before R and the head of the cycle after,
+  // each with its own kernel, x in ms from this beat's R
+  function beatDataK() {
+    const b = res.beats[kb], cp = b.cp, cn = b.cn, dt = 1000 / res.fs, off = $("b-offset").checked ? offset() : 0;
+    const kt = [], kv = [], kw = [], rt = [], rv = [], mp = cp.y.length - 1;
+    for (let s = Math.floor(cp.spK); s <= cp.Lk; s++) { kt.push((s - cp.Lk) * dt); kv.push(cp.kernel[s]); kw.push(cp.warped[s]); }
+    for (let s = 1; s <= Math.ceil(cn.spK); s++) { kt.push(s * dt); kv.push(cn.kernel[s]); kw.push(cn.warped[s]); }
+    for (let j = Math.floor(interp(cp.map, cp.spK)); j <= mp; j++) { rt.push((j - mp) * cp.step * dt); rv.push(cp.y[j]); }
+    for (let j = 1; j <= Math.ceil(interp(cn.map, cn.spK)); j++) { rt.push(j * cn.step * dt); rv.push(cn.y[j]); }
+    const t0 = Math.min(kt[0], rt[0]), t1 = Math.max(kt[kt.length - 1], rt[rt.length - 1]), xs = [];
+    for (let t = t0; t <= t1 + 1e-9; t += dt) xs.push(t);
+    const grid = (ts, vs, o) => xs.map((x) => (x < ts[0] - 1e-9 || x > ts[ts.length - 1] + 1e-9 ? null : lin(ts, vs, x) - o));
+    const step = Math.max(1, Math.round(kt.length / 70));
+    bLinks = [];
+    for (let s = Math.ceil(cp.spK); s <= cp.Lk; s += step) bLinks.push([(s - cp.Lk) * dt, cp.kernel[s], (cp.map[s] - mp) * cp.step * dt, interp(cp.y, cp.map[s]) - off]);
+    for (let s = 0; s <= cn.spK; s += step) bLinks.push([s * dt, cn.kernel[s], cn.map[s] * cn.step * dt, interp(cn.y, cn.map[s]) - off]);
+    return [xs, grid(kt, kv, 0), grid(rt, rv, off), grid(kt, kw, 0)];
+  }
+  // linear interpolation in sorted ts
+  function lin(ts, vs, x) {
+    let lo = 0, hi = ts.length - 1;
+    if (x <= ts[0]) return vs[0];
+    if (x >= ts[hi]) return vs[hi];
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (ts[m] <= x) lo = m; else hi = m; }
+    const d = ts[hi] - ts[lo];
+    return d > 0 ? vs[lo] + (vs[hi] - vs[lo]) * (x - ts[lo]) / d : vs[lo];
   }
   function offset() {
     let lo = Infinity, hi = -Infinity;
@@ -293,23 +339,105 @@
       hooks: { drawSeries: [drawLinks], draw: [phaseLine] },
     }, beatData(), $("b-chart"));
   }
-  // matching lines: reference point i -> the beat's point at i + delta
+  // matching lines: reference / kernel point -> the beat's point it was warped to
   function drawLinks(u, si) {
     if (si !== 2) return;
-    const b = res.beats[kb], off = $("b-offset").checked ? offset() : 0, ctx = u.ctx, fs = res.fs;
-    const step = Math.max(1, Math.round(res.n / 70));
+    strokeLinks(u, bLinks);
+  }
+  function strokeLinks(u, links) {
+    const ctx = u.ctx;
     ctx.save();
     ctx.beginPath(); ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height); ctx.clip();
     ctx.strokeStyle = COL.link; ctx.lineWidth = devicePixelRatio;
     ctx.beginPath();
-    for (let i = 0; i < res.n; i += step) {
-      const j = i + b.delta[i] * fs / 1000, tj = (j - res.pre) * 1000 / fs;
-      const yj = interp(b.y, j) - off;
-      ctx.moveTo(u.valToPos(res.tms[i], "x", true), u.valToPos(res.ref[i], "y", true));
-      ctx.lineTo(u.valToPos(tj, "x", true), u.valToPos(yj, "y", true));
+    for (const [x0, y0, x1, y1] of links) {
+      ctx.moveTo(u.valToPos(x0, "x", true), u.valToPos(y0, "y", true));
+      ctx.lineTo(u.valToPos(x1, "x", true), u.valToPos(y1, "y", true));
     }
     ctx.stroke();
     ctx.restore();
+  }
+
+  // ---------- kernel method: the real ECG against the train of kernels ----------
+  let kU = null, kL = null, kLinks = [];
+  function trainData() {
+    const b = res.beats[kb], fs = res.fs, win = +$("k-win").value, a = b.r - win / 2, e = b.r + win / 2;
+    const off = $("b-offset").checked ? offset() : 0, n = Math.round(win * fs) + 1;
+    const xs = new Array(n), real = new Array(n).fill(null), ker = new Array(n).fill(null), del = new Array(n).fill(null);
+    for (let q = 0; q < n; q++) xs[q] = a + q / fs;
+    const put = (arr, t, v) => { const q = Math.round((t - a) * fs); if (q >= 0 && q < n) arr[q] = v; };
+    kLinks = [];
+    for (const c of res.cycles) {
+      if (c.r1 < a || c.r0 > e) continue;
+      const m = c.y.length - 1;
+      for (let j = 0; j <= m; j++) put(real, c.r0 + j * c.step / fs, c.y[j] - off);
+      if (!c.kernel || !c.map) continue;
+      for (let s = 0; s <= c.Lk; s++) { const t = c.r0 + s / fs; if (t > c.r1 + 0.5 / fs) break; put(ker, t, c.kernel[s]); }
+      // delta on real time: head (timed from the R at the start) and tail (from the R at the end) apart
+      for (const [s0, s1, d] of [[0, Math.floor(c.spK), c.dh], [Math.ceil(c.spK), c.Lk, c.dt]]) {
+        let pt = null, pv = null;
+        for (let s = s0; s <= s1; s++) {
+          const t = c.r0 + c.map[s] * c.step / fs, v = d[s];
+          if (pt != null) {                                     // fill the grid between two path points
+            for (let q = Math.ceil((pt - a) * fs); q <= Math.floor((t - a) * fs); q++) {
+              if (q < 0 || q >= n) continue;
+              const tq = a + q / fs;
+              del[q] = t > pt ? pv + (v - pv) * (tq - pt) / (t - pt) : v;
+            }
+          }
+          pt = t; pv = v;
+        }
+      }
+      const step = Math.max(4, Math.round(win * fs / 160));   // ~160 lines across the view
+      for (let s = 0; s <= c.Lk; s += step) {
+        const tk = c.r0 + s / fs;
+        if (tk > c.r1) break;
+        kLinks.push([tk, c.kernel[s], c.r0 + c.map[s] * c.step / fs, interp(c.y, c.map[s]) - off]);
+      }
+    }
+    return { a, e, xs, ker, real, del };
+  }
+  function makeTrain() {
+    const ts = { key: "dtwtrain" };
+    const d = trainData();
+    kU = new uPlot({
+      width: W("k-chart"), height: 260, legend: { show: false }, pxAlign: 0, padding: [8, 8, 0, 0],
+      cursor: { sync: ts, y: false, points: { show: false }, drag: { x: false, y: false } },
+      scales: { x: { time: true, auto: false, range: () => [trainRange[0], trainRange[1]] }, y: { auto: true } },
+      axes: [axis({ size: 4, values: () => [] }), axis({ label: "ECG", size: 50 })],
+      series: [{}, { stroke: COL.ref, width: 2, spanGaps: false, points: { show: false } },
+               { stroke: COL.ecg, width: 1.2, spanGaps: false, points: { show: false } }],
+      hooks: { drawSeries: [(u, si) => { if (si === 2) strokeLinks(u, kLinks); }], draw: [beatLine] },
+    }, [d.xs, d.ker, d.real], $("k-chart"));
+    kL = new uPlot({
+      width: W("k-lane"), height: 150, legend: { show: false }, pxAlign: 0, padding: [6, 8, 0, 0],
+      cursor: { sync: ts, y: false, points: { show: false }, drag: { x: false, y: false } },
+      scales: { x: { time: true, auto: false, range: () => [trainRange[0], trainRange[1]] },
+                y: { auto: true, range: (u, lo, hi) => { const m = Math.max(5, Math.abs(lo), Math.abs(hi)) * 1.1; return [-m, m]; } } },
+      axes: [axis({ space: 90, values: (u, v) => v.map((x) => clock(x, 1)) }), axis({ label: "Δ ms", size: 50 })],
+      series: [{}, { stroke: COL.hr, width: 1.5, spanGaps: false, points: { show: false } }],
+      hooks: { draw: [beatLine, (u) => {
+        const ctx = u.ctx, y = u.valToPos(0, "y", true);
+        ctx.save(); ctx.strokeStyle = COL.text; ctx.globalAlpha = 0.5; ctx.lineWidth = devicePixelRatio;
+        ctx.beginPath(); ctx.moveTo(u.bbox.left, y); ctx.lineTo(u.bbox.left + u.bbox.width, y); ctx.stroke(); ctx.restore();
+      }] },
+    }, [d.xs, d.del], $("k-lane"));
+    trainRange = [d.a, d.e];
+    for (const u of [kU, kL]) clickOn(u, (t) => selectBeat(nearestBeat(t)));
+  }
+  let trainRange = [0, 1];
+  function showTrain() {
+    if (!kU) return;
+    const d = trainData();
+    trainRange = [d.a, d.e];
+    kU.setData([d.xs, d.ker, d.real]);
+    kL.setData([d.xs, d.del]);
+  }
+  function beatLine(u) {                     // this beat's R
+    const ctx = u.ctx, x = u.valToPos(res.beats[kb].r, "x", true);
+    ctx.save(); ctx.strokeStyle = COL.fg; ctx.globalAlpha = 0.5; ctx.lineWidth = devicePixelRatio;
+    ctx.setLineDash([4 * devicePixelRatio, 3 * devicePixelRatio]);
+    ctx.beginPath(); ctx.moveTo(x, u.bbox.top); ctx.lineTo(x, u.bbox.top + u.bbox.height); ctx.stroke(); ctx.restore();
   }
   function interp(y, p) {
     const i = Math.max(0, Math.min(y.length - 2, Math.floor(p))), f = Math.max(0, Math.min(1, p - i));
@@ -464,7 +592,10 @@
     bU.setData(beatData());
     dU.setData([Array.from(res.tms), Array.from(res.stats.q1), Array.from(res.stats.q3), Array.from(res.stats.med), Array.from(b.delta)]);
     hU.redraw(false, false);
-    const why = b.bad ? " · corrected beat (not in the reference)" : !b.fits ? " · neighbouring QRS in the window (not in the reference)" : "";
+    showTrain();
+    const why = res.method === "kernel"
+      ? (b.fits ? ` · kernels of ${b.cp.nN} + ${b.cn.nN} cycles` : " · a cycle next to it is not clean (corrected beat or a break): not in the kernels")
+      : b.bad ? " · corrected beat (not in the reference)" : !b.fits ? " · neighbouring QRS in the window (not in the reference)" : "";
     setText("b-text", `${kb + 1} / ${res.beats.length} · ${clock(b.r, 2)} · RR ${Math.round(b.rr)} ms · DTW dist ${b.dist.toFixed(3)}${why}`);
     deltaReadout(); scatterData();
   }
@@ -526,7 +657,15 @@
   }
 
   // ---------- inputs ----------
-  for (const id of ["p-pre", "p-post", "p-band", "p-feat", "p-pen", "p-smooth", "p-ref"]) {
+  function methodUi() {
+    const k = $("p-method").value === "kernel";
+    for (const el of document.querySelectorAll(".only-kernel")) el.hidden = !k;
+    for (const el of document.querySelectorAll(".only-ref")) el.hidden = k;
+  }
+  methodUi();
+  $("p-method").addEventListener("change", methodUi);
+  $("k-win").addEventListener("change", () => { saveParams(); if (res && kU) showTrain(); });
+  for (const id of ["p-method", "p-kn", "p-causal", "p-pre", "p-post", "p-band", "p-feat", "p-pen", "p-smooth", "p-ref"]) {
     $(id).addEventListener("change", () => { saveParams(); if (res) want = { k: res.beats[kb].r, p: res.tms[ip] }; schedule(false); });
   }
   $("p-notch").addEventListener("change", (e) => {
@@ -550,7 +689,7 @@
   let rz = 0;
   window.addEventListener("resize", () => {
     clearTimeout(rz);
-    rz = setTimeout(() => { if (ov) ov.setSize({ width: W("ov-chart"), height: 120 }); drawAll(); }, 150);
+    rz = setTimeout(() => { if (ov) ov.setSize({ width: W("ov-chart"), height: 120 }); if (res) drawAll(); }, 150);
   });
 
   loadList();

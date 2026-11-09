@@ -235,3 +235,4 @@ html{background:var(--bg); color-scheme:dark}
 .dtw-lane{width:100%; line-height:0}
 .dtw-sub{margin-top:14px}
 .dtw-legend{font-variant-numeric:tabular-nums}
+.dtw-params [hidden], .card[hidden]{display:none}
