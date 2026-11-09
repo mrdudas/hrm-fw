@@ -195,7 +195,7 @@
     const nUse = res ? res.beats.filter((x) => x.fits).length : 0, ms = Math.round(performance.now() - T);
     setText("status", !res ? "no beats with raw ECG here"
       : res.method === "kernel"
-        ? `${res.beats.length} beats found in the ECG (strap: ${fw}) · ${res.nClean} clean R–R cycles · ${res.nArt} artifact cycles · kernel: ${res.kn} cycles ${P.causal ? "before" : "around"} each · ${ms} ms`
+        ? `${res.beats.length} beats found in the ECG (strap: ${fw}) · ${res.nClean} clean beats · ${res.nArt} artifact beats · cut at the TP segment, ${res.bound.split} ms after R (of ${res.bound.rr}; T end ~${res.bound.tEnd}, P onset ~${res.bound.pOn}) · kernel: ${res.kn} beats ${P.causal ? "before" : "around"} each · ${ms} ms`
         : `${res.beats.length} beats found in the ECG (strap: ${fw}) · ${nUse} in the reference · window ${res.win[0]}+${res.win[1]} ms · ${ms} ms`);
     if (res) {
       // restore the beat / phase from the URL, else the first clean beat and the T-wave peak
@@ -324,22 +324,18 @@
     }
     return [Array.from(res.tms), Array.from(res.ref), b.y.map((v) => v - off), Array.from(b.warped)];
   }
-  // kernel method: the tail of the cycle before R and the head of the cycle after,
-  // each with its own kernel, x in ms from this beat's R
+  // kernel method: the beat from TP to TP with its kernel, x in ms from this beat's R
   function beatDataK() {
-    const b = res.beats[kb], cp = b.cp, cn = b.cn, dt = 1000 / res.fs, off = $("b-offset").checked ? offset() : 0;
-    const kt = [], kv = [], kw = [], rt = [], rv = [], mp = cp.y.length - 1;
-    for (let s = Math.floor(cp.spK); s <= cp.Lk; s++) { kt.push((s - cp.Lk) * dt); kv.push(cp.kernel[s]); kw.push(cp.warped[s]); }
-    for (let s = 1; s <= Math.ceil(cn.spK); s++) { kt.push(s * dt); kv.push(cn.kernel[s]); kw.push(cn.warped[s]); }
-    for (let j = Math.floor(interp(cp.map, cp.spK)); j <= mp; j++) { rt.push((j - mp) * cp.step * dt); rv.push(cp.y[j]); }
-    for (let j = 1; j <= Math.ceil(interp(cn.map, cn.spK)); j++) { rt.push(j * cn.step * dt); rv.push(cn.y[j]); }
+    const c = res.beats[kb].c, dt = 1000 / res.fs, off = $("b-offset").checked ? offset() : 0;
+    const kt = [], kv = [], kw = [], rt = [], rv = [];
+    for (let s = 0; s <= c.Lk; s++) { kt.push((s - c.kR) * dt); kv.push(c.kernel[s]); kw.push(c.warped[s]); }
+    for (let j = 0; j < c.y.length; j++) { rt.push((j - c.rI) * dt); rv.push(c.y[j]); }
     const t0 = Math.min(kt[0], rt[0]), t1 = Math.max(kt[kt.length - 1], rt[rt.length - 1]), xs = [];
     for (let t = t0; t <= t1 + 1e-9; t += dt) xs.push(t);
     const grid = (ts, vs, o) => xs.map((x) => (x < ts[0] - 1e-9 || x > ts[ts.length - 1] + 1e-9 ? null : lin(ts, vs, x) - o));
     const step = Math.max(1, Math.round(kt.length / 70));
     bLinks = [];
-    for (let s = Math.ceil(cp.spK); s <= cp.Lk; s += step) bLinks.push([(s - cp.Lk) * dt, cp.kernel[s], (cp.map[s] - mp) * cp.step * dt, interp(cp.y, cp.map[s]) - off]);
-    for (let s = 0; s <= cn.spK; s += step) bLinks.push([s * dt, cn.kernel[s], cn.map[s] * cn.step * dt, interp(cn.y, cn.map[s]) - off]);
+    for (let s = 0; s <= c.Lk; s += step) bLinks.push([(s - c.kR) * dt, c.kernel[s], (c.map[s] - c.rI) * dt, interp(c.y, c.map[s]) - off]);
     return [xs, grid(kt, kv, 0), grid(rt, rv, off), grid(kt, kw, 0)];
   }
   // linear interpolation in sorted ts
@@ -409,14 +405,15 @@
     for (const c of res.cycles) {
       if (c.r1 < a || c.r0 > e) continue;
       const m = c.y.length - 1;
-      for (let j = 0; j <= m; j++) put(real, c.r0 + j * c.step / fs, c.y[j] - off);
+      for (let j = 0; j <= m; j++) put(real, c.r0 + j / fs, c.y[j] - off);
       if (!c.kernel || !c.map) continue;
-      for (let s = 0; s <= c.Lk; s++) { const t = c.r0 + s / fs; if (t > c.r1 + 0.5 / fs) break; put(ker, t, c.kernel[s]); }
-      // delta on real time: head (timed from the R at the start) and tail (from the R at the end) apart
-      for (const [s0, s1, d] of [[0, Math.floor(c.spK), c.dh], [Math.ceil(c.spK), c.Lk, c.dt]]) {
+      // the kernel with its R on the beat's R, inside the beat's TP-to-TP span
+      for (let s = 0; s <= c.Lk; s++) { const t = c.r + (s - c.kR) / fs; if (t >= c.r0 - 0.5 / fs && t <= c.r1 + 0.5 / fs) put(ker, t, c.kernel[s]); }
+      // delta on real time
+      {
         let pt = null, pv = null;
-        for (let s = s0; s <= s1; s++) {
-          const t = c.r0 + c.map[s] * c.step / fs, v = d[s];
+        for (let s = 0; s <= c.Lk; s++) {
+          const t = c.r + (c.map[s] - c.rI) / fs, v = c.delta[s];
           if (pt != null) {                                     // fill the grid between two path points
             for (let q = Math.max(0, Math.ceil((pt - a) * fs)); q <= Math.min(n - 1, Math.floor((t - a) * fs)); q++) {
               const tq = a + q / fs;
@@ -429,9 +426,9 @@
       if (!links) continue;
       const step = Math.max(4, Math.round(kw * fs / 160));    // ~160 lines across the view
       for (let s = 0; s <= c.Lk; s += step) {
-        const tk = c.r0 + s / fs;
-        if (tk > c.r1) break;
-        kLinks.push([tk, c.kernel[s], c.r0 + c.map[s] * c.step / fs, interp(c.y, c.map[s]) - off]);
+        const tk = c.r + (s - c.kR) / fs;
+        if (tk < c.r0 || tk > c.r1) continue;
+        kLinks.push([tk, c.kernel[s], c.r0 + c.map[s] / fs, interp(c.y, c.map[s]) - off]);
       }
     }
     // zoomed out: min and max per bucket (every QRS stays visible)
@@ -722,7 +719,7 @@
     hU.redraw(false, false);
     if (recentre) showTrain(true); else if (kU) { kU.redraw(false, false); kL.redraw(false, false); }
     const why = res.method === "kernel"
-      ? (b.art ? ` · artifact: ${b.why.join(", ")} (left out of the kernels)` : b.fits ? ` · kernels of ${b.cp.nN} + ${b.cn.nN} cycles` : " · a cycle next to it is not clean (corrected beat or a break): not in the kernels")
+      ? (b.art ? ` · artifact: ${b.why.join(", ")} (left out of the kernels)` : b.fits ? ` · kernel of ${b.c.nN} beats · TP to TP ${Math.round((b.c.r1 - b.c.r0) * 1000)} ms (${Math.round((b.c.r - b.c.r0) * 1000)} before R)` : " · an R–R next to it is not clean (corrected beat or a break): not in the kernels")
       : b.bad ? " · corrected beat (not in the reference)" : !b.fits ? " · neighbouring QRS in the window (not in the reference)" : "";
     setText("b-text", `${kb + 1} / ${res.beats.length} · ${clock(b.r, 2)} · RR ${Math.round(b.rr)} ms · DTW dist ${b.dist.toFixed(3)}${why}`);
     deltaReadout(); scatterData();
@@ -799,14 +796,14 @@
       if (bi >= 0) selectBeat(cat.idx[bi]);
     });
     // mean delta and mean waveform per group, full resolution
-    const n = res.n, pre = res.pre, sp = res.sp;
+    const n = res.n;
     const mD = new Map(), mS = new Map(), cnt = new Map();
     cat.idx.forEach((bi, i) => {
       const l = cat.lab[i], b = res.beats[bi];
       if (!mD.has(l)) { mD.set(l, new Float64Array(n)); mS.set(l, new Float64Array(n)); cnt.set(l, 0); }
       const d = mD.get(l), s = mS.get(l);
       for (let q = 0; q < n; q++) {
-        const cy = q < pre ? b.cp : b.cn, kq = q < pre ? cy.T[sp + q] : cy.T[q - pre];
+        const cy = b.c, kq = cy.T[q];
         d[q] += b.delta[q]; s[q] += at(cy.warped, kq) - at(cy.kernel, kq);
       }
       cnt.set(l, cnt.get(l) + 1);

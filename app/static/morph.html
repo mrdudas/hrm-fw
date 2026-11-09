@@ -43,15 +43,15 @@
       <span class="hint">drag on the chart: choose the period · click: move it there</span>
     </div>
     <div class="dtw-params hint">
-      <label class="nowrap" title="Kernel: an R–R cycle is one beat; each is warped onto the DTW average (DBA) of the cycles around it (not itself), so slow changes (exercise, calming down) are followed and nothing slips from beat to beat. Fixed reference: one averaged beat for the whole period.">method
-        <select id="p-method" class="tool-sel"><option value="kernel">kernel (R–R, sliding)</option><option value="ref">fixed reference</option></select></label>
-      <label class="nowrap only-kernel" title="The kernel is the DTW average of this many clean R–R cycles">kernel <input id="p-kn" type="number" min="2" max="300" step="1" value="30" class="avg-n"> cycles</label>
-      <label class="nowrap only-kernel" title="Around: the cycles before and after the beat (best for a recording, no lag). Before: only the ones before (as it would run live)">
+      <label class="nowrap" title="Kernel: a beat is one heart cycle as it happens, P–QRS–T, cut at the quiet TP stretch between the T wave and the next P wave (found on the average, then in every interval by DTW). Each beat is warped onto the DTW average (DBA) of the beats around it (not itself), with its R pinned, so slow changes (exercise, calming down) are followed and nothing slips from beat to beat. Fixed reference: one averaged beat for the whole period.">method
+        <select id="p-method" class="tool-sel"><option value="kernel">kernel (TP–TP, sliding)</option><option value="ref">fixed reference</option></select></label>
+      <label class="nowrap only-kernel" title="The kernel is the DTW average of this many clean beats">kernel <input id="p-kn" type="number" min="2" max="300" step="1" value="30" class="avg-n"> beats</label>
+      <label class="nowrap only-kernel" title="Around: the beats before and after the beat (best for a recording, no lag). Before: only the ones before (as it would run live)">
         <select id="p-causal" class="tool-sel"><option value="around">around the beat</option><option value="before">before the beat</option></select></label>
       <label class="nowrap only-kernel" title="Baseline removal. Spline: a cubic spline through the isoelectric level before every R (PR segment) is subtracted — follows wander and DC steps, leaves the ST segment and T wave as they are. High-pass: 0.5 Hz zero-phase (rings after a step)">baseline
         <select id="p-base" class="tool-sel"><option value="spline">spline (PR points)</option><option value="hp">high-pass 0.5 Hz</option></select></label>
       <label class="nowrap only-kernel" title="Artifact threshold, robust z (median ± MAD of the period's cycles). A cycle above it on any of: distance to its kernel, poor correlation with it, odd R amplitude, baseline (DC) step, high-frequency noise — or a stuck (saturated) ADC; above 0.6× it when the strap's own beat disagrees or the strap moved. Artifact cycles stay out of the kernels and the statistics. 0: off">artifact z <input id="p-art" type="number" min="0" max="50" step="0.5" value="5" class="avg-n"></label>
-      <label class="nowrap" title="Shown before the R peak, ms (in the kernel method: this last part of the R–R cycle belongs to the next beat, timed from its R). Empty: a third of the median RR, at most 250">before R <input id="p-pre" type="number" min="60" max="400" step="10" placeholder="auto" class="avg-n"> ms</label>
+      <label class="nowrap only-ref" title="Shown before the R peak, ms. Empty: a third of the median RR, at most 250">before R <input id="p-pre" type="number" min="60" max="400" step="10" placeholder="auto" class="avg-n"> ms</label>
       <label class="nowrap only-ref" title="Window after the R peak, ms. Empty: 60 % of the median RR, at most 500 (reaches past the T wave, short of the next P)">after R <input id="p-post" type="number" min="150" max="800" step="10" placeholder="auto" class="avg-n"> ms</label>
       <label class="nowrap" title="Largest time shift the warping may use (Sakoe–Chiba band), ms">max shift ± <input id="p-band" type="number" min="4" max="200" step="2" value="50" class="avg-n"> ms</label>
       <label class="nowrap" title="What the warping matches: the amplitude, the slope (derivative DTW: insensitive to baseline and amplitude), or both">match
@@ -89,7 +89,7 @@
 
   <section id="k-card" class="card wide" hidden>
     <div class="card-head">
-      <h2 title="Grey: the train of kernels, one started at each real R peak (the R peaks are pinned, so no error builds up from beat to beat); green: the real ECG; thin lines: the warping. Below: the timing deviation along the real signal — the part after an R is timed from that R, the part before the next R (P wave, PR) from that one; the step between them is the R–R difference against the kernel. Click: show that beat.">Signal vs kernel train</h2>
+      <h2 title="Grey: the train of kernels, one per beat with its R on the real R (pinned, so no error builds up from beat to beat), each from the TP stretch before the P wave to the one after the T wave; green: the real ECG; thin lines: the warping. Below: the timing deviation along the real signal, each beat timed from its own R; at the TP boundary it steps by the R–R difference against the kernel. Click: show that beat.">Signal vs kernel train</h2>
       <span class="hint zoom">
         <span class="hint">scroll: zoom · drag: scroll · click: that beat · double-click: 8 s</span>
         <span class="sep"></span>

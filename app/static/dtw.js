@@ -371,22 +371,64 @@
   }
 
   /**
+   * DTW with the R pinned: x[0..xR] onto y[0..yR] and x[xR..] onto y[yR..].
+   * map: index in y matched to each x point.
+   */
+  function dtwR(x, xR, y, yR, o) {
+    const a = dtw2(x.subarray(0, xR + 1), y.subarray(0, yR + 1), o), b = dtw2(x.subarray(xR), y.subarray(yR), o);
+    if (!a || !b) return null;
+    const n = x.length, map = new Float64Array(n), warped = new Float64Array(n);
+    for (let i = 0; i <= xR; i++) { map[i] = a.map[i]; warped[i] = a.warped[i]; }
+    for (let i = xR; i < n; i++) { map[i] = yR + b.map[i - xR]; warped[i] = b.warped[i - xR]; }
+    return { map, warped, dist: (a.dist * (xR + 1) + b.dist * (n - xR)) / (n + 1) };
+  }
+
+  /**
+   * Where one beat ends and the next begins, on an R-to-R kernel K (R at both ends):
+   * the middle of the quietest stretch between the T peak and the P peak (the TP
+   * segment; at a fast rate, where T runs into P, the calmest point between them).
+   * Returns indices {split, tEnd, pOn, tPeak, pPeak}.
+   */
+  function findSplit(K, fs) {
+    const L = K.length - 1, ms = (v) => Math.round(v * fs / 1000);
+    const act = new Float64Array(L + 1);
+    for (let i = 1; i < L; i++) act[i] = Math.abs(K[i + 1] - K[i - 1]);
+    const sa = smooth(act, 2 * Math.max(1, ms(15)) + 1);
+    const amax = (a, b) => { let bi = a; for (let i = a; i <= b; i++) if (Math.abs(K[i]) > Math.abs(K[bi])) bi = i; return bi; };
+    const t0 = Math.min(L - 3, ms(100)), t1 = Math.max(t0, Math.min(Math.round(0.65 * L), L - ms(200)));
+    const tPeak = amax(t0, t1);
+    const p0 = Math.min(L - 1, Math.max(tPeak + 1, L - ms(250))), p1 = Math.min(L - 1, Math.max(p0, L - ms(60)));
+    const pPeak = amax(p0, p1);
+    let lo = Infinity, hi = -Infinity;
+    for (let i = tPeak; i <= pPeak; i++) { lo = Math.min(lo, sa[i]); hi = Math.max(hi, sa[i]); }
+    const thr = lo + 0.2 * (hi - lo);
+    let best = [tPeak, tPeak], run = null;
+    for (let i = tPeak; i <= pPeak; i++) {
+      if (sa[i] <= thr) { if (!run) run = [i, i]; run[1] = i; if (run[1] - run[0] > best[1] - best[0]) best = run.slice(); }
+      else run = null;
+    }
+    return { split: Math.round((best[0] + best[1]) / 2), tEnd: best[0], pOn: best[1], tPeak, pPeak };
+  }
+
+  /**
    * The kernel analysis.
-   * segs: [{t, v}]; o: {fs, notch, pre (ms before R shown, null: a third of the median RR),
-   *   band (ms), feat, pen, smoothMs, from, to, clean, kn (kernel = mean of kn cycles),
-   *   causal (kernel from the kn cycles before; else centred), iter (DBA passes)}
-   * A cycle runs from one R to the next. Its head (0 ... L0 - pre) belongs to the
-   * beat at its start, its tail (the last `pre`) to the beat at its end, so a beat
-   * is shown as usual (P before R, T after) with both parts timed from its own R.
+   * segs: [{t, v}]; o: {fs, notch, band (ms), feat, pen, smoothMs, from, to, clean,
+   *   kn (kernel = mean of kn beats), causal (kernel from the kn beats before; else centred),
+   *   iter (DBA passes), baseline, artZ, fw, acc}
+   * A beat is one heart cycle as it happens: from the quiet TP stretch before its P wave
+   * to the one after its T wave. Where that stretch lies is found first on an R-to-R
+   * average (the middle of the TP segment), then mapped into every R-R interval by DTW,
+   * so each boundary sits at that beat's own TP. Each beat is warped onto the kernel of
+   * its neighbours with the R pinned (no slip); timing is measured from its own R.
    * Returns the same shape as analyse() (tms rows, ref, beats[].delta, stats) plus
-   * cycles[] (y, kernel, map, ...) and segs (filtered ECG) for the kernel-train view.
+   * cycles[] (one per beat: y, kernel, map, ...), segs (filtered ECG) and bound (where the beats were cut).
    */
   function kernelAnalyse(segs, o) {
     const fs = o.fs;
     const f = segs.filter((s) => s.v.length > 3 * fs).map((s) => ({ t: s.t, v: s.v, x: prep(s.v, fs, { notch: o.notch }) }));
     const det = detect(f, fs);
-    det.beats = det.beats.filter((b) => b.r >= (o.from ?? -Infinity) - 2 && b.r <= (o.to ?? Infinity) + 2);
-    if (det.beats.length < 5) return null;
+    det.beats = det.beats.filter((b) => b.r >= (o.from ?? -Infinity) - 3 && b.r <= (o.to ?? Infinity) + 3);
+    if (det.beats.length < 6) return null;
     const rr = det.beats.map((b) => b.rr), good = rr.filter(isFinite);
     const rrMed = good.length ? median(good) : 800;
     const gap = rr.map((v) => (isFinite(v) ? 0 : 1));
@@ -412,67 +454,105 @@
     const spl = o.baseline !== "hp";
     for (const s of f) s.a = spl && s.kx.length >= 2 ? (() => { const bl = splineEval(s.kx, s.ky, s.g.length); return s.g.map((v, i) => v - bl[i]); })() : s.x;
 
-    // ---- cycles: R(k) -> R(k+1) in one segment ----
-    const cyc = [];
+    // level and amplitude: the cycle's median (high-pass) or 0 (spline) is the level, its R scaled to the typical R
+    const level = (cs, rv) => {
+      for (const c of cs) { c.off = spl ? 0 : median(c.y); c.amp = pol * (rv(c) - c.off); }
+      const am = median(cs.filter((c) => c.clean && c.amp > 0).map((c) => c.amp)) || 1;
+      for (const c of cs) {
+        c.gain = c.amp > 0.2 * am ? am / c.amp : 1;
+        for (let i = 0; i < c.y.length; i++) c.y[i] = (c.y[i] - c.off) * c.gain;
+      }
+      return am;
+    };
+    const wv = o.feat === "slope" ? 0 : 1, wd = o.feat === "amp" ? 0 : 1;
+    const band = Math.max(2, Math.round(o.band * fs / 1000));
+    const iters = o.iter ?? 3;
+    // DBA: align every clean cycle to K, average, repeat; the last pass aligns all cycles (c.g)
+    const dba = (K, cs, align, n) => {
+      let sv = 1, sd = 1;
+      for (let it = 0; it <= n; it++) {
+        sv = spread(K) || 1; sd = spread(slope(K)) || 1;
+        const acc = new Float64Array(K.length);
+        let nAcc = 0;
+        for (const c of (it < n ? cs.filter((c) => c.clean) : cs)) {
+          const r = align(K, c, { band, wv, wd, pen: o.pen, sv, sd });
+          c.g = r;
+          if (r && c.clean) { for (let i = 0; i < K.length; i++) acc[i] += r.warped[i]; nAcc++; }
+        }
+        if (it < n && nAcc) K = acc.map((v) => v / nAcc);
+      }
+      return { K, sv, sd };
+    };
+
+    // ---- stage 1: R-R intervals, only to find where each beat ends and the next begins ----
+    const rrc = [];
     for (let k = 0; k + 1 < det.beats.length; k++) {
       const a = det.beats[k], b = det.beats[k + 1];
       if (a.seg !== b.seg || !isFinite(b.rr)) continue;
       const m = Math.max(2, Math.round(b.p - a.p) + 1), y = new Float64Array(m), step = (b.p - a.p) / (m - 1);
       for (let i = 0; i < m; i++) y[i] = at(a.seg.a, a.p + i * step);
-      cyc.push({ k0: k, k1: k + 1, r0: a.r, r1: b.r, len: (b.p - a.p) / fs * 1000, step, seg: a.seg, p0: a.p, y,
-                 clean: !bad[k] && !bad[k + 1] });
+      rrc.push({ k0: k, p0: a.p, p1: b.p, step, y, len: (b.p - a.p) / fs * 1000, clean: !bad[k] && !bad[k + 1] });
     }
-    if (cyc.length < 4) return null;
-    // level and amplitude: the cycle's median set to 0, its R (both ends) scaled to the typical R
-    for (const c of cyc) {
-      c.off = spl ? 0 : median(c.y);
-      c.amp = pol * ((c.y[0] + c.y[c.y.length - 1]) / 2 - c.off);
+    if (rrc.filter((c) => c.clean).length < 3) return null;
+    level(rrc, (c) => (c.y[0] + c.y[c.y.length - 1]) / 2);
+    const Lrr = Math.round(median(rrc.filter((c) => c.clean).map((c) => c.y.length - 1)));
+    let Krr = new Float64Array(Lrr + 1);
+    { const cl = rrc.filter((c) => c.clean); for (const c of cl) { const r = resample(c.y, Lrr + 1); for (let i = 0; i <= Lrr; i++) Krr[i] += r[i] / cl.length; } }
+    Krr = dba(Krr, rrc, (K, c, oo) => dtw2(K, c.y, oo), Math.min(2, iters)).K;
+    const cut = findSplit(Krr, fs);
+    // that point in every interval (its own TP), kept away from both R peaks
+    const gapA = Math.round(0.12 * fs), gapB = Math.round(0.06 * fs);
+    for (const c of rrc) {
+      const m = c.y.length - 1;
+      let j = c.g ? at(c.g.map, cut.split) : cut.split * m / Lrr;
+      j = Math.max(gapA / c.step, Math.min(m - gapB / c.step, j));
+      c.bnd = c.p0 + j * c.step;
     }
-    const ampMed = median(cyc.filter((c) => c.clean && c.amp > 0).map((c) => c.amp)) || 1;
-    for (const c of cyc) {
-      c.gain = c.amp > 0.2 * ampMed ? ampMed / c.amp : 1;
-      for (let i = 0; i < c.y.length; i++) c.y[i] = (c.y[i] - c.off) * c.gain;
-    }
+
+    // ---- stage 2: beats, TP to TP, the R inside at a whole sample ----
+    const byK0 = new Map(rrc.map((c) => [c.k0, c]));
+    const cyc = [];
+    det.beats.forEach((b, k) => {
+      const cp = byK0.get(k - 1), cn = byK0.get(k);
+      if (!cp || !cn) return;
+      const rI = Math.floor(b.p - cp.bnd), m = rI + Math.floor(cn.bnd - b.p), p0 = b.p - rI;
+      if (rI < 2 || m - rI < 2) return;
+      const y = new Float64Array(m + 1);
+      for (let j = 0; j <= m; j++) y[j] = at(b.seg.a, p0 + j);
+      cyc.push({ k, k0: k, k1: k + 1, r: b.r, r0: b.r - rI / fs, r1: b.r + (m - rI) / fs, rI, p0, step: 1, seg: b.seg, y,
+                 len: cp.len, lenNext: cn.len, clean: cp.clean && cn.clean });
+    });
+    const ampMed = level(cyc, (c) => c.y[c.rI]);
     const cleanC = cyc.filter((c) => c.clean);
     if (cleanC.length < 3) return null;
 
-    // ---- global kernel K0 (DBA): start from the time-normalised mean, then align and average ----
-    const L0 = Math.round(median(cleanC.map((c) => c.y.length - 1)));
-    const N0 = L0 + 1;
+    // ---- global kernel K0 (DBA), R at R0: start from the mean of the parts before and after R ----
+    const R0 = Math.round(median(cleanC.map((c) => c.rI))), E0 = Math.round(median(cleanC.map((c) => c.y.length - 1 - c.rI)));
+    const N0 = R0 + E0 + 1;
     let K0 = new Float64Array(N0);
-    for (const c of cleanC) { const r = resample(c.y, N0); for (let i = 0; i < N0; i++) K0[i] += r[i] / cleanC.length; }
-    const wv = o.feat === "slope" ? 0 : 1, wd = o.feat === "amp" ? 0 : 1;
-    const band = Math.max(2, Math.round(o.band * fs / 1000));
-    const iters = o.iter ?? 3;
-    let sv, sd;
-    for (let it = 0; it <= iters; it++) {
-      sv = spread(K0) || 1; sd = spread(slope(K0)) || 1;
-      const acc = new Float64Array(N0);
-      let nAcc = 0;
-      for (const c of (it < iters ? cleanC : cyc)) {
-        const r = dtw2(K0, c.y, { band, wv, wd, pen: o.pen, sv, sd });
-        c.g = r;                                               // alignment to K0 (last pass: all cycles)
-        if (r && c.clean) { for (let i = 0; i < N0; i++) acc[i] += r.warped[i]; nAcc++; }
-      }
-      if (it < iters && nAcc) K0 = acc.map((v) => v / nAcc);
+    for (const c of cleanC) {
+      const a = resample(c.y.subarray(0, c.rI + 1), R0 + 1), b = resample(c.y.subarray(c.rI), E0 + 1);
+      for (let i = 0; i <= R0; i++) K0[i] += a[i] / cleanC.length;
+      for (let i = 1; i <= E0; i++) K0[R0 + i] += b[i] / cleanC.length;
     }
+    const alignR = (K, c, oo) => dtwR(K, R0, c.y, c.rI, oo);
+    let sv, sd;
+    ({ K: K0, sv, sd } = dba(K0, cyc, alignR, iters));
 
-    // ---- local kernel of each cycle: mean shape and timing of its kn neighbours (not itself) ----
+    // ---- local kernel of each beat: mean shape and timing of its kn neighbours (not itself) ----
     const kn = Math.max(2, o.kn | 0);
-    const sp = Math.max(0, Math.min(L0 - 2, L0 - Math.round((o.pre ?? Math.min(250, rrMed / 3)) * fs / 1000)));   // split: head 0..sp, tail sp..L0
     let ok = [];
     const localPass = () => {
     ok = cyc.filter((c) => c.clean && c.g);
     const idx = new Map(ok.map((c, i) => [c, i]));
-    // prefix sums over the clean cycles of their warped shape and time map on K0's grid
-    const PW = [new Float64Array(N0)], PT = [new Float64Array(N0)], PL = [0];
+    // prefix sums over the clean beats of their warped shape and time map (samples from R) on K0's grid
+    const PW = [new Float64Array(N0)], PT = [new Float64Array(N0)];
     for (const c of ok) {
       const w = new Float64Array(N0), t = new Float64Array(N0), lw = PW[PW.length - 1], lt = PT[PT.length - 1];
-      for (let i = 0; i < N0; i++) { w[i] = lw[i] + c.g.warped[i]; t[i] = lt[i] + c.g.map[i]; }
-      PW.push(w); PT.push(t); PL.push(PL[PL.length - 1] + c.y.length - 1);
+      for (let i = 0; i < N0; i++) { w[i] = lw[i] + c.g.warped[i]; t[i] = lt[i] + c.g.map[i] - c.rI; }
+      PW.push(w); PT.push(t);
     }
     for (const c of cyc) {
-      // neighbours among the clean cycles: the kn nearest in time (centred) or the kn before
       let pos = idx.has(c) ? idx.get(c) : lowerBoundBy(ok, c.r0);
       const self = idx.has(c);
       let a, b;
@@ -485,64 +565,52 @@
       let nN = b - a;
       const W = new Float64Array(N0), T = new Float64Array(N0);
       for (let i = 0; i < N0; i++) { W[i] = PW[b][i] - PW[a][i]; T[i] = PT[b][i] - PT[a][i]; }
-      let Ls = PL[b] - PL[a];
-      if (self && pos >= a && pos < b) {                       // leave the cycle itself out
-        for (let i = 0; i < N0; i++) { W[i] -= c.g.warped[i]; T[i] -= c.g.map[i]; }
-        Ls -= c.y.length - 1; nN--;
+      if (self && pos >= a && pos < b) {                       // leave the beat itself out
+        for (let i = 0; i < N0; i++) { W[i] -= c.g.warped[i]; T[i] -= c.g.map[i] - c.rI; }
+        nN--;
       }
       if (nN < 1) { c.kernel = null; continue; }
       for (let i = 0; i < N0; i++) { W[i] /= nN; T[i] /= nN; }
-      // the kernel on its own uniform time grid: points (T[i], W[i]) resampled
-      const Lk = Math.max(2, Math.round(Ls / nN)), ker = new Float64Array(Lk + 1);
+      // the kernel on a uniform grid of samples from its R: points (T[i], W[i]) resampled
+      const kR = Math.max(2, Math.round(-T[0])), Lk = kR + Math.max(2, Math.round(T[N0 - 1])), ker = new Float64Array(Lk + 1);
       let i = 0;
       for (let s = 0; s <= Lk; s++) {
-        const ts = s * T[N0 - 1] / Lk;
+        const ts = s - kR;
         while (i < N0 - 2 && T[i + 1] < ts) i++;
         const d = T[i + 1] - T[i];
         ker[s] = d > 0 ? W[i] + (W[i + 1] - W[i]) * Math.max(0, Math.min(1, (ts - T[i]) / d)) : W[i];
       }
-      c.kernel = ker; c.T = T.map((v) => v * Lk / T[N0 - 1]);  // K0 point i -> kernel sample
+      ker[kR] = W[R0];
+      c.kernel = ker; c.kR = kR; c.Lk = Lk; c.T = T.map((v) => v + kR);   // K0 point i -> kernel sample
       c.nN = nN;
-      // this cycle warped onto its kernel
-      const r = dtw2(ker, c.y, { band, wv, wd, pen: o.pen, sv, sd });
+      const r = dtwR(ker, kR, c.y, c.rI, { band, wv, wd, pen: o.pen, sv, sd });
       if (!r) { c.kernel = null; continue; }
-      c.map = r.map; c.warped = r.warped; c.dist = r.dist; c.Lk = Lk;
-      const m = c.y.length - 1, sm = Math.max(1, Math.round((o.smoothMs || 0) * fs / 1000)) | 1;
-      // timing deviation on the kernel grid: head from the start R, tail from the end R
-      const dh = new Float64Array(Lk + 1), dt = new Float64Array(Lk + 1);
-      for (let s = 0; s <= Lk; s++) { dh[s] = (r.map[s] - s) * c.step; dt[s] = ((r.map[s] - m) - (s - Lk)) * c.step; }
-      c.dh = smooth(dh, sm).map((v) => v * 1000 / fs);
-      c.dt = smooth(dt, sm).map((v) => v * 1000 / fs);
-      c.spK = c.T[sp];                                          // the split on the kernel grid
+      c.map = r.map; c.warped = r.warped; c.dist = r.dist;
+      // timing deviation on the kernel grid, from the R (0 at the R)
+      const sm = Math.max(1, Math.round((o.smoothMs || 0) * fs / 1000)) | 1, d = new Float64Array(Lk + 1);
+      for (let s = 0; s <= Lk; s++) d[s] = ((r.map[s] - c.rI) - (s - kR)) * 1000 / fs;
+      c.delta = smooth(d, sm);
     }
     };
     localPass();
-    // ---- artifacts: score every cycle, leave the bad ones out of the kernels, redo ----
-    const nArt = scoreArtifacts(cyc, det, { ...o, fs, pol, ampMed }) ;
+    // ---- artifacts: score every beat, leave the bad ones out of the kernels, redo ----
+    const nArt = scoreArtifacts(cyc, det, { ...o, fs, pol, ampMed });
     if (nArt) { for (const c of cyc) if (c.art) c.clean = false; localPass(); }
 
-    // ---- beats: tail of the cycle before + head of the cycle after, rows on K0's grid ----
-    const rows = L0, pre = L0 - sp;                             // tail rows sp..L0-1, then head rows 0..sp-1
+    // ---- beats: rows on K0's grid ----
+    const rows = N0, pre = R0;
     const tms = new Float64Array(rows);
-    for (let q = 0; q < rows; q++) tms[q] = (q < pre ? (sp + q - L0) : (q - pre)) * 1000 / fs;
-    const ref = new Float64Array(rows);
-    for (let q = 0; q < rows; q++) ref[q] = q < pre ? K0[sp + q] : K0[q - pre];
-    const byK1 = new Map(cyc.map((c) => [c.k1, c])), byK0 = new Map(cyc.map((c) => [c.k0, c]));
+    for (let q = 0; q < rows; q++) tms[q] = (q - R0) * 1000 / fs;
+    const ref = Float64Array.from(K0);
     const beats = [];
-    det.beats.forEach((b, k) => {
-      const cp = byK1.get(k), cn = byK0.get(k);
-      if (!cp || !cn || !cp.kernel || !cn.kernel) return;
-      if (b.r < (o.from ?? -Infinity) || b.r > (o.to ?? Infinity)) return;
+    for (const c of cyc) {
+      if (!c.kernel) continue;
+      if (c.r < (o.from ?? -Infinity) || c.r > (o.to ?? Infinity)) continue;
       const delta = new Float64Array(rows);
-      for (let q = 0; q < rows; q++) {
-        if (q < pre) delta[q] = at(cp.dt, cp.T[sp + q]);
-        else delta[q] = at(cn.dh, cn.T[q - pre]);
-      }
-      const why = [...new Set([...(cp.why || []), ...(cn.why || [])])];
-      beats.push({ k, t: b.r, r: b.r, rr: cp.len, rrNext: cn.len, bad: !!bad[k], fits: cp.clean && cn.clean,
-                   art: !!(cp.art || cn.art), why, q: Math.max(cp.z || 0, cn.z || 0),
-                   delta, dist: (cp.dist + cn.dist) / 2, cp, cn, gain: cn.gain });
-    });
+      for (let q = 0; q < rows; q++) delta[q] = at(c.delta, c.T[q]);
+      beats.push({ k: c.k, t: c.r, r: c.r, rr: c.len, rrNext: c.lenNext, bad: !!bad[c.k], fits: c.clean,
+                   art: !!c.art, why: c.why || [], q: c.z || 0, delta, dist: c.dist, c, gain: c.gain });
+    }
     if (!beats.length) return null;
     const use = beats.filter((b) => b.fits);
     const med = new Float64Array(rows), q1 = new Float64Array(rows), q3 = new Float64Array(rows);
@@ -551,9 +619,12 @@
       if (!m) continue;
       med[q] = s[Math.floor(0.5 * (m - 1))]; q1[q] = s[Math.floor(0.25 * (m - 1))]; q3[q] = s[Math.floor(0.75 * (m - 1))];
     }
-    return { method: "kernel", fs, pre, n: rows, tms, ref, pol, beats, stats: { med, q1, q3 }, win: [Math.round(pre * 1000 / fs), Math.round(sp * 1000 / fs)],
-             rrMed, L0, sp, K0, cycles: cyc, segs: f, kn, nClean: ok.length, nArt, artZ: o.artZ ?? 5 };
+    const msR = (i) => Math.round(i * 1000 / fs);
+    return { method: "kernel", fs, pre, n: rows, tms, ref, pol, beats, stats: { med, q1, q3 }, win: [msR(R0), msR(E0)],
+             rrMed, L0: N0 - 1, R0, K0, Krr, cycles: cyc, segs: f, kn, nClean: ok.length, nArt, artZ: o.artZ ?? 5,
+             bound: { split: msR(cut.split), tEnd: msR(cut.tEnd), pOn: msR(cut.pOn), tPeak: msR(cut.tPeak), pPeak: msR(cut.pPeak), rr: msR(Lrr) } };
   }
+
   // natural cubic spline through (xs, ys) (xs increasing), evaluated at 0 ... n-1; flat outside
   function splineEval(xs, ys, n) {
     const k = xs.length, out = new Float64Array(n);
@@ -693,19 +764,26 @@
    * the same total spread so neither dominates. Returns {idx (beat indices), X}.
    */
   function beatFeatures(res, mode = "both", bins = 48) {
-    const n = res.n, pre = res.pre, sp = res.sp;
+    const n = res.n;
     let lo = Infinity, hi = -Infinity;
     for (const v of res.ref) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
     const amp = hi - lo || 1;
-    const edges = Array.from({ length: bins + 1 }, (_, i) => Math.round(i * n / bins));
+    // only the waves: from the P onset to the T end (+-20 ms); the flat TP ends carry no timing
+    let q0 = 0, q1 = n;
+    if (res.bound) {
+      const t0 = res.bound.pOn - res.bound.rr - 20, t1 = res.bound.tEnd + 20;
+      while (q0 < n - 1 && res.tms[q0] < t0) q0++;
+      while (q1 > q0 + bins && res.tms[q1 - 1] > t1) q1--;
+    }
+    const edges = Array.from({ length: bins + 1 }, (_, i) => q0 + Math.round(i * (q1 - q0) / bins));
     const idx = [], T = [], S = [];
     res.beats.forEach((b, k) => {
-      if (!b.fits || b.art || !b.cp || !b.cn) return;
+      if (!b.fits || b.art || !b.c) return;
       const t = new Float64Array(bins), s = new Float64Array(bins);
       for (let j = 0; j < bins; j++) {
         let st = 0, ss = 0, c = 0;
         for (let q = edges[j]; q < Math.max(edges[j] + 1, edges[j + 1]); q++) {
-          const cy = q < pre ? b.cp : b.cn, kq = q < pre ? cy.T[sp + q] : cy.T[q - pre];
+          const cy = b.c, kq = cy.T[q];
           st += b.delta[q]; ss += (at(cy.warped, kq) - at(cy.kernel, kq)) / amp; c++;
         }
         t[j] = st / c; s[j] = ss / c;

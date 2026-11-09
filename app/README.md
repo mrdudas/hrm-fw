@@ -213,18 +213,21 @@ around the strip). For a chosen period (up to 10 min) of a recording:
   deviation Δ(t) = (where it is in this beat) − (where it is in the
   reference), both from R. Positive: later in this beat; a later T wave means
   a longer QT.
-- **Kernel method (default).** One beat = one R–R cycle. Every clean cycle
-  is warped onto the period's DTW average (DBA, 3 passes); the *kernel* of a
-  cycle is the mean shape and timing of its `n` clean neighbours (around it,
-  or only before it), never itself, so it follows slow changes (exercise,
-  calming down). Each cycle is then warped onto its own kernel with both R
-  peaks pinned, so nothing slips from beat to beat. A beat is shown as usual
-  (P before R, T after): the part after its R from the cycle that starts
-  there, timed from that R; the last part before it (P, PR) from the cycle
-  before, timed back from the same R. *Signal vs kernel train* shows the real
-  ECG against the kernels laid at the real R peaks, with the deviation along
-  the signal. *Fixed reference* is the earlier method: one averaged beat for
-  the whole period.
+- **Kernel method (default).** One beat = one heart cycle as it happens,
+  P–QRS–T, cut where it naturally ends: in the quiet TP stretch between the T
+  wave and the next P wave. That point is found on the DTW average of the R–R
+  intervals (the middle of the calmest stretch between the T peak and the P
+  peak), then mapped into every interval by its warping, so each boundary
+  sits at that beat's own TP. Every clean beat is warped onto the period's
+  DTW average (DBA, 3 passes); the *kernel* of a beat is the mean shape and
+  timing of its `n` clean neighbours (around it, or only before it), never
+  itself, so it follows slow changes (exercise, calming down). Each beat is
+  then warped onto its own kernel with its R pinned (the parts before and
+  after it apart), so nothing slips from beat to beat; timing is measured
+  from its own R. *Signal vs kernel train* shows the real ECG against the
+  kernels laid at the real R peaks, with the deviation along the signal.
+  *Fixed reference* is the earlier method: one averaged beat for the whole
+  period.
 - **Baseline and artifacts (kernel method).** The baseline is a cubic spline
   through the isoelectric level before every R (PR segment), subtracted from
   the ECG (no high-pass ringing after a DC step; ST and T untouched); a 0.5 Hz
@@ -239,7 +242,8 @@ around the strip). For a chosen period (up to 10 min) of a recording:
   plots the score with the threshold and red ticks.
 - **Beat categories (kernel method).** Each clean beat is described by its
   timing deviation Δ(t) and its shape left after the warping (warped beat −
-  kernel), both binned along the beat, the two blocks weighted equally (or
+  kernel), both binned along the beat from the P onset to the T end (the flat
+  TP ends carry no timing), the two blocks weighted equally (or
   either alone). PCA (90 % of the variance), then k-means; the number of
   groups (2–6, or fixed) by the silhouette, with no group under 3 % of the
   beats. Isolated beats (far from their 5th nearest neighbour) and beats far
