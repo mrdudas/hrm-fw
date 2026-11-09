@@ -178,15 +178,19 @@
     }
     syncNotch();
     setText("status", "computing…");
-    await new Promise((r) => setTimeout(r, 10));
-    if (id !== runId) return;
     const P = params();
     const T = performance.now();
-    // R peaks from the ECG itself; the app's artifact / ectopy rules on their RR
-    const clean = (rr, gap) => HRV.clean(rr, Uint8Array.from(gap)).bad;
-    res = P.method === "kernel"
-      ? BeatDTW.kernelAnalyse(ecg.segs, { ...P, from: sel[0], to: sel[1], clean, fw: ses.beats.t, acc: ecg.acc })
-      : BeatDTW.analyse(ecg.segs, { ...P, from: sel[0], to: sel[1], clean });
+    // R peaks from the ECG itself; the app's artifact / ectopy rules on their RR (in the worker)
+    const o = P.method === "kernel"
+      ? { ...P, from: sel[0], to: sel[1], fw: ses.beats.t.slice(lowerBound(ses.beats.t, sel[0] - 30), lowerBound(ses.beats.t, sel[1] + 30)), acc: ecg.acc }
+      : { ...P, from: sel[0], to: sel[1] };
+    let out;
+    try { out = await compute(id, ecg.segs, o); } catch (err) {
+      if (id === runId) setText("status", "analysis failed: " + (err.message || err));
+      return;
+    }
+    if (id !== runId || !out) return;                      // a newer run started meanwhile
+    res = out;
     const fw = lowerBound(ses.beats.t, sel[1]) - lowerBound(ses.beats.t, sel[0]);
     const nUse = res ? res.beats.filter((x) => x.fits).length : 0, ms = Math.round(performance.now() - T);
     setText("status", !res ? "no beats with raw ECG here"
@@ -203,6 +207,23 @@
     }
     drawAll();
     writeHash();
+  }
+  // the analysis in a worker; a new run stops the one still computing
+  let worker = null, workerBusy = false;
+  function compute(id, segs, o) {
+    if (workerBusy && worker) { worker.terminate(); worker = null; }
+    if (!worker) worker = new Worker("/static/dtw_worker.js");
+    workerBusy = true;
+    return new Promise((resolve, reject) => {
+      worker.onmessage = (e) => {
+        workerBusy = false;
+        if (e.data.id !== id) return resolve(null);
+        if (e.data.error) reject(new Error(e.data.error.split("\n")[0]));
+        else resolve(e.data.res);
+      };
+      worker.onerror = (e) => { workerBusy = false; reject(new Error(e.message || "worker error")); };
+      worker.postMessage({ id, segs, o });
+    });
   }
   function tPeak() {
     let best = res.pre + Math.round(0.12 * res.fs), bv = -Infinity;

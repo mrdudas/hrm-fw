@@ -317,7 +317,7 @@ app/
 ├── recordings.py     # reads saved sessions back for the review page (beats, lost-beat breaks, activity + cadence, raw ECG windows), resting windows for /daily
 ├── static/           # index.html + app.js + style.css (uPlot via CDN);
 │                     # review.html + review.js + hrv.js (HRV / DFA / MFDFA / Chhabra–Jensen), ecgview.js (raw ECG strip)
-│                     # morph.html + morph.js + dtw.js (beat timing against the averaged beat, DTW)
+│                     # morph.html + morph.js + dtw.js (beat timing against the averaged beat, DTW; runs in dtw_worker.js)
 ├── recordings/       # CSV output (created on first run)
 ├── requirements.txt
 ├── install.sh / run.sh                 # Linux + macOS installer / launcher
