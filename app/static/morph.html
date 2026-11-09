@@ -88,8 +88,11 @@
     <div class="card-head">
       <h2 title="Grey: the train of kernels, one started at each real R peak (the R peaks are pinned, so no error builds up from beat to beat); green: the real ECG; thin lines: the warping. Below: the timing deviation along the real signal — the part after an R is timed from that R, the part before the next R (P wave, PR) from that one; the step between them is the R–R difference against the kernel. Click: show that beat.">Signal vs kernel train</h2>
       <span class="hint zoom">
-        <label class="nowrap" title="Length of the shown stretch">window
-          <select id="k-win" class="tool-sel"><option value="4">4 s</option><option value="8" selected>8 s</option><option value="16">16 s</option></select></label>
+        <span class="hint">scroll: zoom · drag: scroll · click: that beat · double-click: 8 s</span>
+        <span class="sep"></span>
+        <button id="k-out" class="zoom-btn" title="Zoom out">−</button>
+        <span id="k-winl" class="win-label">8 s</span>
+        <button id="k-in" class="zoom-btn" title="Zoom in">+</button>
       </span>
     </div>
     <div id="k-chart" class="dtw-lane"></div>

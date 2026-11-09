@@ -47,7 +47,7 @@
   }
 
   // ---------- parameters ----------
-  const PARAM_IDS = ["p-method", "p-kn", "p-causal", "k-win", "p-pre", "p-post", "p-band", "p-feat", "p-pen", "p-smooth", "p-ref", "h-scale", "sel-len"];
+  const PARAM_IDS = ["p-method", "p-kn", "p-causal", "p-pre", "p-post", "p-band", "p-feat", "p-pen", "p-smooth", "p-ref", "h-scale", "sel-len"];
   try {
     const saved = JSON.parse(localStorage.getItem("hrm.morph") || "{}");
     for (const id of PARAM_IDS) if (saved[id] != null) $(id).value = saved[id];
@@ -360,12 +360,22 @@
 
   // ---------- kernel method: the real ECG against the train of kernels ----------
   let kU = null, kL = null, kLinks = [];
+  // view of the train: centre and width (s); wheel zooms, drag scrolls, double-click: 8 s
+  const KWIN_DEFAULT = 8, KWIN_MIN = 1, KMAX_PTS = 4000, KLINKS_MAX_S = 20;
+  let kc = null, kw = KWIN_DEFAULT;
+  try { kw = Math.max(KWIN_MIN, parseFloat(localStorage.getItem("hrm.morph.kwin")) || KWIN_DEFAULT); } catch (e) {}
+  function kClamp() {
+    const lo = sel[0] - 2, hi = sel[1] + 2;
+    kw = Math.max(KWIN_MIN, Math.min(hi - lo, kw));
+    kc = Math.max(lo + kw / 2, Math.min(hi - kw / 2, kc));
+  }
   function trainData() {
-    const b = res.beats[kb], fs = res.fs, win = +$("k-win").value, a = b.r - win / 2, e = b.r + win / 2;
-    const off = $("b-offset").checked ? offset() : 0, n = Math.round(win * fs) + 1;
-    const xs = new Array(n), real = new Array(n).fill(null), ker = new Array(n).fill(null), del = new Array(n).fill(null);
-    for (let q = 0; q < n; q++) xs[q] = a + q / fs;
+    kClamp();
+    const fs = res.fs, a = kc - kw / 2, e = kc + kw / 2;
+    const off = $("b-offset").checked ? offset() : 0, n = Math.round(kw * fs) + 1;
+    const real = new Float64Array(n).fill(NaN), ker = new Float64Array(n).fill(NaN), del = new Float64Array(n).fill(NaN);
     const put = (arr, t, v) => { const q = Math.round((t - a) * fs); if (q >= 0 && q < n) arr[q] = v; };
+    const links = kw <= KLINKS_MAX_S;
     kLinks = [];
     for (const c of res.cycles) {
       if (c.r1 < a || c.r0 > e) continue;
@@ -379,8 +389,7 @@
         for (let s = s0; s <= s1; s++) {
           const t = c.r0 + c.map[s] * c.step / fs, v = d[s];
           if (pt != null) {                                     // fill the grid between two path points
-            for (let q = Math.ceil((pt - a) * fs); q <= Math.floor((t - a) * fs); q++) {
-              if (q < 0 || q >= n) continue;
+            for (let q = Math.max(0, Math.ceil((pt - a) * fs)); q <= Math.min(n - 1, Math.floor((t - a) * fs)); q++) {
               const tq = a + q / fs;
               del[q] = t > pt ? pv + (v - pv) * (tq - pt) / (t - pt) : v;
             }
@@ -388,18 +397,38 @@
           pt = t; pv = v;
         }
       }
-      const step = Math.max(4, Math.round(win * fs / 160));   // ~160 lines across the view
+      if (!links) continue;
+      const step = Math.max(4, Math.round(kw * fs / 160));    // ~160 lines across the view
       for (let s = 0; s <= c.Lk; s += step) {
         const tk = c.r0 + s / fs;
         if (tk > c.r1) break;
         kLinks.push([tk, c.kernel[s], c.r0 + c.map[s] * c.step / fs, interp(c.y, c.map[s]) - off]);
       }
     }
-    return { a, e, xs, ker, real, del };
+    // zoomed out: min and max per bucket (every QRS stays visible)
+    const B = n > KMAX_PTS ? Math.ceil(n / (KMAX_PTS / 2)) : 1;
+    const xs = [], cols = [real, ker, del], out = [[], [], []];
+    const val = (v) => (isNaN(v) ? null : v);
+    if (B === 1) {
+      for (let q = 0; q < n; q++) { xs.push(a + q / fs); for (let k = 0; k < 3; k++) out[k].push(val(cols[k][q])); }
+    } else {
+      for (let q0 = 0; q0 < n; q0 += B) {
+        const q1 = Math.min(n, q0 + B);
+        xs.push(a + q0 / fs, a + (q0 + q1 - 1) / 2 / fs);
+        for (let k = 0; k < 3; k++) {
+          let lo = Infinity, hi = -Infinity;
+          for (let q = q0; q < q1; q++) { const v = cols[k][q]; if (!isNaN(v)) { if (v < lo) lo = v; if (v > hi) hi = v; } }
+          out[k].push(lo === Infinity ? null : lo, hi === -Infinity ? null : hi);
+        }
+      }
+    }
+    return { a, e, xs, real: out[0], ker: out[1], del: out[2] };
   }
   function makeTrain() {
     const ts = { key: "dtwtrain" };
+    kc = res.beats[kb].r;
     const d = trainData();
+    trainRange = [d.a, d.e];
     kU = new uPlot({
       width: W("k-chart"), height: 260, legend: { show: false }, pxAlign: 0, padding: [8, 8, 0, 0],
       cursor: { sync: ts, y: false, points: { show: false }, drag: { x: false, y: false } },
@@ -414,7 +443,7 @@
       cursor: { sync: ts, y: false, points: { show: false }, drag: { x: false, y: false } },
       scales: { x: { time: true, auto: false, range: () => [trainRange[0], trainRange[1]] },
                 y: { auto: true, range: (u, lo, hi) => { const m = Math.max(5, Math.abs(lo), Math.abs(hi)) * 1.1; return [-m, m]; } } },
-      axes: [axis({ space: 90, values: (u, v) => v.map((x) => clock(x, 1)) }), axis({ label: "Δ ms", size: 50 })],
+      axes: [axis({ space: 90, values: (u, v) => v.map((x) => clock(x, kw < 60 ? 1 : 0)) }), axis({ label: "Δ ms", size: 50 })],
       series: [{}, { stroke: COL.hr, width: 1.5, spanGaps: false, points: { show: false } }],
       hooks: { draw: [beatLine, (u) => {
         const ctx = u.ctx, y = u.valToPos(0, "y", true);
@@ -422,17 +451,65 @@
         ctx.beginPath(); ctx.moveTo(u.bbox.left, y); ctx.lineTo(u.bbox.left + u.bbox.width, y); ctx.stroke(); ctx.restore();
       }] },
     }, [d.xs, d.del], $("k-lane"));
-    trainRange = [d.a, d.e];
-    for (const u of [kU, kL]) clickOn(u, (t) => selectBeat(nearestBeat(t)));
+    setText("k-winl", fmtWin(kw));
   }
-  let trainRange = [0, 1];
-  function showTrain() {
+  let trainRange = [0, 1], kRaf = 0;
+  // recentre: on the shown beat (when a beat is picked elsewhere)
+  function showTrain(recentre = true) {
     if (!kU) return;
-    const d = trainData();
-    trainRange = [d.a, d.e];
-    kU.setData([d.xs, d.ker, d.real]);
-    kL.setData([d.xs, d.del]);
+    if (recentre) kc = res.beats[kb].r;
+    cancelAnimationFrame(kRaf);
+    kRaf = requestAnimationFrame(() => {
+      const d = trainData();
+      trainRange = [d.a, d.e];
+      kU.setData([d.xs, d.ker, d.real]);
+      kL.setData([d.xs, d.del]);
+      setText("k-winl", fmtWin(kw));
+    });
   }
+  function fmtWin(w) { return w < 10 ? w.toFixed(1) + " s" : w < 120 ? Math.round(w) + " s" : (w / 60).toFixed(w < 600 ? 1 : 0) + " min"; }
+  function kZoom(f, anchor) {
+    const old = kw;
+    kw *= f; kClamp();
+    if (anchor != null) kc = anchor + (kc - anchor) * (kw / old);
+    try { localStorage.setItem("hrm.morph.kwin", String(kw)); } catch (e) {}
+    showTrain(false);
+  }
+  // wheel: zoom at the cursor; drag: scroll; click: pick the beat; double-click: 8 s
+  function bindTrain() {
+    const host = $("k-card");
+    host.addEventListener("wheel", (e) => {
+      if (!kU || !e.target.closest(".u-over")) return;
+      e.preventDefault();
+      const dy = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1);
+      const u = e.target.closest("#k-lane") ? kL : kU;
+      kZoom(Math.exp(dy * 0.002), u.posToVal(e.clientX - u.over.getBoundingClientRect().left, "x"));
+    }, { passive: false });
+    let drag = null;
+    host.addEventListener("mousedown", (e) => {
+      if (!kU || e.button !== 0 || !e.target.closest(".u-over")) return;
+      const u = e.target.closest("#k-lane") ? kL : kU;
+      drag = { x: e.clientX, c: kc, u, moved: false };
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.x;
+      if (Math.abs(dx) > 3) drag.moved = true;
+      if (drag.moved) { kc = drag.c - dx * kw / (drag.u.over.clientWidth || 1); showTrain(false); }
+    });
+    window.addEventListener("mouseup", (e) => {
+      if (drag && !drag.moved && res) {
+        const k = nearestBeat(drag.u.posToVal(e.clientX - drag.u.over.getBoundingClientRect().left, "x"));
+        kb = Math.max(0, Math.min(res.beats.length - 1, k));
+        showBeat(false); writeHash();
+      }
+      drag = null;
+    });
+    host.addEventListener("dblclick", (e) => { if (kU && e.target.closest(".u-over")) { kw = KWIN_DEFAULT; kZoom(1, null); } });
+    $("k-out").addEventListener("click", () => kU && kZoom(1.5, null));
+    $("k-in").addEventListener("click", () => kU && kZoom(1 / 1.5, null));
+  }
+  bindTrain();
   function beatLine(u) {                     // this beat's R
     const ctx = u.ctx, x = u.valToPos(res.beats[kb].r, "x", true);
     ctx.save(); ctx.strokeStyle = COL.fg; ctx.globalAlpha = 0.5; ctx.lineWidth = devicePixelRatio;
@@ -587,12 +664,13 @@
     kb = Math.max(0, Math.min(res.beats.length - 1, k));
     showBeat(); writeHash();
   }
-  function showBeat() {
+  // recentre: move the kernel-train view to the beat (not when the beat was picked on it)
+  function showBeat(recentre = true) {
     const b = res.beats[kb];
     bU.setData(beatData());
     dU.setData([Array.from(res.tms), Array.from(res.stats.q1), Array.from(res.stats.q3), Array.from(res.stats.med), Array.from(b.delta)]);
     hU.redraw(false, false);
-    showTrain();
+    if (recentre) showTrain(true); else if (kU) { kU.redraw(false, false); kL.redraw(false, false); }
     const why = res.method === "kernel"
       ? (b.fits ? ` · kernels of ${b.cp.nN} + ${b.cn.nN} cycles` : " · a cycle next to it is not clean (corrected beat or a break): not in the kernels")
       : b.bad ? " · corrected beat (not in the reference)" : !b.fits ? " · neighbouring QRS in the window (not in the reference)" : "";
@@ -664,7 +742,6 @@
   }
   methodUi();
   $("p-method").addEventListener("change", methodUi);
-  $("k-win").addEventListener("change", () => { saveParams(); if (res && kU) showTrain(); });
   for (const id of ["p-method", "p-kn", "p-causal", "p-pre", "p-post", "p-band", "p-feat", "p-pen", "p-smooth", "p-ref"]) {
     $(id).addEventListener("change", () => { saveParams(); if (res) want = { k: res.beats[kb].r, p: res.tms[ip] }; schedule(false); });
   }
