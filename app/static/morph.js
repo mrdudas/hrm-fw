@@ -47,7 +47,7 @@
   }
 
   // ---------- parameters ----------
-  const PARAM_IDS = ["p-method", "p-kn", "p-causal", "p-base", "p-art", "p-pre", "p-post", "p-band", "p-feat", "p-pen", "p-smooth", "p-ref", "h-scale", "sel-len"];
+  const PARAM_IDS = ["p-method", "p-kn", "p-causal", "p-base", "p-art", "p-pre", "p-post", "p-band", "p-feat", "p-pen", "p-smooth", "p-ref", "h-scale", "sel-len", "c-mode", "c-k"];
   try {
     const saved = JSON.parse(localStorage.getItem("hrm.morph") || "{}");
     for (const id of PARAM_IDS) if (saved[id] != null) $(id).value = saved[id];
@@ -296,14 +296,16 @@
 
   // ---------- charts ----------
   function drawAll() {
-    for (const u of [bU, dU, hU, lU, sU, kU, kL]) if (u) u.destroy();
-    bU = dU = hU = lU = sU = kU = kL = null;
+    for (const u of [bU, dU, hU, lU, sU, kU, kL, ...cUs]) if (u) u.destroy();
+    bU = dU = hU = lU = sU = kU = kL = null; cUs = []; cat = null; catOf = null;
     for (const id of ["b-chart", "d-chart", "h-chart", "h-lane", "s-chart", "k-chart", "k-lane"]) $(id).innerHTML = "";
     const kern = !!(res && res.method === "kernel");
     $("k-card").hidden = !kern;
     if (!res) { setText("b-text", "–"); setText("d-readout", ""); setText("s-readout", ""); return; }
     makeBeat(); makeDelta(); makeHeat(); makeScatter();
     if (kern) makeTrain();
+    $("c-card").hidden = !kern;
+    if (kern) runCat();
     showBeat();
   }
   const W = (id) => $(id).clientWidth;
@@ -681,6 +683,11 @@
         if (y >= u.bbox.top) { ctx.beginPath(); ctx.moveTo(u.bbox.left, y); ctx.lineTo(u.bbox.left + u.bbox.width, y); ctx.stroke(); }
         ctx.globalAlpha = 1; ctx.fillStyle = COL.hr;                // artifact beats: a red tick at the bottom
         for (const b of res.beats) if (b.art) ctx.fillRect(u.valToPos(b.r, "x", true) - dpr, u.bbox.top + u.bbox.height - 6 * dpr, 2 * dpr, 6 * dpr);
+        if (catOf) res.beats.forEach((b, i) => {                     // categories: a coloured tick at the top
+          if (catOf[i] === -2) return;
+          ctx.fillStyle = catColor(catOf[i]);
+          ctx.fillRect(u.valToPos(b.r, "x", true) - dpr, u.bbox.top, 2 * dpr, 7 * dpr);
+        });
         ctx.restore();
       }] },
     }, [xs, rr, dist], $("h-lane"));
@@ -719,6 +726,129 @@
       : b.bad ? " · corrected beat (not in the reference)" : !b.fits ? " · neighbouring QRS in the window (not in the reference)" : "";
     setText("b-text", `${kb + 1} / ${res.beats.length} · ${clock(b.r, 2)} · RR ${Math.round(b.rr)} ms · DTW dist ${b.dist.toFixed(3)}${why}`);
     deltaReadout(); scatterData();
+    if (cUs[0]) cUs[0].redraw(false, false);
+    if (catOf && catOf[kb] !== -2) setText("b-text", $("b-text").textContent + ` · ${catOf[kb] < 0 ? "outlier" : "group " + (catOf[kb] + 1)}`);
+  }
+
+  // ---------- beat categories (kernel method) ----------
+  const CAT = ["#4bd1a0", "#5aa2ff", "#ffb454", "#c792ea", "#ff5470", "#7fdbca"];
+  const catColor = (l) => (l < 0 ? "#8b96a5" : CAT[l % CAT.length]);
+  let cat = null, catOf = null, cUs = [];
+  const at = (x, p) => {                                        // x at fractional index p
+    if (p <= 0) return x[0];
+    if (p >= x.length - 1) return x[x.length - 1];
+    const i = Math.floor(p), f = p - i;
+    return x[i] + f * (x[i + 1] - x[i]);
+  };
+  function runCat() {
+    for (const u of cUs) u.destroy();
+    cUs = [];
+    for (const id of ["c-scatter", "c-delta", "c-shape"]) $(id).innerHTML = "";
+    $("c-table").innerHTML = "";
+    cat = BeatDTW.categorize(res, { mode: $("c-mode").value, k: +$("c-k").value });
+    catOf = new Int8Array(res.beats.length).fill(-2);
+    if (!cat) { setText("c-info", "too few clean beats to group (at least 20)"); return; }
+    cat.idx.forEach((bi, i) => { catOf[bi] = cat.lab[i]; });
+    const nOut = cat.lab.filter((l) => l < 0).length;
+    const how = cat.sil > 0.5 ? "clear groups" : cat.sil > 0.25 ? "some structure" : "hardly any structure: the beats vary continuously rather than in kinds";
+    setText("c-info", `${cat.idx.length} clean beats · ${cat.k} groups · silhouette ${cat.sil.toFixed(2)} (${how})` +
+      (Object.keys(cat.sils).length > 1 ? ` · tried: ${Object.entries(cat.sils).map(([k, v]) => `${k}: ${v.toFixed(2)}`).join(", ")}` : "") +
+      ` · ${nOut} outliers · PC1–2 explain ${Math.round(100 * (cat.frac[0] + (cat.frac[1] || 0)))} %`);
+    drawCat();
+    lU.redraw(false, false);
+  }
+  function drawCat() {
+    const groups = [...new Set(cat.lab)].sort((a, b) => (a < 0) - (b < 0) || a - b);
+    const w = (id) => $(id).clientWidth;
+    // scatter of the first two PCs
+    const xs = cat.pc.map((p) => p[0]), ys = cat.pc.map((p) => p[1]);
+    const rng = (v) => {                                            // 0.5–99.5 %: a far outlier is drawn at the edge
+      const q = Array.from(v).sort((a, b) => a - b), lo = q[Math.floor(0.005 * (q.length - 1))], hi = q[Math.ceil(0.995 * (q.length - 1))];
+      const p = 0.08 * (hi - lo || 1); return [lo - p, hi + p];
+    };
+    const [x0, x1] = rng(xs), [y0, y1] = rng(ys);
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    const sc = new uPlot({
+      width: w("c-scatter"), height: 260, legend: { show: false }, pxAlign: 0, padding: [8, 8, 0, 0],
+      cursor: { show: false },
+      scales: { x: { time: false, auto: false, range: () => [x0, x1] }, y: { auto: false, range: () => [y0, y1] } },
+      axes: [axis({ label: "PC1" }), axis({ label: "PC2", size: 40 })],
+      series: [{}, { stroke: "transparent", points: { show: false } }],
+      hooks: { draw: [(u) => {
+        const ctx = u.ctx, dpr = devicePixelRatio;
+        ctx.save();
+        cat.pc.forEach((p, i) => {
+          ctx.fillStyle = catColor(cat.lab[i]); ctx.globalAlpha = cat.lab[i] < 0 ? 0.5 : 0.8;
+          ctx.beginPath(); ctx.arc(u.valToPos(clamp(p[0], x0, x1), "x", true), u.valToPos(clamp(p[1], y0, y1), "y", true), 2.4 * dpr, 0, 2 * Math.PI); ctx.fill();
+        });
+        const j = cat.idx.indexOf(kb);
+        if (j >= 0) {
+          ctx.globalAlpha = 1; ctx.strokeStyle = COL.fg; ctx.lineWidth = 2 * dpr;
+          ctx.beginPath(); ctx.arc(u.valToPos(clamp(cat.pc[j][0], x0, x1), "x", true), u.valToPos(clamp(cat.pc[j][1], y0, y1), "y", true), 6 * dpr, 0, 2 * Math.PI); ctx.stroke();
+        }
+        ctx.restore();
+      }] },
+    }, [[x0, x1], [null, null]], $("c-scatter"));
+    sc.over.addEventListener("click", (e) => {
+      const r = sc.over.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+      let bi = -1, bd = 144;
+      cat.pc.forEach((p, i) => {
+        const d = (sc.valToPos(clamp(p[0], x0, x1), "x") - mx) ** 2 + (sc.valToPos(clamp(p[1], y0, y1), "y") - my) ** 2;
+        if (d < bd) { bd = d; bi = i; }
+      });
+      if (bi >= 0) selectBeat(cat.idx[bi]);
+    });
+    // mean delta and mean waveform per group, full resolution
+    const n = res.n, pre = res.pre, sp = res.sp;
+    const mD = new Map(), mS = new Map(), cnt = new Map();
+    cat.idx.forEach((bi, i) => {
+      const l = cat.lab[i], b = res.beats[bi];
+      if (!mD.has(l)) { mD.set(l, new Float64Array(n)); mS.set(l, new Float64Array(n)); cnt.set(l, 0); }
+      const d = mD.get(l), s = mS.get(l);
+      for (let q = 0; q < n; q++) {
+        const cy = q < pre ? b.cp : b.cn, kq = q < pre ? cy.T[sp + q] : cy.T[q - pre];
+        d[q] += b.delta[q]; s[q] += at(cy.warped, kq) - at(cy.kernel, kq);
+      }
+      cnt.set(l, cnt.get(l) + 1);
+    });
+    const xsT = Array.from(res.tms);
+    const ser = groups.map((l) => ({ stroke: catColor(l), width: l < 0 ? 1 : 1.6, dash: l < 0 ? [4, 3] : undefined, points: { show: false } }));
+    const mk = (id, label, data, extra) => new uPlot({
+      width: w(id), height: 260, legend: { show: false }, pxAlign: 0, padding: [8, 8, 0, 0],
+      cursor: { y: false, points: { show: false }, drag: { x: false, y: false } },
+      scales: { x: { time: false }, y: { auto: true } },
+      axes: [axis({ label: "ms from R" }), axis({ label, size: 50 })],
+      series: [{}, ...(extra || []), ...ser],
+    }, data, $(id));
+    cUs.push(sc,
+      mk("c-delta", "Δ ms", [xsT, ...groups.map((l) => Array.from(mD.get(l), (v) => v / cnt.get(l)))]),
+      mk("c-shape", "ECG", [xsT, Array.from(res.ref), ...groups.map((l) => Array.from(mS.get(l), (v, q) => res.ref[q] + v / cnt.get(l)))],
+         [{ stroke: COL.ref, width: 3, alpha: 0.35, points: { show: false } }]));
+    // the table: what goes with each group
+    const mean = (a) => a.reduce((s, v) => s + v, 0) / (a.length || 1);
+    const sd = (a) => { const m = mean(a); return Math.sqrt(mean(a.map((v) => (v - m) ** 2))); };
+    const rows = groups.map((l) => {
+      const mem = cat.idx.filter((_, i) => cat.lab[i] === l).map((bi) => res.beats[bi]);
+      const rr = mem.map((b) => b.rr), dr = mem.map((b) => b.rrNext - b.rr), mo = mem.map((b) => motion(b.r)).filter(isFinite);
+      const ts = mem.map((b) => b.r), bins = new Set(ts.map((t) => Math.floor((t - sel[0]) / 30)));
+      const nBins = Math.max(1, Math.ceil((sel[1] - sel[0]) / 30));
+      return `<tr><td><span class="chip" style="background:${catColor(l)}"></span>${l < 0 ? "outliers" : "group " + (l + 1)}</td>` +
+        `<td>${mem.length}</td><td>${(100 * mem.length / cat.idx.length).toFixed(0)} %</td>` +
+        `<td>${mean(rr).toFixed(0)} ± ${sd(rr).toFixed(0)}</td><td>${sg(mean(dr), 0)}</td>` +
+        `<td>${mo.length ? (1000 * mean(mo)).toFixed(1) : "–"}</td><td>${(100 * bins.size / nBins).toFixed(0)} %</td></tr>`;
+    });
+    $("c-table").innerHTML = `<tr><th>group</th><th>beats</th><th>share</th><th title="RR before the beat, ms">RR ms</th>` +
+      `<th title="RR after minus RR before, ms (mean): above 0 the beat is followed by a longer interval (e.g. a compensatory pause)">RR after − before</th>` +
+      `<th title="Movement: spread of the accelerometer magnitude around the beat, milli-g (mean)">movement mg</th>` +
+      `<th title="Share of the period's 30-s stretches that hold at least one beat of the group: low = bunched in time, high = spread through it">in 30-s stretches</th></tr>` + rows.join("");
+  }
+  // spread of |a| (g) from 0.4 s before to 0.6 s after t
+  function motion(t) {
+    const A = ecg && ecg.acc;
+    if (!A || !A.t.length) return NaN;
+    let i = lowerBound(A.t, t - 0.4), s = 0, s2 = 0, n = 0;
+    for (; i < A.t.length && A.t[i] <= t + 0.6; i++) { const m = Math.hypot(A.x[i], A.y[i], A.z[i]); s += m; s2 += m * m; n++; }
+    return n > 1 ? Math.sqrt(Math.max(0, s2 / n - (s / n) ** 2)) : NaN;
   }
 
   // delta at the chosen phase against the RR before the beat
@@ -793,6 +923,7 @@
     if (res) want = { k: res.beats[kb].r, p: res.tms[ip] };
     schedule(false);
   });
+  for (const id of ["c-mode", "c-k"]) $(id).addEventListener("change", () => { saveParams(); if (res && res.method === "kernel") { runCat(); showBeat(false); } });
   $("h-hide").checked = hideArt;
   $("h-hide").addEventListener("change", (e) => {
     hideArt = e.target.checked;

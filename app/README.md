@@ -237,6 +237,19 @@ around the strip). For a chosen period (up to 10 min) of a recording:
   movement. Artifact cycles leave the kernels (which are then rebuilt) and the
   statistics; on the heat map they are blank (or shown), the lane under it
   plots the score with the threshold and red ticks.
+- **Beat categories (kernel method).** Each clean beat is described by its
+  timing deviation Δ(t) and its shape left after the warping (warped beat −
+  kernel), both binned along the beat, the two blocks weighted equally (or
+  either alone). PCA (90 % of the variance), then k-means; the number of
+  groups (2–6, or fixed) by the silhouette, with no group under 3 % of the
+  beats. Isolated beats (far from their 5th nearest neighbour) and beats far
+  from their group's centre are outliers. Shown: the beats on PC1/PC2 (click
+  one to open it), the mean Δ(t) and the mean waveform per group, coloured
+  ticks on the lane, and a table of what goes with each group: RR, the change
+  of RR after the beat, movement, how spread through the period it is. RR and
+  movement are not used for the grouping, so a group that is only a heart
+  rate or a movement shows in the table. A silhouette under 0.25 means the
+  beats vary continuously rather than in kinds.
 - **Charts.** The beat against the reference, with the matching lines and the
   warped beat. Δ(t) of the beat against the period's median and middle half.
   A heat map of Δ for every beat (x: time, y: ms from R) with RR and the DTW

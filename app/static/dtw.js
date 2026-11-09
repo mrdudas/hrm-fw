@@ -681,6 +681,197 @@
     return lo;
   }
 
+  // ======================================================================
+  // Beat categories: features of each clean beat -> PCA -> k-means
+  // ======================================================================
+
+  /**
+   * Feature vector of every usable beat of a kernel analysis: its timing
+   * deviation (ms) and its shape residual after the warping (warped - kernel,
+   * in units of the reference's range), each binned to `bins` points along
+   * the cycle; mode: "both" | "timing" | "shape". The two blocks are scaled to
+   * the same total spread so neither dominates. Returns {idx (beat indices), X}.
+   */
+  function beatFeatures(res, mode = "both", bins = 48) {
+    const n = res.n, pre = res.pre, sp = res.sp;
+    let lo = Infinity, hi = -Infinity;
+    for (const v of res.ref) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    const amp = hi - lo || 1;
+    const edges = Array.from({ length: bins + 1 }, (_, i) => Math.round(i * n / bins));
+    const idx = [], T = [], S = [];
+    res.beats.forEach((b, k) => {
+      if (!b.fits || b.art || !b.cp || !b.cn) return;
+      const t = new Float64Array(bins), s = new Float64Array(bins);
+      for (let j = 0; j < bins; j++) {
+        let st = 0, ss = 0, c = 0;
+        for (let q = edges[j]; q < Math.max(edges[j] + 1, edges[j + 1]); q++) {
+          const cy = q < pre ? b.cp : b.cn, kq = q < pre ? cy.T[sp + q] : cy.T[q - pre];
+          st += b.delta[q]; ss += (at(cy.warped, kq) - at(cy.kernel, kq)) / amp; c++;
+        }
+        t[j] = st / c; s[j] = ss / c;
+      }
+      idx.push(k); T.push(t); S.push(s);
+    });
+    const scale = (M) => {                       // centre; divide by the block's RMS spread
+      if (!M.length) return M;
+      const d = M[0].length, mu = new Float64Array(d);
+      for (const r of M) for (let j = 0; j < d; j++) mu[j] += r[j] / M.length;
+      let ss = 0;
+      for (const r of M) for (let j = 0; j < d; j++) ss += (r[j] - mu[j]) ** 2;
+      const f = Math.sqrt(ss / M.length) || 1;
+      return M.map((r) => r.map((v, j) => (v - mu[j]) / f));
+    };
+    const Ts = scale(T), Ss = scale(S);
+    const X = idx.map((_, i) => mode === "timing" ? Ts[i] : mode === "shape" ? Ss[i]
+      : Float64Array.from([...Ts[i], ...Ss[i]]));
+    return { idx, X, T, S, bins, edges };
+  }
+
+  /** PCA by the covariance's eigenvectors (Jacobi). Returns {Y (n x m scores), vals, frac (explained, per comp)}. */
+  function pca(X, maxComp = 10, keep = 0.9) {
+    const n = X.length, d = X[0].length, mu = new Float64Array(d);
+    for (const r of X) for (let j = 0; j < d; j++) mu[j] += r[j] / n;
+    const C = Array.from({ length: d }, () => new Float64Array(d));
+    for (const r of X) for (let a = 0; a < d; a++) { const va = r[a] - mu[a]; for (let b = a; b < d; b++) C[a][b] += va * (r[b] - mu[b]); }
+    for (let a = 0; a < d; a++) for (let b = a; b < d; b++) { C[a][b] /= n; C[b][a] = C[a][b]; }
+    const V = Array.from({ length: d }, (_, i) => { const r = new Float64Array(d); r[i] = 1; return r; });
+    for (let sweep = 0; sweep < 30; sweep++) {
+      let off = 0;
+      for (let p = 0; p < d; p++) for (let q = p + 1; q < d; q++) off += C[p][q] * C[p][q];
+      if (off < 1e-14) break;
+      for (let p = 0; p < d; p++) for (let q = p + 1; q < d; q++) {
+        if (Math.abs(C[p][q]) < 1e-15) continue;
+        const th = (C[q][q] - C[p][p]) / (2 * C[p][q]);
+        const t = Math.sign(th || 1) / (Math.abs(th) + Math.sqrt(th * th + 1)), c = 1 / Math.sqrt(t * t + 1), s = t * c;
+        for (let k = 0; k < d; k++) {
+          const a = C[k][p], b = C[k][q];
+          C[k][p] = c * a - s * b; C[k][q] = s * a + c * b;
+        }
+        for (let k = 0; k < d; k++) {
+          const a = C[p][k], b = C[q][k];
+          C[p][k] = c * a - s * b; C[q][k] = s * a + c * b;
+        }
+        for (let k = 0; k < d; k++) {
+          const a = V[k][p], b = V[k][q];
+          V[k][p] = c * a - s * b; V[k][q] = s * a + c * b;
+        }
+      }
+    }
+    const order = Array.from({ length: d }, (_, i) => i).sort((a, b) => C[b][b] - C[a][a]);
+    const vals = order.map((i) => Math.max(0, C[i][i])), tot = vals.reduce((a, b) => a + b, 0) || 1;
+    let m = 0, cum = 0;
+    while (m < Math.min(maxComp, d) && (m < 2 || cum < keep)) { cum += vals[m] / tot; m++; }
+    const Y = X.map((r) => Float64Array.from({ length: m }, (_, c) => {
+      const col = order[c];
+      let v = 0;
+      for (let j = 0; j < d; j++) v += (r[j] - mu[j]) * V[j][col];
+      return v;
+    }));
+    return { Y, vals: vals.slice(0, m), frac: vals.slice(0, m).map((v) => v / tot), m };
+  }
+
+  // k-means++ (seeded, best of `restarts`), returns {lab, cent, sse}
+  function kmeans(Y, k, restarts = 8, seed = 1) {
+    let rnd = seed;
+    const rand = () => { rnd = (rnd * 16807) % 2147483647; return (rnd - 1) / 2147483646; };
+    const n = Y.length, d = Y[0].length, dist2 = (a, b) => { let s = 0; for (let j = 0; j < d; j++) s += (a[j] - b[j]) ** 2; return s; };
+    let best = null;
+    for (let r = 0; r < restarts; r++) {
+      const cent = [Float64Array.from(Y[Math.floor(rand() * n)])];
+      while (cent.length < k) {
+        const dd = Y.map((y) => Math.min(...cent.map((c) => dist2(y, c))));
+        let u = rand() * dd.reduce((a, b) => a + b, 0), i = 0;
+        while (i < n - 1 && (u -= dd[i]) > 0) i++;
+        cent.push(Float64Array.from(Y[i]));
+      }
+      const lab = new Int32Array(n);
+      for (let it = 0; it < 100; it++) {
+        let moved = 0;
+        for (let i = 0; i < n; i++) {
+          let bj = 0, bd = Infinity;
+          for (let j = 0; j < k; j++) { const v = dist2(Y[i], cent[j]); if (v < bd) { bd = v; bj = j; } }
+          if (lab[i] !== bj) { lab[i] = bj; moved++; }
+        }
+        const sum = cent.map(() => new Float64Array(d)), cnt = new Int32Array(k);
+        for (let i = 0; i < n; i++) { cnt[lab[i]]++; for (let j = 0; j < d; j++) sum[lab[i]][j] += Y[i][j]; }
+        for (let j = 0; j < k; j++) if (cnt[j]) cent[j] = sum[j].map((v) => v / cnt[j]);
+        if (!moved && it) break;
+      }
+      let sse = 0;
+      for (let i = 0; i < n; i++) sse += dist2(Y[i], cent[lab[i]]);
+      if (!best || sse < best.sse) best = { lab, cent, sse };
+    }
+    return best;
+  }
+  // mean silhouette (Euclidean)
+  function silhouette(Y, lab, k) {
+    const n = Y.length, d = Y[0].length;
+    if (k < 2) return 0;
+    let tot = 0;
+    for (let i = 0; i < n; i++) {
+      const sum = new Float64Array(k), cnt = new Int32Array(k);
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+        let s = 0;
+        for (let q = 0; q < d; q++) s += (Y[i][q] - Y[j][q]) ** 2;
+        sum[lab[j]] += Math.sqrt(s); cnt[lab[j]]++;
+      }
+      const a = cnt[lab[i]] ? sum[lab[i]] / cnt[lab[i]] : 0;
+      let b = Infinity;
+      for (let c = 0; c < k; c++) if (c !== lab[i] && cnt[c]) b = Math.min(b, sum[c] / cnt[c]);
+      tot += isFinite(b) && Math.max(a, b) > 0 ? (b - a) / Math.max(a, b) : 0;
+    }
+    return tot / n;
+  }
+
+  /**
+   * Categories of the beats. o: {mode, k (0 = choose 2..6 by the silhouette)}.
+   * Beats further from their centre than median + 4 MAD (of all such
+   * distances) are outliers (label -1). Clusters are renumbered by size.
+   * Returns {idx, lab (per idx), pc (2-D scores), k, sil, sils, frac, X}.
+   */
+  function categorize(res, o = {}) {
+    const F = beatFeatures(res, o.mode || "both");
+    if (F.idx.length < 20) return null;
+    const P = pca(F.X, 10, 0.9);
+    // isolated beats first (far from their 5th nearest neighbour): they would otherwise pull a centroid of their own.
+    // A real group, however far from the bulk, has close neighbours and stays.
+    const nn = P.Y.map((y, i) => {
+      const d = [];
+      for (let j = 0; j < P.Y.length; j++) if (j !== i) d.push(y.reduce((s, v, q) => s + (v - P.Y[j][q]) ** 2, 0));
+      d.sort((a, b) => a - b);
+      return Math.sqrt(d[Math.min(4, d.length - 1)]);
+    });
+    const m0 = median(nn), mad0 = median(nn.map((v) => Math.abs(v - m0))) * 1.4826 || 1e-9;
+    const inl = [];
+    nn.forEach((d, i) => { if (d <= m0 + 6 * mad0) inl.push(i); });
+    const Yi = inl.map((i) => P.Y[i]);
+    const minSize = Math.max(5, Math.ceil(0.03 * Yi.length));          // a group of fewer is not a kind of beat
+    const tries = o.k ? [o.k] : [2, 3, 4, 5, 6];
+    let best = null;
+    const sils = {};
+    for (const k of tries) {
+      const km = kmeans(Yi, k);
+      const sil = silhouette(Yi, km.lab, k);
+      sils[k] = sil;
+      const small = Array.from({ length: k }, (_, c) => km.lab.filter((l) => l === c).length).some((n) => n < minSize);
+      const cand = { ...km, k, sil, small };
+      if (!best || (best.small && !small) || (best.small === small && sil > best.sil)) best = cand;
+    }
+    const lab = new Int32Array(P.Y.length).fill(-1);
+    inl.forEach((i, j) => { lab[i] = best.lab[j]; });
+    const dd = P.Y.map((y, i) => (lab[i] < 0 ? Infinity : Math.sqrt(y.reduce((s, v, j) => s + (v - best.cent[lab[i]][j]) ** 2, 0))));
+    const fin = dd.filter(isFinite), m = median(fin), mad = median(fin.map((v) => Math.abs(v - m))) * 1.4826 || 1e-9;
+    for (let i = 0; i < lab.length; i++) if (dd[i] > m + 4 * mad) lab[i] = -1;
+    const cnt = Array.from({ length: best.k }, (_, c) => lab.filter((l) => l === c).length);
+    for (let i = 0; i < lab.length; i++) if (lab[i] >= 0 && cnt[lab[i]] < minSize) lab[i] = -1;
+    // renumber by size, dropping groups that ended up too small
+    const keep = cnt.map((c, i) => i).filter((c) => cnt[c] >= minSize).sort((a, b) => cnt[b] - cnt[a]), ren = new Map(keep.map((c, i) => [c, i]));
+    best.k = keep.length;
+    return { idx: F.idx, lab: Array.from(lab, (l) => (l < 0 ? -1 : ren.get(l))), pc: P.Y.map((y) => [y[0], y[1] || 0]), k: best.k,
+             sil: best.sil, sils, frac: P.frac, T: F.T, S: F.S, bins: F.bins, edges: F.edges };
+  }
+
   /** Pearson r and least-squares slope of y on x (finite pairs only). */
   function fit(x, y) {
     let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0, syy = 0;
@@ -693,7 +884,7 @@
     return { n, slope: vx ? c / vx : NaN, icept: (sy - (vx ? c / vx : 0) * sx) / n, r: vx && vy ? c / Math.sqrt(vx * vy) : NaN };
   }
 
-  const BeatDTW = { prep, filtfilt, biquad, detect, extract, dtw2, kernelAnalyse, resample, reference, dtw, smooth, analyse, fit, median };
+  const BeatDTW = { prep, filtfilt, biquad, detect, extract, dtw2, kernelAnalyse, resample, beatFeatures, pca, kmeans, silhouette, categorize, reference, dtw, smooth, analyse, fit, median };
   root.BeatDTW = BeatDTW;
   if (typeof module !== "undefined") module.exports = BeatDTW;
 })(typeof window !== "undefined" ? window : globalThis);

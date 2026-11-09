@@ -117,6 +117,25 @@
     <div id="h-lane" class="dtw-lane"></div>
   </section>
 
+  <section id="c-card" class="card wide" hidden>
+    <div class="card-head">
+      <h2 title="Beats that resemble each other. Each clean beat (not an artifact, kernels clean) is described by its timing deviation and its shape left over after the warping (the difference from its kernel), both along the cycle; PCA, then k-means. The number of groups is chosen by the silhouette (how much closer a beat is to its own group than to the next: above 0.5 clear, 0.25–0.5 some structure, below 0.25 hardly any). Beats far from every group are outliers (grey). RR and movement are NOT used for grouping — they are listed per group, so you can see whether a group is just a heart rate or a movement.">Beat categories</h2>
+      <span class="hint zoom">
+        <label class="nowrap" title="What the grouping uses">by
+          <select id="c-mode" class="tool-sel"><option value="both">timing + shape</option><option value="timing">timing</option><option value="shape">shape</option></select></label>
+        <label class="nowrap" title="Number of groups; auto: 2–6 by the silhouette">groups
+          <select id="c-k" class="tool-sel"><option value="0">auto</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option></select></label>
+      </span>
+    </div>
+    <div id="c-info" class="rv-readout">&nbsp;</div>
+    <div class="dtw-cat">
+      <figure><figcaption title="Every beat by its first two principal components; colour: its group. Click: show that beat (ringed).">Beats (PCA)</figcaption><div id="c-scatter"></div></figure>
+      <figure><figcaption title="Mean timing deviation of each group along the cycle, ms (above 0: later than its kernel)">Mean Δ(t) per group</figcaption><div id="c-delta"></div></figure>
+      <figure><figcaption title="The period's kernel plus each group's mean shape difference: how the groups' waveforms differ">Mean waveform per group</figcaption><div id="c-shape"></div></figure>
+    </div>
+    <table id="c-table" class="dtw-table"></table>
+  </section>
+
   <section class="card wide">
     <div class="card-head">
       <h2 title="The timing deviation at the chosen phase against the RR interval before the beat, one dot per clean beat. A slope means this part of the cycle follows the heart rate (the T wave: the QT–RR relation).">Δ at the chosen phase vs RR</h2>

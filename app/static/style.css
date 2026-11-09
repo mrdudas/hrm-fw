@@ -236,3 +236,12 @@ html{background:var(--bg); color-scheme:dark}
 .dtw-sub{margin-top:14px}
 .dtw-legend{font-variant-numeric:tabular-nums}
 .dtw-params [hidden], .card[hidden]{display:none}
+.dtw-cat{display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:12px; margin-top:8px}
+.dtw-cat figure{margin:0; min-width:0}
+.dtw-cat figcaption{color:var(--muted); font-size:12px; margin-bottom:4px}
+.dtw-cat figure > div{width:100%; line-height:0}
+.dtw-table{width:100%; border-collapse:collapse; margin-top:12px; font-size:13px; font-variant-numeric:tabular-nums}
+.dtw-table th{color:var(--muted); font-weight:500; text-align:right; padding:4px 8px; border-bottom:1px solid var(--border)}
+.dtw-table td{text-align:right; padding:4px 8px; border-bottom:1px solid var(--grid)}
+.dtw-table th:first-child, .dtw-table td:first-child{text-align:left}
+.dtw-table .chip{display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; vertical-align:-1px}
