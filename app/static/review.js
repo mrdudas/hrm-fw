@@ -15,6 +15,7 @@
   const FONT = "11px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
   const dpr = () => window.devicePixelRatio || 1;
 
+  let artBad = null;        // cl.bad without the alternans beats: real beats for the HR / RR lines
   let ses = null;           // loaded session: {id, beats:{t, rr, gap}, ectopy, activity}
   let cl = null;            // HRV.clean() of it
   let roll = null, mf = null;
@@ -79,6 +80,7 @@
     // RR alternans (alternans.js, as live): its beats are ALT-SHORT / ALT-LONG, left out of the HRV
     alt = Alternans.detect(b, ses.ectopy);
     altMask = Alternans.hrvMask(alt);
+    artBad = cl.bad.slice();                       // corrected beats before the alternans ones are added (HR / RR lines)
     for (let i = 0; i < altMask.length; i++) if (altMask[i]) cl.bad[i] = 1;
     Alternans.forSession(id, ses);                 // refresh the cached summary (daily view)
     altSelEp = -1;
@@ -132,21 +134,44 @@
     if (sel) for (const u of [laneNL, laneHC]) u.setScale("x", { min: sel[0], max: sel[1] });
   }
 
+  // HR per beat for a line: corrected beats are skipped (undefined: uPlot joins across them),
+  // lost beats break it (null)
+  function hrLine(b) {
+    return b.rr.map((v, i) => (b.gap && b.gap[i] ? null : artBad[i] || !(v >= 300 && v <= 2000) ? undefined : 60000 / v));
+  }
+  function rrLine(b) {
+    return b.rr.map((v, i) => (b.gap && b.gap[i] ? null : artBad[i] ? undefined : v));
+  }
+  // y range of a beat series from the visible part, 1st–99th percentile: a few spikes don't flatten it
+  function robustRange(u, si = 1, minSpan = 20, win = null) {
+    const x = u.data[0], y = u.data[si], lo = win ? win[0] : -Infinity, hi = win ? win[1] : Infinity, v = [];
+    for (let i = 0; i < x.length; i++) if (x[i] >= lo && x[i] <= hi && y[i] != null) v.push(y[i]);
+    if (v.length < 2) return [40, 180];
+    v.sort((p, q) => p - q);
+    let a = v[Math.floor(0.01 * (v.length - 1))], b = v[Math.ceil(0.99 * (v.length - 1))];
+    if (b - a < minSpan) { const c = (a + b) / 2; a = c - minSpan / 2; b = c + minSpan / 2; }
+    const m = 0.08 * (b - a);
+    return [Math.floor(a - m), Math.ceil(b + m)];
+  }
+  // the live dashboard's look: red line, dots once zoomed in far enough to tell the beats apart
+  const hrSeries = () => ({ stroke: COL.hr, width: 1.6, spanGaps: false, fill: "rgba(255,84,112,0.07)",
+                            points: { size: 4, fill: COL.hr, stroke: COL.hr } });
+
   // ---------- overview ----------
   let ov = null;
   function drawOverview() {
     const b = ses.beats;
-    const hr = b.rr.map((v, i) => (cl.bad[i] ? null : 60000 / v));
+    const hr = hrLine(b);
     // NaN-free x with a break at each gap: insert nulls
     if (ov) ov.destroy();
     ov = new uPlot({
-      width: $("ov-chart").clientWidth, height: 150, legend: { show: false }, pxAlign: 0,
+      width: $("ov-chart").clientWidth, height: 170, legend: { show: false }, pxAlign: 0,
       padding: [8, 8, 0, 0],
       cursor: { y: false, points: { show: false }, drag: { x: true, y: false, setScale: false } },
       select: { show: true },
-      scales: { x: { time: true }, y: { auto: true } },
+      scales: { x: { time: true }, y: { auto: true, range: (u) => robustRange(u) } },
       axes: [axis({ space: 90 }), axis({ label: "HR bpm", size: 50 })],
-      series: [{}, { stroke: COL.hr, width: 1, spanGaps: false, points: { show: false } }],
+      series: [{}, hrSeries()],
       hooks: {
         setSelect: [(u) => {
           if (u.select.width < 4) return;
@@ -274,13 +299,13 @@
     for (const u of lanes) u.destroy();
     lanes = [];
     const b = ses.beats;
-    const good = b.rr.map((v, i) => (cl.bad[i] || alt.label[i] ? null : v));
     const badv = b.rr.map((v, i) => (cl.bad[i] && !alt.label[i] ? Math.min(2000, Math.max(250, v)) : null));
     const altv = b.rr.map((v, i) => (alt.label[i] ? v : null));
     const ecto = ses.ectopy.filter((e) => e[1] === "PVC" || e[1] === "PAC");
     const dot = (c, s) => ({ stroke: c, fill: c, paths: () => null, points: { show: true, size: s, stroke: c, fill: c, width: 0 } });
-    lane("ln-rr", 150, "RR ms", b.t, [dot(COL.ecg, 2.5), dot(COL.pvc, 3), dot(AltView.COL.A, 3)], {
-      data: [good, badv, altv],
+    lane("ln-rr", 150, "RR ms", b.t, [{ stroke: COL.ecg, width: 1.4, spanGaps: false, points: { size: 4, fill: COL.ecg, stroke: COL.ecg } },
+                                      dot(COL.pvc, 3), dot(AltView.COL.A, 3)], {
+      data: [rrLine(b), badv, altv], range: (u) => robustRange(u, 1, 200, sel),
       draw: (u) => {                                      // PAC / PVC marks along the top
         const ctx = u.ctx, x0 = u.scales.x.min, x1 = u.scales.x.max;
         ctx.save();
@@ -299,6 +324,7 @@
         ctx.restore();
       },
     });
+    lane("ln-bpm", 130, "HR bpm", b.t, [hrSeries()], { data: [hrLine(b)], range: (u) => robustRange(u, 1, 20, sel) });
     lane("ln-a", 150, "DFA α", roll.t, [
       { stroke: COL.ecg, width: 1.5, points: { show: false } },
       { stroke: COL.z, width: 1.5, points: { show: false } },
@@ -362,7 +388,7 @@
     const b = ses.beats, i = nearest(b.t, tv), r = nearest(roll.t, tv), m = nearest(mf.t, tv);
     const parts = [
       `<b>${fmtTime(tv, true)}</b>`,
-      `RR ${f(b.rr[i])} ms${cl.bad[i] ? " (corrected)" : ""}`,
+      `RR ${f(b.rr[i])} ms (${f(60000 / b.rr[i])} bpm)${cl.bad[i] ? " (corrected)" : ""}`,
       `α1 ${f(roll.a1[r], 2)}`, `α2 ${f(roll.a2[r], 2)}`,
       `Δα MFDFA ${f(mf.mfW[m], 2)} · CJ ${f(mf.cjW[m], 2)}`,
       `α0 ${f(mf.mfA0[m], 2)} · ${f(mf.cjA0[m], 2)}`,
