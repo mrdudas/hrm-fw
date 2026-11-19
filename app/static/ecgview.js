@@ -2,7 +2,8 @@
  * instead of following the stream. ECG + accelerometer (X/Y/Z, |a|) on one
  * time axis, ECG-paper grid, display-only mains notch, the session's beats as
  * dots on their QRS peaks (corrected beats hollow), measure tool. The beat-
- * to-beat HR (60000 / RR, corrected beats and lost-beat gaps left out) is drawn
+ * to-beat HR (60000 / RR of every beat the strap reported, PAC / PVC / corrected ones
+ * included and marked orange; broken only where beats were lost) is drawn
  * over the ECG on its own right-hand axis, as on the overview chart.
  *
  * Data: /api/sessions/<id>/ecg?a=&b= serves a window (up to 200 s) of the raw
@@ -135,7 +136,7 @@
       // largest deviation either way: the lead can be reversed (negative QRS)
       let best = -1, bv = -Infinity;
       for (let j = j0; j <= j1; j++) if (Math.abs(s.f[j] - base) > bv) { bv = Math.abs(s.f[j] - base); best = j; }
-      if (best >= 0) dots.push({ t: s.t + best / fs, v: s.f[best], rr: ses.beats.rr[i], bad: !!cl.bad[i] });
+      if (best >= 0) dots.push({ t: s.t + best / fs, v: s.f[best], rr: ses.beats.rr[i], bad: !!cl.bad[i], i });
     }
     data.dots = dots;
   }
@@ -273,12 +274,13 @@
   }
 
   // beat-to-beat HR of the beats in [a, b] (one beyond each end, so the line reaches the edges);
-  // null = a break (corrected beat, or beats lost before this one)
+  // every reported beat counts (an early PAC / PVC beat is a real heartbeat: the line jumps up with it);
+  // null = a break (beats lost before this one, or an impossible R-R)
   function hrPoints(a, b) {
     const bt = ses.beats.t, rr = ses.beats.rr, gap = ses.beats.gap, pts = [];
     for (let i = Math.max(0, lowerBound(bt, a) - 1); i < bt.length; i++) {
       if (gap[i] && pts.length) pts.push(null);
-      pts.push(cl.bad[i] ? null : { t: bt[i], v: 60000 / rr[i] });
+      pts.push(rr[i] >= 250 && rr[i] <= 2500 ? { t: bt[i], v: 60000 / rr[i], bad: !!cl.bad[i], i } : null);
       if (bt[i] > b) break;
     }
     return pts;
@@ -294,6 +296,11 @@
     if (!ses || !cl || tc == null) return;
     const ctx = u.ctx, { left, top, width, height } = u.bbox, dpr = devicePixelRatio;
     const pts = hrPoints(tc - win / 2, tc + win / 2);
+    // where the raw ECG is loaded, put each beat's HR on its R peak (the dot), not at the strap's beat time
+    if (rawOk() && data && data.ses === ses.id && data.dots) {
+      const at = new Map(data.dots.map((d) => [d.i, d.t]));
+      for (const p of pts) if (p && at.has(p.i)) p.t = at.get(p.i);
+    }
     ctx.save();
     ctx.beginPath(); ctx.rect(left, top, width, height); ctx.clip();
     ctx.strokeStyle = COL.hr; ctx.lineWidth = 1.5 * dpr; ctx.globalAlpha = 0.85;
@@ -306,8 +313,13 @@
       pen = true;
     }
     ctx.stroke();
-    ctx.fillStyle = COL.hr;            // a small mark on each beat
-    if (win <= HR_MARK_MAX) for (const p of pts) if (p) ctx.fillRect(u.valToPos(p.t, "x", true) - 1.5 * dpr, u.valToPos(p.v, "hr", true) - 1.5 * dpr, 3 * dpr, 3 * dpr);
+    // a small mark on each beat; corrected (PAC / PVC / artifact) beats bigger, orange
+    for (const p of pts) {
+      if (!p || (!p.bad && win > HR_MARK_MAX)) continue;
+      const s = (p.bad ? 5 : 3) * dpr;
+      ctx.fillStyle = p.bad ? COL.bad : COL.hr;
+      ctx.fillRect(u.valToPos(p.t, "x", true) - s / 2, u.valToPos(p.v, "hr", true) - s / 2, s, s);
+    }
     ctx.restore();
   }
   function drawDots(u) {
