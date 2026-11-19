@@ -3,8 +3,8 @@
  * time axis, ECG-paper grid, display-only mains notch, the session's beats as
  * dots on their QRS peaks (corrected beats hollow), measure tool. The beat-
  * to-beat HR (60000 / RR of every beat the strap reported, PAC / PVC / corrected ones
- * included and marked orange; broken only where beats were lost) is drawn
- * over the ECG on its own right-hand axis, as on the overview chart.
+ * included and marked orange; broken only where beats were lost) has its own
+ * lane under the ECG, half its height, like the accelerometer lanes.
  *
  * Data: /api/sessions/<id>/ecg?a=&b= serves a window (up to 200 s) of the raw
  * CSV on the strap's sample clock (recordings.raw_window); a bit more than the
@@ -160,6 +160,7 @@
   }
   const LANES = [
     { key: "ecg", label: "ECG", h: 240, color: [COL.ecg], minSpan: 200, paper: true },
+    { key: "hr", label: "HR bpm", h: 120, color: ["transparent"], minSpan: HR_MIN_SPAN },   // drawn by drawHr
     { key: "acc", label: "XYZ g", h: 96, color: [COL.x, COL.y, COL.z], minSpan: 0.1, legend: ["X", "Y", "Z"] },
     { key: "mag", label: "|a| g", h: 92, color: [COL.mag], minSpan: 0.1, bottom: true },
   ];
@@ -174,11 +175,8 @@
         size: L.bottom ? 26 : 0 },
       { ...axisBase, scale: "y", label: L.label, labelSize: 14, labelFont: FONT, size: 50, space: L.h < 100 ? 22 : 35,
         grid: { stroke: COL.grid, width: 1 } },
-      // right: HR bpm on the ECG lane; the same gutter, empty, on the others so the time axes line up
-      L.key === "ecg"
-        ? { ...axisBase, scale: "hr", side: 1, label: "HR bpm", labelSize: 14, labelFont: FONT, size: 44, space: 35,
-            stroke: COL.hr, grid: { show: false } }
-        : { scale: "y", side: 1, size: 44, label: "", labelSize: 14, grid: { show: false }, ticks: { show: false }, values: (u, s) => s.map(() => "") },
+      // an empty right gutter on every lane, so the time axes line up with the charts above
+      { scale: "y", side: 1, size: 44, label: "", labelSize: 14, grid: { show: false }, ticks: { show: false }, values: (u, s) => s.map(() => "") },
     ];
     if (L.paper) {   // ECG-paper fine grid: 40 ms / 200 ms as zoom allows
       axes.unshift({ scale: "x", side: 2, size: 0, incrs: [0.04, 0.2, 1, 5], space: 8,
@@ -191,12 +189,13 @@
                      grid: { stroke: COL.gridMinor, width: 1 }, ticks: { show: false }, values: () => [] });
     }
     const draw = [drawMeasure];
-    if (L.key === "ecg") draw.unshift(drawHr, drawDots);
+    if (L.key === "ecg") draw.unshift(drawDots);
+    if (L.key === "hr") draw.unshift(drawHr);
     if (L.legend) draw.unshift((u) => drawLegend(u, L));
     return {
       width, height: L.h, legend: { show: false }, pxAlign: 0, padding: [4, 0, L.bottom ? 0 : 4, 0],
       cursor: { sync: { key: "rvecg" }, y: false, points: { show: false }, drag: { x: false, y: false, setScale: false } },
-      scales: { x: { time: false, auto: false }, y: { auto: false }, hr: { auto: false } },
+      scales: { x: { time: false, auto: false }, y: { auto: false } },
       axes, series: [{}, ...L.color.map((c) => ({ stroke: c, width: LW, spanGaps: false, points: { show: false } }))],
       hooks: { draw, setCursor: [(u) => hover(u)] },
     };
@@ -240,7 +239,8 @@
       }
     }
     set("ecg", [ex, ey], xr, lo, hi);
-    lanes.ecg.setScale("hr", hrRange(a, b));
+    // HR: its own lane under the ECG (drawn by drawHr on the y scale)
+    lanes.hr.batch(() => { lanes.hr.setData([[a, b], [null, null]], false); lanes.hr.setScale("x", xr); lanes.hr.setScale("y", hrRange(a, b)); });
     // accelerometer: X/Y/Z and |a|, a break where samples are missing
     const ax = [], X = [], Y = [], Z = [], M = [];
     let alo = Infinity, ahi = -Infinity, mlo = Infinity, mhi = -Infinity;
@@ -308,7 +308,7 @@
     let pen = false;
     for (const p of pts) {
       if (!p) { pen = false; continue; }
-      const x = u.valToPos(p.t, "x", true), y = u.valToPos(p.v, "hr", true);
+      const x = u.valToPos(p.t, "x", true), y = u.valToPos(p.v, "y", true);
       if (pen) ctx.lineTo(x, y); else ctx.moveTo(x, y);
       pen = true;
     }
@@ -318,7 +318,7 @@
       if (!p || (!p.bad && win > HR_MARK_MAX)) continue;
       const s = (p.bad ? 5 : 3) * dpr;
       ctx.fillStyle = p.bad ? COL.bad : COL.hr;
-      ctx.fillRect(u.valToPos(p.t, "x", true) - s / 2, u.valToPos(p.v, "hr", true) - s / 2, s, s);
+      ctx.fillRect(u.valToPos(p.t, "x", true) - s / 2, u.valToPos(p.v, "y", true) - s / 2, s, s);
     }
     ctx.restore();
   }
