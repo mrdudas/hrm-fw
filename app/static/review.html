@@ -129,6 +129,23 @@
       <figure><figcaption title="Each beat's RR against the next one. SD1 (across the identity line): beat-to-beat variability; SD2 (along it): slower variability.">Poincaré plot</figcaption><canvas id="pl-poin"></canvas></figure>
     </div>
   </section>
+  <section id="alt-card" class="card wide">
+    <div class="card-head">
+      <h2 title="RR alternans / bigeminy: a window of 12 normal beats (no PVC, no lost beat) alternates when the sign of ΔRR changes in ≥ 80 % of the pairs, the median |ΔRR| is ≥ 80 ms and the short and the long intervals are each steady; an episode starts after 12 such beats in a row and ends after 8 without. Same detector as the live dashboard (alternans.js). Prematurity: short RR against the median LONG interval of the episode. Click an episode: the charts above go to it (±2 min) and its split average is computed.">RR alternans / bigeminy</h2>
+      <span class="hint rv-tools">
+        <button id="alt-range-btn" class="tool-btn" title="Split average (A short-cycle vs B long-cycle beats) over the episodes inside the selected period (at most 15 min of episode ECG)">Analyse selected range</button>
+        <a id="alt-report" class="tool-btn nav-link" target="_blank" title="One-page episode report of the selected period, for printing or saving as PDF">Report (PDF)</a>
+      </span>
+    </div>
+    <div id="alt-info" class="alt-sub"></div>
+    <div id="alt-range" class="alt-sub"></div>
+    <div id="alt-eps"></div>
+    <div id="alt-split-wrap" hidden>
+      <div id="alt-split-sub" class="alt-sub"></div>
+      <div class="alt-grid"><div id="alt-split"></div><div id="alt-metrics"></div></div>
+    </div>
+  </section>
+
   <section class="card wide">
     <div class="card-head">
       <h2 title="How the selected period's exercise tired you: DFA α1 against HR (thresholds and their drift), α1 at the same HR / cadence early and late, HR drift against cadence, heart rate recovery after bouts, and the training load. Select the workout on the charts above.">Exercise · fatigue</h2>
@@ -154,6 +171,10 @@
 <script src="/static/chaos.js"></script>
 <script src="/static/exercise.js"></script>
 <script src="/static/ecgview.js"></script>
+<script src="/static/qrst.js"></script>
+<script src="/static/dtw.js"></script>
+<script src="/static/alternans.js"></script>
+<script src="/static/altview.js"></script>
 <script src="/static/review.js"></script>
 </body>
 </html>

@@ -329,8 +329,11 @@
     while (hrvBeats.length && hrvBeats[0].t < tArr - HRV_WIN) hrvBeats.shift();
     hrvUpdate();
   }
+  // beats inside an RR alternans episode (altlive.js) stay out of RMSSD / SDNN / pNN50
+  const altEx = (b) => !!(window.AltLive && window.AltLive.inEpisode(b.t));
   function hrvUpdate() {
-    const good = hrvBeats.filter((b) => b.ok);
+    const good = hrvBeats.filter((b) => b.ok && !altEx(b));
+    const nAlt = hrvBeats.filter(altEx).length;
     const span = hrvBeats.length ? hrvBeats[hrvBeats.length - 1].t - hrvBeats[0].t : 0;
     if (good.length < 10 || span < HRV_MIN_S) {
       setText("hrv", "--");
@@ -339,7 +342,7 @@
     }
     let sumSq = 0, nDiff = 0, nn50 = 0;
     for (let i = 1; i < hrvBeats.length; i++) {
-      if (!hrvBeats[i].chain) continue;
+      if (!hrvBeats[i].chain || altEx(hrvBeats[i]) || altEx(hrvBeats[i - 1])) continue;
       const d = hrvBeats[i].rr - hrvBeats[i - 1].rr;
       sumSq += d * d; nDiff++;
       if (Math.abs(d) > 50) nn50++;
@@ -363,7 +366,8 @@
     const win = span < HRV_WIN - 5 ? `${Math.round(span)} s` : "5 min";
     setText("hrv-sub", `SDNN ${Math.round(hrvEma.sdnn)} ms · pNN50 ${Math.round(hrvEma.pnn50)} % · ` +
                        `${good.length} beats / ${win}` +
-                       (good.length < hrvBeats.length ? ` · ${hrvBeats.length - good.length} excluded` : ""));
+                       (good.length < hrvBeats.length ? ` · ${hrvBeats.length - good.length} excluded` : "") +
+                       (nAlt ? ` (${nAlt} in alternans)` : ""));
     $("hrv").title = `now (window ${win}): RMSSD ${Math.round(rmssd)} ms, SDNN ${Math.round(sdnn)} ms; ` +
                      `card shows a ~1 min moving average`;
   }

@@ -76,6 +76,13 @@
     ses = await r.json();
     const b = ses.beats;
     cl = HRV.clean(b.rr, Uint8Array.from(b.gap, (g) => (g ? 1 : 0)));
+    // RR alternans (alternans.js, as live): its beats are ALT-SHORT / ALT-LONG, left out of the HRV
+    alt = Alternans.detect(b, ses.ectopy);
+    altMask = Alternans.hrvMask(alt);
+    for (let i = 0; i < altMask.length; i++) if (altMask[i]) cl.bad[i] = 1;
+    Alternans.forSession(id, ses);                 // refresh the cached summary (daily view)
+    altSelEp = -1;
+    $("alt-split-wrap").hidden = true;
     const nBad = cl.bad.reduce((s, v) => s + v, 0), nGap = b.gap.filter((g) => g).length;
     setText("ses-info", b.t.length
       ? `${b.t.length} beats · ${(100 * nBad / b.t.length).toFixed(1)} % corrected · ${nGap} break${nGap === 1 ? "" : "s"} (lost beats) · ${ses.ectopy.filter((e) => e[1] !== "ARTIFACT").length} PAC/PVC`
@@ -267,15 +274,22 @@
     for (const u of lanes) u.destroy();
     lanes = [];
     const b = ses.beats;
-    const good = b.rr.map((v, i) => (cl.bad[i] ? null : v));
-    const badv = b.rr.map((v, i) => (cl.bad[i] ? Math.min(2000, Math.max(250, v)) : null));
+    const good = b.rr.map((v, i) => (cl.bad[i] || alt.label[i] ? null : v));
+    const badv = b.rr.map((v, i) => (cl.bad[i] && !alt.label[i] ? Math.min(2000, Math.max(250, v)) : null));
+    const altv = b.rr.map((v, i) => (alt.label[i] ? v : null));
     const ecto = ses.ectopy.filter((e) => e[1] === "PVC" || e[1] === "PAC");
     const dot = (c, s) => ({ stroke: c, fill: c, paths: () => null, points: { show: true, size: s, stroke: c, fill: c, width: 0 } });
-    lane("ln-rr", 150, "RR ms", b.t, [dot(COL.ecg, 2.5), dot(COL.pvc, 3)], {
-      data: [good, badv],
+    lane("ln-rr", 150, "RR ms", b.t, [dot(COL.ecg, 2.5), dot(COL.pvc, 3), dot(AltView.COL.A, 3)], {
+      data: [good, badv, altv],
       draw: (u) => {                                      // PAC / PVC marks along the top
         const ctx = u.ctx, x0 = u.scales.x.min, x1 = u.scales.x.max;
         ctx.save();
+        ctx.fillStyle = "rgba(255,180,84,0.10)";          // alternans episodes shaded
+        for (const e of alt.episodes) {
+          if (e.t1 < x0 || e.t0 > x1) continue;
+          const a = u.valToPos(Math.max(x0, e.t0), "x", true), c = u.valToPos(Math.min(x1, e.t1), "x", true);
+          ctx.fillRect(a, u.bbox.top, Math.max(1, c - a), u.bbox.height);
+        }
         for (const e of ecto) {
           if (e[0] < x0 || e[0] > x1) continue;
           const x = u.valToPos(e[0], "x", true), y = u.bbox.top + 2 * dpr();
@@ -377,6 +391,7 @@
     writeHash();
     clearTimeout(sumTimer);
     sumTimer = setTimeout(summary, 120);
+    altCard();
   }
   function shift(dir) {
     if (!sel) return;
@@ -475,6 +490,63 @@
     plotHq(m);
     plotPoincare(a, b);
   }
+
+  // ---------- RR alternans / bigeminy (alternans.js, altview.js) ----------
+  let alt = null, altMask = null, altSelEp = -1, altPlot = null, altRun = 0;
+  function altCard() {
+    if (!ses || !alt) return;
+    const b = ses.beats, st = alt.stats;
+    const artIn = ses.ectopy.filter((e) => e[1] === "ARTIFACT" && alt.episodes.some((p) => e[0] >= p.t0 && e[0] <= p.t1 + 1)).length;
+    setText("alt-info", `Whole recording: ${AltView.statsText(st)}` + (st.count ? ` · ${st.short} ALT-SHORT / ${st.long} ALT-LONG beats` : "") +
+      (artIn ? ` · ${artIn} of the strap's ARTIFACT labels fall inside episodes` : "") +
+      (alt.rejected.length ? ` · ${alt.rejected.length} alternating stretch${alt.rejected.length > 1 ? "es" : ""} rejected (short + long ≈ one normal R-R: a beat counted twice)` : ""));
+    const t = b.t, a = nearest(t, sel[0]), c = Math.min(t.length, nearest(t, sel[1]) + 1);
+    const inSel = Alternans.inRange(alt, sel[0], sel[1]);
+    const h1 = Alternans.hrv(b, a, c), h2 = Alternans.hrv(b, a, c, altMask);
+    const fh = (h) => `RMSSD ${f(h.rmssd, 0)} · SDNN ${f(h.sdnn, 0)} ms · pNN50 ${f(h.pnn50, 0)} %`;
+    setText("alt-range", `Selected period: ${inSel.length} episode${inSel.length === 1 ? "" : "s"}` +
+      ` · HRV all beats: ${fh(h1)} · alternans left out: ${fh(h2)}`);
+    const host = $("alt-eps");
+    host.innerHTML = "";
+    if (alt.episodes.length) host.appendChild(AltView.episodeTable(alt.episodes, (e, i) => {
+      altSelEp = i;
+      setRange(e.t0 - 120, e.t1 + 120);
+      EcgView.goTo(e.t0 + 5);
+      altSplit([e], `Episode ${AltView.clock(e.t0)}–${AltView.clock(e.t1)}`);
+    }, altSelEp));
+    $("alt-report").href = `/report#s=${ses.id}&a=${sel[0].toFixed(1)}&b=${sel[1].toFixed(1)}`;
+  }
+  // split average over episodes (clipped to at most 15 min of ECG)
+  async function altSplit(eps, title) {
+    const id = ++altRun, sesId = ses.id;
+    $("alt-split-wrap").hidden = false;
+    if (!eps.length) { setText("alt-split-sub", "no alternans episode in the selected period"); $("alt-metrics").innerHTML = ""; $("alt-split").innerHTML = ""; return; }
+    let left = 900;
+    const parts = [];
+    for (const e of eps) { if (left <= 0) break; const b = Math.min(e.t1, e.t0 + left); parts.push([e.t0, b]); left -= b - e.t0; }
+    const segs = [];
+    let fs = null, notched = 0;
+    try {
+      for (let k = 0; k < parts.length; k++) {
+        const d = await Alternans.fetchEcg(sesId, parts[k][0], parts[k][1],
+          (fr) => setText("alt-split-sub", `${title}: loading the ECG… ${Math.round(100 * (k + fr) / parts.length)} %`));
+        if (id !== altRun) return;
+        fs = d.fs; notched = d.notched; segs.push(...d.segs);
+      }
+    } catch (err) { setText("alt-split-sub", `${title}: ${err.message}`); return; }
+    const sa = Alternans.splitAverage({ fs, segs, notched }, eps);
+    const secs = parts.reduce((s, p) => s + p[1] - p[0], 0);
+    setText("alt-split-sub", `${title} · split average of ${AltView.dur(secs)} of episode ECG` + (left <= 0 ? " (capped at 15 min)" : ""));
+    if (altPlot) { altPlot.destroy(); altPlot = null; }
+    altPlot = AltView.splitChart($("alt-split"), sa);
+    $("alt-metrics").innerHTML = sa ? AltView.metricsTable(sa) : "not enough clean beats in the episodes";
+  }
+  $("alt-range-btn").addEventListener("click", () => {
+    if (!ses || !alt) return;
+    const eps = Alternans.inRange(alt, sel[0], sel[1]).map((e) => ({ ...e, t0: Math.max(e.t0, sel[0]), t1: Math.min(e.t1, sel[1]) }));
+    altSelEp = -1; altCard();
+    altSplit(eps, `Selected period ${fmtTime(sel[0], true)}–${fmtTime(sel[1], true)}`);
+  });
 
   // ---------- RR distribution of the selected period (rrhist.js) ----------
   let histSel = null, hist = null;

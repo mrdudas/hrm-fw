@@ -46,6 +46,19 @@
 
   <section class="card wide">
     <div class="card-head">
+      <h2 title="RR alternans / bigeminy episodes found in every recording by the same detector as the live dashboard and the review page (alternans.js). Results are cached per recording (recordings/analysis/) and redone when the recording grew or the detector's parameters changed.">RR alternans, day by day</h2>
+      <span class="hint rv-tools">
+        <button id="a-rescan" class="tool-btn" title="Analyse every recording again, ignoring the cache">Rescan all recordings</button>
+        <span id="a-info"></span>
+      </span>
+    </div>
+    <canvas id="a-map" class="chart-day"></canvas>
+    <p class="hint">Each row is a day (newest on top), across the hours of the day: grey where the strap was recording, orange where an alternans episode was going on. Click an episode: open it on the review page (±2 min).</p>
+    <div class="table-wrap"><table id="a-table" class="d-table"></table></div>
+  </section>
+
+  <section class="card wide">
+    <div class="card-head">
       <h2>Days</h2>
       <span class="hint">newest first · click a row: its first window on the review page</span>
     </div>
@@ -54,5 +67,7 @@
 </main>
 
 <script src="/static/daily.js"></script>
+<script src="/static/alternans.js"></script>
+<script src="/static/altdaily.js"></script>
 </body>
 </html>

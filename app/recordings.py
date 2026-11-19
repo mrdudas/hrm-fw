@@ -528,3 +528,114 @@ def raw_window(outdir, ses, a, b):
     info = meta.get("ecg_info") or {}
     return {"a": a, "b": b, "fs": fs, "ecg": _ecg_window(ecg_path, fs, a, b), "acc": acc,
             "notched_hz": info.get("notched_hz", 0), "hp_comp": bool(info.get("hp_comp"))}
+
+
+# ---------------------------------------------------------------------------
+# Alternans results, user events and episode clips
+#
+# The alternans detector runs in the browser (static/alternans.js, the same code
+# live and on saved recordings); its per-recording summary is cached here, in
+# <outdir>/analysis/alternans_<session>.json, together with the size and mtime of
+# the rr file it was made from and the detector's parameter key, so the page can
+# tell whether it is still valid.
+# ---------------------------------------------------------------------------
+def _rr_stat(outdir, ses):
+    try:
+        st = os.stat(os.path.join(outdir, f"rr_{ses}.csv"))
+    except OSError:
+        return None
+    return {"size": st.st_size, "mtime": round(st.st_mtime, 3)}
+
+
+def alternans_get(outdir, ses):
+    if not SESSION_RE.match(ses):
+        raise ValueError("bad session id")
+    cached = None
+    try:
+        with open(os.path.join(outdir, "analysis", f"alternans_{ses}.json")) as f:
+            cached = json.load(f)
+    except (OSError, ValueError):
+        pass
+    return {"cached": cached, "rr": _rr_stat(outdir, ses)}
+
+
+def alternans_put(outdir, ses, data):
+    if not SESSION_RE.match(ses) or not isinstance(data, dict):
+        raise ValueError("bad session id")
+    d = os.path.join(outdir, "analysis")
+    os.makedirs(d, exist_ok=True)
+    tmp = os.path.join(d, f".alternans_{ses}.json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(data, f, separators=(",", ":"))
+    os.replace(tmp, os.path.join(d, f"alternans_{ses}.json"))
+
+
+def alternans_all(outdir):
+    """Every session with its rr file stat and cached alternans summary (or None)."""
+    out = []
+    for s in list_sessions(outdir):
+        out.append({"id": s["id"], "start": s.get("start"), "end": s.get("end"), "beats": s.get("beats"),
+                    **alternans_get(outdir, s["id"])})
+    return out
+
+
+def events_get(outdir, ses):
+    """User events of a session (Mark event, notes): events_<session>.jsonl, one JSON per line."""
+    if not SESSION_RE.match(ses):
+        raise ValueError("bad session id")
+    out = []
+    try:
+        with open(os.path.join(outdir, f"events_{ses}.jsonl")) as f:
+            for line in f:
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return out
+
+
+def events_add(outdir, ses, ev):
+    if not SESSION_RE.match(ses):
+        raise ValueError("bad session id")
+    ev = {"t": float(ev.get("t")), "kind": str(ev.get("kind", "note"))[:20], "note": str(ev.get("note", ""))[:2000]}
+    with open(os.path.join(outdir, f"events_{ses}.jsonl"), "a") as f:
+        f.write(json.dumps(ev) + "\n")
+    return ev
+
+
+CLIP_STREAMS = (("ecg", None), ("rr", 0), ("accel", 0), ("ectopy", 0), ("battery", 0))
+
+
+def write_clip(outdir, ses, a, b, name, info=None):
+    """Copy [a, b] (unix s) of every stream of a session into
+    <outdir>/clips/<session>_<name>/ (same CSV formats and headers, plus meta.json
+    with the session's meta and `info`). Returns the clip folder, or None if it exists."""
+    if not SESSION_RE.match(ses) or not re.match(r"^[A-Za-z0-9_.-]{1,60}$", name):
+        raise ValueError("bad session id or clip name")
+    d = os.path.join(outdir, "clips", f"{ses}_{name}")
+    if os.path.exists(d):
+        return None
+    os.makedirs(d)
+    for stream, col in CLIP_STREAMS:
+        src = os.path.join(outdir, f"{stream}_{ses}.csv")
+        hdr = _header(src)
+        if not hdr:
+            continue
+        if col is None:                    # ECG: by arrival time when the file has it
+            col = 3 if "rx_time" in hdr else 0
+        rows = _read_window(src, col, a, b + (1.0 if col == 3 else 0.0))
+        with open(os.path.join(d, f"{stream}.csv"), "w") as f:
+            f.write(",".join(hdr) + "\n")
+            for r in rows:
+                f.write(",".join(r) + "\n")
+    meta = {}
+    try:
+        with open(os.path.join(outdir, f"meta_{ses}.json")) as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        pass
+    with open(os.path.join(d, "meta.json"), "w") as f:
+        json.dump({"session": ses, "a": a, "b": b, "clip": info or {}, "session_meta": meta}, f, indent=1)
+    return d

@@ -12,12 +12,17 @@ import time
 
 
 class DemoSource:
-    def __init__(self, hub, hr=62.0, log=print, fs=250, batch=20):
+    def __init__(self, hub, hr=62.0, log=print, fs=250, batch=20, alternans=False):
         self.hub = hub
         self.fs = fs                  # ECG sample rate to simulate (strap: 250 or 1024)
         self.batch = batch            # ECG samples per packet (strap: 20 or 40)
         self.notched_hz = 0           # demo stream carries no mains hum, so no strap notch
         self.base_hr = hr
+        # --demo-alternans: every 5 min a 2 min bigeminy (short / long R-R alternating),
+        # the short-cycle beats with an early, inverted P wave (premature atrial beats),
+        # and the strap's classifier calling them ARTIFACT, as the firmware does
+        self.alternans = alternans
+        self._t0 = time.time()
         self.log = log
         self.enabled = True           # UI Disconnect pauses the synthetic stream
         self._stop = asyncio.Event()
@@ -95,11 +100,13 @@ class DemoSource:
         # batched 5 per packet with the ECG position (seq, offset) of the last one
         acc_div = max(1, round(fs / 25))
         acc_buf, tick = [], 0
+        alt_short = False             # alternans: this cycle is the short one
+        pac_p = False                 # this cycle's P wave is the premature atrial one
         while not self._stop.is_set():
             packet.clear()
             for _ in range(self.batch):
                 # QRS-ish morphology as a function of phase within the beat
-                packet.append(int(self._ecg_sample(phase, rr_s)))
+                packet.append(int(self._ecg_sample(phase, rr_s, pac_p)))
                 phase += 1.0 / fs
                 t_samp += 1.0 / fs
                 tick += 1
@@ -126,6 +133,9 @@ class DemoSource:
                             ecto_pend = None
                         if ecto_cycle:
                             ecto_pend = (ecto_cycle, rr_ms)
+                        if self._in_alternans():
+                            art += 1
+                            self._emit_ecto(3, round(rr_ms), 0, pvc, pac, art, total)
                     last_r = r_t
                 if phase >= rr_s:
                     phase -= rr_s
@@ -138,6 +148,14 @@ class DemoSource:
                     rr_s = max(0.3, 60.0 / self.base_hr * (1 + hrv))
                     if after_pvc:
                         rr_s *= 1.35               # compensatory pause
+                    pac_p = False
+                    if self._in_alternans():
+                        alt_short = not alt_short
+                        rr_s = 60.0 / self.base_hr * (0.78 if alt_short else 1.14) * (1 + random.gauss(0, 0.01))
+                        # the R sits at 0.32 of a cycle, so the R-R ending in the cycle AFTER
+                        # a short one is the short R-R: that beat gets the premature P wave
+                        pac_p = not alt_short
+                        continue
                     # ~4% chance of an ectopic beat
                     roll = random.random()
                     if roll < 0.025:
@@ -155,11 +173,17 @@ class DemoSource:
             next_t += self.batch / fs
             await asyncio.sleep(max(0.0, next_t - time.monotonic()))
 
-    def _ecg_sample(self, phase, rr_s):
+    def _in_alternans(self):
+        return self.alternans and 90 <= (time.time() - self._t0) % 300 < 210
+
+    def _ecg_sample(self, phase, rr_s, pac_p=False):
         """A crude but recognizable P-QRS-T over the interval [0, rr_s)."""
         f = phase / rr_s
         v = 0.0
-        v += 120 * math.exp(-((f - 0.12) ** 2) / (2 * 0.0016))     # P wave
+        if pac_p:                                                  # premature atrial: inverted, later P
+            v += -90 * math.exp(-((f - 0.17) ** 2) / (2 * 0.0012))
+        else:
+            v += 120 * math.exp(-((f - 0.12) ** 2) / (2 * 0.0016))     # P wave
         v += -80 * math.exp(-((f - 0.30) ** 2) / (2 * 0.00015))    # Q
         v += 900 * math.exp(-((f - 0.32) ** 2) / (2 * 0.00025))    # R
         v += -180 * math.exp(-((f - 0.35) ** 2) / (2 * 0.0004))    # S

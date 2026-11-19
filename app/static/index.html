@@ -175,6 +175,11 @@
     </div>
     <div id="avg-chart" class="chart-avg"></div>
     <div id="qrst-out" class="qrst-out"></div>
+    <div id="alt-split-wrap" class="alt-section" hidden>
+      <h3 title="During RR alternans the beats ending a SHORT R-R (A) and those ending a LONG one (B) are averaged apart (R-aligned, from the recorded ECG, so it matches the review page). Different P waves or PR in A point to premature atrial beats; overlapping P waves to a sinus-origin alternation. Shaded: the P window compared (−250 … −40 ms).">Split average during alternans: A short-cycle vs B long-cycle</h3>
+      <div id="alt-split-sub" class="alt-sub"></div>
+      <div class="alt-grid"><div id="alt-split"></div><div id="alt-metrics"></div></div>
+    </div>
   </section>
 
   <!-- ectopy -->
@@ -185,6 +190,7 @@
         <div class="ecto-count pvc"><div class="ec-n" id="pvc">0</div><div class="ec-l">PVC</div></div>
         <div class="ecto-count pac"><div class="ec-n" id="pac">0</div><div class="ec-l">PAC</div></div>
         <div class="ecto-count art"><div class="ec-n" id="artifact">0</div><div class="ec-l">Artifact</div></div>
+        <div class="ecto-count alt" title="RR alternans / bigeminy episodes in this recording (the app's detector on the recorded beats)"><div class="ec-n" id="alt-count">0</div><div class="ec-l">Alternans</div></div>
       </div>
       <div class="ecto-log-wrap">
         <div class="ecto-log-head">Recent events <span class="ecto-tip">· click one to see its ECG</span></div>
@@ -198,6 +204,18 @@
         <button id="ecto-view-close" class="tool-btn" title="Hide the waveform">Close</button>
       </div>
       <div id="ecto-chart" class="chart-ecto"></div>
+    </div>
+    <div class="alt-section">
+      <h3 title="A window of 12 normal beats alternates when the sign of ΔRR changes in ≥ 80 % of the pairs, the median |ΔRR| is ≥ 80 ms and the short and the long intervals are each steady; an episode starts after 12 such beats in a row and ends after 8 without. Its beats are ALT-SHORT / ALT-LONG, not artifacts; prematurity is measured against the median LONG interval. HRV leaves them out. Each episode is saved (±30 s of every stream) to recordings/clips/.">RR alternans / bigeminy</h3>
+      <div id="alt-stats" class="hint">waiting for the recording…</div>
+      <div id="alt-now" class="alt-now"></div>
+      <div id="alt-eps"></div>
+      <div class="alt-mark">
+        <input id="alt-note" type="text" maxlength="500" placeholder="notes: caffeine, posture, symptoms, fatigue…">
+        <button id="alt-mark-btn" class="tool-btn" title="Mark this moment: saves the note and ±60 s of every stream to recordings/clips/">Mark event</button>
+        <button id="alt-note-btn" class="tool-btn" title="Save the note at this moment (no clip)">Save note</button>
+        <span id="alt-mark-msg" class="hint"></span>
+      </div>
     </div>
   </section>
 </main>
@@ -215,6 +233,10 @@
 <script src="/static/exercise.js"></script>
 <script src="/static/exlive.js"></script>
 <script src="/static/rrhist.js"></script>
+<script src="/static/dtw.js"></script>
+<script src="/static/alternans.js"></script>
+<script src="/static/altview.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/altlive.js"></script>
 </body>
 </html>

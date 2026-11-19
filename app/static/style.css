@@ -245,3 +245,25 @@ html{background:var(--bg); color-scheme:dark}
 .dtw-table td{text-align:right; padding:4px 8px; border-bottom:1px solid var(--grid)}
 .dtw-table th:first-child, .dtw-table td:first-child{text-align:left}
 .dtw-table .chip{display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; vertical-align:-1px}
+/* alternans (live, review, daily) */
+.alt-table{border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; width:100%}
+.alt-table th{color:var(--muted); font-weight:500; text-align:right; padding:3px 8px; border-bottom:1px solid var(--border)}
+.alt-table td{text-align:right; padding:3px 8px; border-bottom:1px solid var(--grid)}
+.alt-table th:first-child, .alt-table td:first-child{text-align:left}
+.alt-table tr.click{cursor:pointer}
+.alt-table tr.click:hover td{background:var(--panel-2)}
+.alt-table tr.sel td{background:rgba(90,162,255,0.14)}
+.alt-hint{margin-top:8px; font-size:12px; line-height:17px; padding:6px 8px; border-radius:6px; background:var(--panel-2)}
+.alt-hint.different{border-left:3px solid #ffb454}
+.alt-hint.same{border-left:3px solid #5aa2ff}
+.alt-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:14px; margin-top:10px}
+.alt-grid > *{min-width:0}
+.alt-sub{color:var(--muted); font-size:12px; margin:8px 0 4px}
+.alt-now{font-size:13px; font-variant-numeric:tabular-nums; margin-top:6px}
+.alt-now.on{color:#ffb454}
+.alt-mark{display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap}
+.alt-mark input[type=text]{flex:1; min-width:180px; height:26px; background:var(--panel-2); color:var(--text);
+  border:1px solid var(--border); border-radius:6px; font:inherit; font-size:12px; padding:0 8px}
+.alt-section{margin-top:14px; padding-top:12px; border-top:1px solid var(--border)}
+.alt-section h3{font-size:13px; font-weight:600; margin:0 0 4px}
+.ecto-count.alt .ec-n{color:#ffb454}

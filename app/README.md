@@ -94,6 +94,7 @@ pip install -r requirements.txt
 python app.py               # scan for the strap, stream live, open the dashboard
 python app.py --demo        # synthetic data — no hardware needed (great for UI testing)
 python app.py --demo --demo-fs 1024   # same, simulating the 1024 Hz firmware
+python app.py --demo --demo-alternans # plus a 2 min RR alternans / bigeminy episode every 5 min
 python app.py --scan        # just list nearby BLE devices and exit
 python app.py --address D7:CD:02:7A:05:33   # connect to a specific address / macOS UUID
 python app.py --no-open --port 9000         # don't open a browser, custom port
@@ -307,6 +308,72 @@ The verdict counts the four signs. HR max, HR rest and sex (Banister weights)
 are set on the card and shared by both pages. Cadence comes from the
 strap's step counter (accel CSV, `steps` column), per 10 s bin.
 
+## RR alternans / bigeminy
+
+One detector for everything (`static/alternans.js`): the live dashboard, the
+review page, the daily view and the episode report run it on the same input,
+the session's beats as the server reconstructs them from `rr_<session>.csv` (the
+live page reads the session being recorded every 15 s), so a stretch gives the
+same result live and later from the file.
+
+- **Detector.** A window of 12 normal beats (no strap PVC, no lost beat, RR
+  300–2000 ms) qualifies when the sign of ΔRR alternates in ≥ 80 % of the
+  consecutive pairs, the median |ΔRR| is ≥ 80 ms, and the short and the long
+  intervals are each steady (SD of every other RR ≤ 0.5 × the median |ΔRR|:
+  without this an irregular rhythm such as atrial fibrillation alternates in
+  sign by chance often enough to pass). An episode starts after 12 qualifying
+  beats in a row and ends after 8 that do not (at once at a lost beat or a PVC).
+  Its beats are ALT-SHORT / ALT-LONG (RR below / above the mean of its
+  neighbours), not artifacts. A stretch whose short + long interval is under
+  1.35 × the median R-R of the minute around it is one beat counted twice (a T
+  wave or noise taken for an R) and is rejected. Prematurity during an episode
+  is measured against the median of its LONG intervals (the overall local
+  median is dragged down by the alternation itself). The parameters form a key
+  (`v1-w12-…`) stored with every cached result.
+- **HRV.** Episode beats are left out of the live RMSSD / SDNN / pNN50 card; the
+  review page marks them corrected and shows the period's HRV both ways.
+- **Split averaged beat.** Inside the episodes the ECG's own R peaks are taken,
+  the beats ending a short R-R (A) and a long one (B) averaged apart (R-aligned,
+  0.5–40 Hz, beats whose shape is far from the group's median left out), and
+  each mean delineated (`qrst.js`): PR, P onset from R, P amplitude and
+  duration, QRS, plus the correlation of the two P waves (−250 … −40 ms). A
+  different P wave or PR in A suggests premature atrial beats; overlapping P
+  waves a sinus-origin alternation (a hint from a single-lead strap, not a
+  diagnosis).
+- **Live.** The Ectopy card counts episodes, total time and % of the monitored
+  time, says when an episode is going on, lists the last ones, and how many of
+  the strap's ARTIFACT labels fall inside them. Under the signal-averaged beat:
+  the split average of the latest episode (its last 3 min, refreshed every
+  minute while it lasts). Every finished episode is saved, ±30 s of every
+  stream (ECG, RR, accelerometer, ectopy, battery), to
+  `recordings/clips/<session>_alt_<HHMMSS>/` with a `meta.json`; the recorder
+  writes every stream anyway, so the clip is cut from the session's files (no
+  separate ring buffer). **Mark event** saves the note and ±60 s the same way;
+  **Save note** only the note (`events_<session>.jsonl`).
+- **Review page.** A card lists every episode of the recording (start, end,
+  duration, beats, mean short / long RR, median |ΔRR|, prematurity); a click
+  moves the charts to it (±2 min, ECG strip at its start) and computes its
+  split average; *Analyse selected range* does it for the episodes inside the
+  selection (at most 15 min of ECG). Episodes are shaded on the RR chart, their
+  beats orange.
+- **Daily view.** Every recording's result is cached in
+  `recordings/analysis/alternans_<session>.json` with the rr file's size and
+  mtime and the parameter key; the page analyses the recordings without a
+  valid cached result (with progress) and stores it. A map of the days across
+  the hours (grey: recording, orange: episodes; click: open it) and a table per
+  day: episodes, total, % of the recorded time, when.
+- **Episode report** (`/report#s=<session>&a=&b=`, *Report (PDF)* on the review
+  card): one A4 landscape page to print or save as PDF, from a saved recording
+  or the one being recorded. Header with the date, device, sample rate, source
+  and the filter note; three 10-s ECG strips at 25 mm/s and 10 mm/mV on an ECG
+  grid (episode onset, mid-episode, the nearest stretch without alternation),
+  with the R-R of every beat; the RR tachogram of the episode ±2 min (shaded);
+  the Poincaré plot, episode against other beats; the split average with its
+  metrics; a summary (episodes, total time, strap PVC / PAC / ARTIFACT, HR
+  range, RMSSD with and without the episodes, the user's notes). The strap's
+  ADC-to-mV scale is not known: the page asks for the counts per mV (default
+  1500, an estimate) and says so on the page.
+
 ## Packaging (optional, later)
 
 Can be bundled into a single executable with PyInstaller, e.g.:
@@ -330,11 +397,13 @@ app/
 ├── hub.py            # fans events out to CSV + all WebSocket clients
 ├── ble_source.py     # scan / connect / subscribe / auto-reconnect (bleak)
 ├── demo_source.py    # synthetic data generator (--demo)
-├── webserver.py      # aiohttp: serves the dashboard + /ws, the review page + /api/sessions (+ /ecg raw window), /daily + /api/rest, /morph
+├── webserver.py      # aiohttp: serves the dashboard + /ws, the review page + /api/sessions (+ /ecg raw window), /daily + /api/rest, /morph,
+│                     # /report; alternans cache (/api/alternans, /api/sessions/<id>/alternans), events, clips
 ├── recordings.py     # reads saved sessions back for the review page (beats, lost-beat breaks, activity + cadence, raw ECG windows), resting windows for /daily
 ├── static/           # index.html + app.js + style.css (uPlot via CDN);
 │                     # review.html + review.js + hrv.js (HRV / DFA / MFDFA / Chhabra–Jensen), ecgview.js (raw ECG strip)
 │                     # morph.html + morph.js + dtw.js (beat timing against the averaged beat, DTW; runs in dtw_worker.js)
+│                     # alternans.js (RR alternans detector, split average), altview.js, altlive.js, altdaily.js, report.html + report.js
 ├── recordings/       # CSV output (created on first run)
 ├── requirements.txt
 ├── install.sh / run.sh                 # Linux + macOS installer / launcher
