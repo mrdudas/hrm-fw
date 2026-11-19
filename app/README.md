@@ -386,6 +386,52 @@ same result live and later from the file.
   The cache keeps per clock hour the time with signal, the strap's labels and
   the median R-R for this.
 
+## ECG ectopy: bigeminy from the raw ECG
+
+`/ectopy#s=<session>[&a=&b=]` (*ECG ectopy* on the review page's alternans card,
+for the selected period) analyses the raw ECG itself (`static/ectopy.js`, in a
+Web Worker), independent of the strap's own ectopy labels:
+
+- **R peaks**: band-pass 5–25 Hz, energy envelope, adaptive threshold with
+  search-back, 250 ms refractory, peak refined on the 0.5–40 Hz trace (the
+  lead's dominant polarity). A long interval is searched once more with the
+  QRS template (a beat lost in noise). R-Rs across lost ECG samples are not
+  used — never a pause.
+- **Signal quality** per beat (sqi 0–1): noise between the QRS complexes, EMG,
+  accelerometer movement, and the QRS correlation with the dominant template
+  only when the surroundings are noisy too. Only a bad signal makes an
+  ARTIFACT; an irregular R-R in a clean signal never does. A long R-R
+  (> 1.5 × sinus) in a noisy interval is an artifact, in a quiet one a pause.
+- **Sinus R-R**: the median of the clean beats of the last 5 min, leaving out
+  alternating and early beats and their neighbours; inside a long bigeminy
+  (few clean beats) the upper quartile of the R-Rs around, i.e. the long ones.
+- **Bigeminy**: dRR changes sign beat to beat with |dRR| ≥ max(80 ms, 8 % of
+  sinus); 6 alternating R-Rs start an episode, 2 non-alternating pairs end
+  it; short / long 0.70–0.92 with a robust CV (MAD) < 0.10. Type from
+  short + long: < 1.97 × sinus → PAC; 2 × sinus ± 3 % with a wide or
+  different QRS → PVC; mean R-R above 1.03 × sinus → GROUPED_BLOCK_SUSPECT.
+  Episodes less than 30 s apart make a bout. A slow breathing wave never
+  changes sign beat to beat, so it does not alternate. **Trigeminy**: an early
+  beat exactly every third beat, ≥ 3 cycles.
+- **PAC / PVC**: QRS like the template (r ≥ 0.9) and not wide → PAC, otherwise
+  PVC; wide = ≥ 120 ms *and* 40 ms over the recording's usual QRS width (a
+  strap's filters can make every QRS measure wide). The P wave rules nothing out (an atrial focus near the sinus
+  node has the same P).
+- **Output**: per beat label, R-R, coupling, pause, sqi, QRS correlation and
+  width, sinus R-R (CSV); per episode start, end, pairs, short / long, ratio,
+  sinus R-R, (S + L) / sinus, type, mean HR, movement, posture (from the
+  gravity vector against the one seen while walking; "–" when the recording
+  has no steps); burden and its hourly counts; the share of R-Rs HRV has to
+  leave out. Charts: the R-R tachogram with the episodes, and the early-beat
+  burden per bin against the strap firmware's PAC / PVC labels.
+
+Validated on the 2026-11-19 22:52 recording (49 min, lying, deep breathing at
+the end): bigeminy at 0–3, 10–13, 18–23 and 28–37.6 min, short ≈ 805 ms /
+long ≈ 970 ms, ratio 0.84, sinus ≈ 946 ms, S + L ≈ 1.85 × sinus → PAC; about
+11 % of the beats in bigeminy, 14 % early in all (the firmware: 0.16 %);
+the 1.5–2 s R-Rs of minutes 18–23 are artifacts; the 18-s ECG gap at 48.5 min
+makes no pause.
+
 ## Packaging (optional, later)
 
 Can be bundled into a single executable with PyInstaller, e.g.:
@@ -416,6 +462,7 @@ app/
 │                     # review.html + review.js + hrv.js (HRV / DFA / MFDFA / Chhabra–Jensen), ecgview.js (raw ECG strip)
 │                     # morph.html + morph.js + dtw.js (beat timing against the averaged beat, DTW; runs in dtw_worker.js)
 │                     # alternans.js (RR alternans detector, split average), altview.js, altlive.js, altdaily.js, report.html + report.js
+│                     # ectopy.html + ectopy_page.js + ectopy.js (raw-ECG ectopy / bigeminy analysis; runs in ectopy_worker.js)
 ├── recordings/       # CSV output (created on first run)
 ├── requirements.txt
 ├── install.sh / run.sh                 # Linux + macOS installer / launcher

@@ -26,6 +26,7 @@ def make_app(hub, log=print):
     app.router.add_get("/daily", _daily)
     app.router.add_get("/morph", _morph)
     app.router.add_get("/report", _report)
+    app.router.add_get("/ectopy", _ectopy_page)
     app.router.add_get("/api/current", _current)
     app.router.add_get("/api/sessions", _sessions)
     app.router.add_get("/api/sessions/{id}", _session)
@@ -45,7 +46,7 @@ def make_app(hub, log=print):
 async def _no_cache(request, response):
     """Make the browser revalidate the dashboard files on every load, so a
     `git pull` takes effect on a normal reload (no stale cached app.js)."""
-    if request.path in ("/", "/review", "/daily", "/morph", "/report") or request.path.startswith("/static/"):
+    if request.path in ("/", "/review", "/daily", "/morph", "/report", "/ectopy") or request.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache"
 
 
@@ -75,6 +76,10 @@ async def _morph(request):
 
 async def _report(request):
     return web.FileResponse(os.path.join(STATIC_DIR, "report.html"))
+
+
+async def _ectopy_page(request):
+    return web.FileResponse(os.path.join(STATIC_DIR, "ectopy.html"))
 
 
 def _outdir(request):

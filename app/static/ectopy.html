@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>HRM Raw RR — ECG ectopy</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="review">
+<header>
+  <div class="brand">
+    <span class="logo">&#9829;</span>
+    <span>HRM Raw RR — ECG ectopy</span>
+  </div>
+  <div class="header-right">
+    <div class="device">
+      <select id="e-ses" title="Saved session"></select>
+      <button id="e-run" class="tool-btn" title="Analyse the raw ECG of the session (or the range in the address)">Analyse</button>
+    </div>
+    <a class="tool-btn nav-link" id="e-review" href="/review">Recordings</a>
+    <a class="tool-btn nav-link" href="/daily">Daily</a>
+    <a class="tool-btn nav-link" href="/">Live dashboard</a>
+  </div>
+</header>
+
+<main>
+  <section class="card wide">
+    <div class="card-head">
+      <h2 title="Beats found in the raw ECG by the app (R peaks, QRS template, signal quality), early beats and bigeminy / trigeminy by their R-R pattern. Not a diagnostic device.">ECG ectopy · bigeminy</h2>
+      <span class="hint" id="e-info">choose a recording</span>
+    </div>
+    <div id="e-stats" class="rv-stats"></div>
+    <p class="hint" id="e-note"></p>
+  </section>
+
+  <section class="card wide">
+    <div class="card-head">
+      <h2>R-R tachogram</h2>
+      <span class="hint" id="e-key"></span>
+    </div>
+    <div id="e-tach" class="rv-lane"></div>
+    <p class="hint">Each dot is a beat's R-R, coloured by its label; shaded: bigeminy / trigeminy (light: the bout, darker: the episodes in it); line: the sinus R-R the early beats are measured against. Drag: zoom · double-click: whole range · click: open that moment on the Recordings page.</p>
+  </section>
+
+  <section class="card wide">
+    <div class="card-head">
+      <h2 title="Early beats per bin over all beats in the bin: the app's ECG analysis against the strap's own PAC / PVC labels (ectopy stream of the firmware)">Burden: strap firmware vs ECG analysis</h2>
+      <span class="hint" id="e-burden-info"></span>
+    </div>
+    <div id="e-burden" class="rv-lane"></div>
+  </section>
+
+  <section class="card wide">
+    <div class="card-head">
+      <h2 title="Episodes joined when less than 30 s apart">Bigeminy / trigeminy</h2>
+      <span class="hint">click a row: open it on the Recordings page</span>
+    </div>
+    <div class="table-wrap"><table id="e-bouts" class="d-table"></table></div>
+    <div class="sub-head"><h3>Episodes</h3><span class="hint">≥ 6 alternating R-Rs to start, 2 non-alternating pairs end one</span></div>
+    <div class="table-wrap"><table id="e-eps" class="d-table"></table></div>
+    <div class="sub-head"><h3>Per hour</h3><span class="hint" id="e-dl"></span></div>
+    <div class="table-wrap"><table id="e-hours" class="d-table"></table></div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+<script src="/static/alternans.js"></script>
+<script src="/static/ectopy_page.js"></script>
+</body>
+</html>

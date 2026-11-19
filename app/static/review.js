@@ -541,6 +541,7 @@
       altSplit([e], `Episode ${AltView.clock(e.t0)}–${AltView.clock(e.t1)}`);
     }, altSelEp));
     $("alt-report").href = `/report#s=${ses.id}&a=${sel[0].toFixed(1)}&b=${sel[1].toFixed(1)}`;
+    $("alt-ecto").href = `/ectopy#s=${ses.id}&a=${sel[0].toFixed(1)}&b=${sel[1].toFixed(1)}`;
   }
   // split average over episodes (clipped to at most 15 min of ECG)
   async function altSplit(eps, title) {
