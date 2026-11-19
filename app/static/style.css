@@ -267,3 +267,7 @@ html{background:var(--bg); color-scheme:dark}
 .alt-section{margin-top:14px; padding-top:12px; border-top:1px solid var(--border)}
 .alt-section h3{font-size:13px; font-weight:600; margin:0 0 4px}
 .ecto-count.alt .ec-n{color:#ffb454}
+
+.alt-range { font-size: 12px; color: var(--muted, #8b96a5); }
+.alt-range input { background: #1e232c; color: #e6edf3; border: 1px solid #3a4250; border-radius: 6px; padding: 2px 4px; font: inherit; color-scheme: dark; }
+a.tool-btn { text-decoration: none; display: inline-block; line-height: 24px; }

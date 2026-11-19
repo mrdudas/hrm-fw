@@ -122,6 +122,18 @@
     }
   }
   $("a-rescan").addEventListener("click", () => scan(true));
+  // multi-day report: the range defaults to the last 30 days
+  {
+    const p2 = (n) => String(n).padStart(2, "0"), ymd = (d) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+    const now = new Date(), ago = new Date(now); ago.setDate(now.getDate() - 29);
+    $("a-from").value = ymd(ago); $("a-to").value = ymd(now);
+    const link = () => {
+      let f = $("a-from").value, t = $("a-to").value;
+      if (f && t && f > t) [f, t] = [t, f];
+      $("a-report").href = `/report#from=${f}&to=${t}`;
+    };
+    $("a-from").addEventListener("change", link); $("a-to").addEventListener("change", link); link();
+  }
   let rt = 0;
   addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(draw, 150); });
   scan(false);

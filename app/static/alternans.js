@@ -39,7 +39,7 @@
   // results cached per recording carry this key; a change of the parameters invalidates them
   const paramsKey = (p = PARAMS) => `v${p.version}-w${p.win}-a${p.altFrac}-d${p.minDelta}-s${p.startRun}-e${p.endRun}-g${p.regular}-x${p.split}-r${p.rrMin}-${p.rrMax}`;
   const NORMAL = 0, SHORT = 1, LONG = 2;
-  const SUMMARY_FMT = 2;               // layout of the cached per-recording summary
+  const SUMMARY_FMT = 3;               // layout of the cached per-recording summary
   const CLASS = ["N", "ALT-SHORT", "ALT-LONG"];
 
   function median(a) {
@@ -329,19 +329,23 @@
 
   // what is kept per recording (daily view, episode lists)
   function summarize(id, ses, res, rrStat) {
-    // seconds the strap actually watched the heart, per clock hour: [[hour start (unix s), s], ...]
+    // per clock hour: [hour start (unix s), seconds the strap watched the heart, strap PVC, PAC,
+    // ARTIFACT labels, median RR ms] -- the daily view and the multi-day report add these up
     const mon = new Map(), b = ses.beats;
+    const hour = (t) => { const h = Math.floor(t / 3600) * 3600; if (!mon.has(h)) mon.set(h, { s: 0, PVC: 0, PAC: 0, ARTIFACT: 0, rr: [] }); return mon.get(h); };
     for (let i = 0; i < b.t.length; i++) {
       if (b.gap && b.gap[i]) continue;
       if (!(b.rr[i] >= PARAMS.rrMin && b.rr[i] <= PARAMS.rrMax)) continue;
-      const h = Math.floor(b.t[i] / 3600) * 3600;
-      mon.set(h, (mon.get(h) || 0) + b.rr[i] / 1000);
+      const m = hour(b.t[i]);
+      m.s += b.rr[i] / 1000;
+      m.rr.push(b.rr[i]);
     }
+    for (const e of ses.ectopy || []) if (e[1] in { PVC: 1, PAC: 1, ARTIFACT: 1 }) hour(e[0])[e[1]]++;
     const ecto = ses.ectopy || [];
     const artIn = ecto.filter((e) => e[1] === "ARTIFACT" && res.episodes.some((p) => e[0] >= p.t0 && e[0] <= p.t1 + 1)).length;
     return {
       id, key: res.key, fmt: SUMMARY_FMT, rr: rrStat || null, made: Date.now() / 1000,
-      mon: [...mon].map(([h, s]) => [h, Math.round(s)]),
+      mon: [...mon].sort((x, y) => x[0] - y[0]).map(([h, m]) => [h, Math.round(m.s), m.PVC, m.PAC, m.ARTIFACT, m.rr.length ? Math.round(median(m.rr)) : null]),
       start: ses.beats.t[0], end: ses.beats.t[ses.beats.t.length - 1], stats: res.stats,
       artifactsInEpisodes: artIn, rejected: (res.rejected || []).length,
       episodes: res.episodes.map((e) => ({ t0: e.t0, t1: e.t1, dur: e.dur, n: e.n, ongoing: e.ongoing,

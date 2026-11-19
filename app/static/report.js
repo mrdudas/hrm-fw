@@ -132,8 +132,8 @@
     $("poin-sub").textContent = `orange: episode (${pts.filter((q) => q[2]).length}) · grey: other beats (${pts.filter((q) => !q[2]).length})`;
   }
 
-  function splitPlot(sa) {
-    const W = 64, H = 30, s = svg($("split"), W, H), x0 = 8, y0 = 1, w = 55, h = 24;
+  function splitPlot(sa, pre = "") {
+    const W = 64, H = 30, s = svg($(pre + "split"), W, H), x0 = 8, y0 = 1, w = 55, h = 24;
     if (!sa) { text("not enough clean beats", 4, 10, { size: 2.4 }, s); return; }
     const ys = [sa.A, sa.B].filter(Boolean).flatMap((g) => Array.from(g.y));
     const lo = Math.min(...ys), hi = Math.max(...ys), m = 0.06 * (hi - lo);
@@ -144,7 +144,7 @@
     text("ms from R · shaded: P window", x0 + w / 2, H - 0.3, { size: 1.9, anchor: "middle", fill: "#555" }, s);
     const g = (k, f) => (sa[k] ? f(sa[k]) : "–");
     const row = (n, f, u) => `<tr><td>${n}</td><td>${g("A", f)}</td><td>${g("B", f)}</td><td>${u}</td></tr>`;
-    $("split-tab").innerHTML = `<table><tr><th></th><th style="color:var(--a)">A short</th><th style="color:var(--b)">B long</th><th></th></tr>` +
+    $(pre + "split-tab").innerHTML = `<table><tr><th></th><th style="color:var(--a)">A short</th><th style="color:var(--b)">B long</th><th></th></tr>` +
       row("beats", (x) => x.n, "") + row("RR before", (x) => r0(x.rr), "ms") + row("PR", (x) => r0(x.m.pr), "ms") +
       row("P onset", (x) => r0(x.m.pOn), "ms from R") + row("P amplitude", (x) => (x.m.pAmp == null ? "–" : (x.m.pAmp / cal * 1000).toFixed(0)), "µV") +
       row("P duration", (x) => r0(x.m.pDur), "ms") + row("QRS", (x) => r0(x.m.qrs), "ms") +
@@ -155,6 +155,11 @@
   // ---------------- the report ----------------
   async function build() {
     const h = new URLSearchParams(location.hash.slice(1));
+    const multi = h.has("from");
+    $("page").hidden = multi; $("multi").hidden = !multi;
+    document.querySelector(".tools b").textContent = multi ? "Multi-day report" : "Episode report";
+    document.title = multi ? "Multi-day report" : "Episode report";
+    if (multi) return buildMulti(h.get("from"), h.get("to") || h.get("from"));
     const id = h.get("s");
     let a = +h.get("a"), b = +h.get("b");
     if (!id) { msg("no session in the URL (#s=…&a=…&b=…)"); return; }
@@ -240,6 +245,171 @@
     }
     msg(eps.length ? "ready · print it, or save as PDF (A4 landscape)" : "ready · no alternans episode in this range");
   }
+  // ---------------- multi-day summary: /report#from=YYYY-MM-DD&to=YYYY-MM-DD ----------------
+  const dayOf = (t) => { const d = new Date(t * 1000); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
+  const ymd = (t) => { const d = new Date(t * 1000); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+  const hrs = (s) => (s >= 3600 ? `${(s / 3600).toFixed(1)} h` : `${Math.round(s / 60)} min`);
+  const parseDay = (s) => { const m = /^(\d{4})-(\d\d)-(\d\d)$/.exec(s || ""); return m ? new Date(+m[1], +m[2] - 1, +m[3]).getTime() / 1000 : NaN; };
+
+  async function buildMulti(fromS, toS) {
+    const A0 = parseDay(fromS), d1 = parseDay(toS);
+    if (!(A0 === A0) || !(d1 === d1) || d1 < A0) { msg("bad range in the URL (#from=YYYY-MM-DD&to=YYYY-MM-DD)"); return; }
+    const B0 = new Date(new Date(d1 * 1000).setDate(new Date(d1 * 1000).getDate() + 1)).getTime() / 1000;   // end of the last day
+    msg("listing the recordings…");
+    const list = (await (await fetch("/api/alternans")).json()).filter((s) => s.end > A0 && s.start < B0);
+    const sums = [];
+    for (let i = 0; i < list.length; i++) {
+      const s = list[i];
+      if (Alternans.valid(s)) { sums.push(s.cached); continue; }
+      msg(`analysing recordings… ${i + 1} / ${list.length}`);
+      const r = await Alternans.forSession(s.id, null, true);
+      if (r.summary) sums.push(r.summary);
+    }
+    // per day, per local clock hour; episodes clipped to the range
+    const days = new Map(), hourRec = new Float64Array(24), hourEp = new Float64Array(24);
+    const day = (m) => { if (!days.has(m)) days.set(m, { m, rec: [], mon: 0, eps: [], PVC: 0, PAC: 0, ART: 0, rr: [] }); return days.get(m); };
+    const eps = [];
+    let artIn = 0, rejected = 0;
+    for (const s of sums) {
+      for (const [h, sec, pvc, pac, art, rr] of s.mon || []) {
+        if (h + 3600 <= A0 || h >= B0) continue;
+        const d = day(dayOf(h)), lh = new Date(h * 1000).getHours();
+        d.rec.push([h, Math.min(1, sec / 3600)]); d.mon += sec; d.PVC += pvc; d.PAC += pac; d.ART += art;
+        if (rr) d.rr.push([rr, sec]);
+        hourRec[lh] += sec;
+      }
+      artIn += s.artifactsInEpisodes || 0; rejected += s.rejected || 0;
+      for (const e of s.episodes || []) {
+        if (e.t1 <= A0 || e.t0 >= B0) continue;
+        const x = { ...e, id: s.id, t0: Math.max(A0, e.t0), t1: Math.min(B0, e.t1) };
+        x.dur = x.t1 - x.t0;
+        eps.push(x);
+        day(dayOf(x.t0)).eps.push(x);
+        for (let t = x.t0; t < x.t1;) {                   // episode seconds per clock hour
+          const nx = Math.min(x.t1, (Math.floor(t / 3600) + 1) * 3600);
+          hourEp[new Date(t * 1000).getHours()] += nx - t; t = nx;
+        }
+      }
+    }
+    const dl = [...days.values()].sort((x, y) => x.m - y.m);
+    const mon = dl.reduce((s, d) => s + d.mon, 0), epDur = eps.reduce((s, e) => s + e.dur, 0);
+    const wmean = (k) => { const w = eps.reduce((s, e) => s + e.n, 0); return w ? eps.reduce((s, e) => s + e[k] * e.n, 0) / w : NaN; };
+    const wmed = (pairs) => {                             // time-weighted median of hourly median RRs
+      const p = pairs.slice().sort((x, y) => x[0] - y[0]), tot = p.reduce((s, x) => s + x[1], 0);
+      let c = 0; for (const [v, w] of p) { c += w; if (c >= tot / 2) return v; } return NaN;
+    };
+    const tot = (k) => dl.reduce((s, d) => s + d[k], 0);
+    const longest = eps.slice().sort((x, y) => y.dur - x.dur);
+
+    $("m-meta").textContent = `${fromS} – ${toS} · HRM Raw RR chest strap · ${sums.length} recording${sums.length === 1 ? "" : "s"}, ${hrs(mon)} with signal`;
+    $("m-meta2").textContent = `Detector ${Alternans.paramsKey()} · generated ${new Date().toLocaleString()}`;
+    $("m2-meta").textContent = `${fromS} – ${toS} · the longest episodes · generated ${new Date().toLocaleString()}`;
+    $("m2-filter").innerHTML = `<b>Single-lead chest strap, front-end high-pass 1.7 Hz — not a diagnostic device.</b><br>Strips: 0.5–40 Hz · 10 mm/mV at ${cal} ADC counts/mV (estimated, not calibrated).`;
+
+    const hrMed = wmed(dl.flatMap((d) => d.rr));
+    $("m-sum").innerHTML = `<table class="big">
+      <tr><td>days with a recording / with episodes</td><td>${dl.filter((d) => d.mon > 0).length} / ${dl.filter((d) => d.eps.length).length}</td></tr>
+      <tr><td>time with signal</td><td>${hrs(mon)}</td></tr>
+      <tr><td>alternans episodes</td><td>${eps.length}</td></tr>
+      <tr><td>total in episodes</td><td>${dur(epDur)} (${mon ? (100 * epDur / mon).toFixed(1) : "0"} % of the time with signal)</td></tr>
+      <tr><td>longest episode</td><td>${longest[0] ? `${dur(longest[0].dur)}, ${ymd(longest[0].t0)} ${clock(longest[0].t0, false)}` : "–"}</td></tr>
+      <tr><td>short / long R-R in episodes (beat-weighted mean)</td><td>${r0(wmean("shortMean"))} / ${r0(wmean("longMean"))} ms</td></tr>
+      <tr><td>median |ΔRR| · prematurity (short / median long)</td><td>${r0(wmean("medDelta"))} ms · ${eps.length ? wmean("prematurity").toFixed(2) : "–"}</td></tr>
+      <tr><td>median HR (time with signal)</td><td>${hrMed === hrMed ? Math.round(60000 / hrMed) + " bpm" : "–"}</td></tr>
+      <tr><td>strap PVC / PAC</td><td>${tot("PVC")} / ${tot("PAC")}</td></tr>
+      <tr><td>strap ARTIFACT labels</td><td>${tot("ART")} (${artIn} inside episodes)</td></tr>
+      <tr><td>rejected stretches (a beat counted twice)</td><td>${rejected}</td></tr>
+    </table>`;
+
+    // episodes by clock hour
+    {
+      const W = 126, H = 30, s = svg($("m-hours"), W, H), x0 = 9, y0 = 1.5, w = W - 10, h = 22;
+      const pct = [...hourRec].map((r, i) => (r > 0 ? 100 * hourEp[i] / r : 0)), top = Math.max(10, Math.ceil(Math.max(...pct) / 10) * 10);
+      const { X, Y } = frame(s, x0, y0, w, h, [0, 24], [0, top], [0, 3, 6, 9, 12, 15, 18, 21, 24].map((v) => [v, pad(v)]), ticks(0, top, 3).map((v) => [v, v + " %"]));
+      for (let i = 0; i < 24; i++) {
+        if (hourRec[i] <= 0) { el("rect", { x: X(i) + 0.4, y: y0 + h - 0.6, width: X(1) - X(0) - 0.8, height: 0.6, fill: "#ddd" }, s); continue; }
+        el("rect", { x: X(i) + 0.4, y: Y(pct[i]), width: X(1) - X(0) - 0.8, height: y0 + h - Y(pct[i]), fill: "var(--a)" }, s);
+        text((hourRec[i] / 3600).toFixed(hourRec[i] < 36000 ? 1 : 0), X(i + 0.5), y0 + h - 0.6, { size: 1.5, anchor: "middle", fill: "#333" }, s);
+      }
+    }
+    // day x hour map
+    {
+      const n = Math.max(1, dl.length), rh = Math.max(1.6, Math.min(4.5, 62 / n)), W = 126, x0 = 17, w = W - 18, H = 3 + n * rh + 1;
+      const s = svg($("m-map"), W, H), X = (sec) => x0 + sec / 86400 * w;
+      for (let k = 0; k <= 24; k += 3) { el("line", { x1: X(k * 3600), y1: 2.6, x2: X(k * 3600), y2: H, stroke: "#e3e3e3", "stroke-width": 0.1 }, s); text(pad(k), X(k * 3600), 2.2, { size: 1.8, anchor: "middle", fill: "#555" }, s); }
+      dl.forEach((d, j) => {
+        const y = 3 + j * rh;
+        text(ymd(d.m), x0 - 1, y + rh * 0.75, { size: Math.min(2, rh * 0.8), anchor: "end", fill: "#333" }, s);
+        for (const [h, f] of d.rec) el("rect", { x: X(h - d.m), y: y + 0.2, width: X(3600) - x0, height: rh - 0.4, fill: "#8b96a5", "fill-opacity": (0.1 + 0.4 * f).toFixed(3) }, s);
+        for (const e of d.eps) el("rect", { x: X(e.t0 - d.m), y: y + 0.2, width: Math.max(0.35, X(e.dur) - x0), height: rh - 0.4, fill: "var(--a)" }, s);
+      });
+    }
+    // days table
+    {
+      const MAX = 42, rows = dl.slice(-MAX);
+      $("m-days").innerHTML = `<table><tr><th>day</th><th>signal</th><th>episodes</th><th>total</th><th>%</th><th>longest</th><th>short / long</th><th>|ΔRR|</th><th>HR</th><th>PVC</th><th>PAC</th><th>ART</th></tr>` +
+        rows.map((d) => {
+          const tt = d.eps.reduce((s, e) => s + e.dur, 0), lg = d.eps.reduce((m, e) => Math.max(m, e.dur), 0), w = d.eps.reduce((s, e) => s + e.n, 0);
+          const mean = (k) => (w ? d.eps.reduce((s, e) => s + e[k] * e.n, 0) / w : NaN), rr = wmed(d.rr);
+          return `<tr><td>${ymd(d.m)}</td><td>${hrs(d.mon)}</td><td>${d.eps.length || "–"}</td><td>${tt ? dur(tt) : "–"}</td><td>${d.mon ? (100 * tt / d.mon).toFixed(1) : "–"}</td>` +
+            `<td>${lg ? dur(lg) : "–"}</td><td>${w ? r0(mean("shortMean")) + " / " + r0(mean("longMean")) : "–"}</td><td>${w ? r0(mean("medDelta")) : "–"}</td>` +
+            `<td>${rr === rr ? Math.round(60000 / rr) : "–"}</td><td>${d.PVC}</td><td>${d.PAC}</td><td>${d.ART}</td></tr>`;
+        }).join("") + `</table>` + (dl.length > MAX ? `<div class="sub">the last ${MAX} of ${dl.length} days</div>` : "") +
+        `<div class="sub" style="margin-top:1mm">signal: time the strap saw the heart · %: of that time in an episode · short / long: beat-weighted mean R-R of the episodes (ms) · HR: median, bpm · PVC / PAC / ART: the strap's own labels</div>`;
+    }
+
+    // page 2: the longest episodes -- strips (from different days when possible), table, split average, notes
+    const pick = [];
+    for (const e of longest) { if (pick.length >= 3) break; if (!pick.some((p) => dayOf(p.t0) === dayOf(e.t0))) pick.push(e); }
+    for (const e of longest) { if (pick.length >= 3) break; if (!pick.includes(e)) pick.push(e); }
+    $("m-eps").innerHTML = eps.length ? `<table><tr><th>day</th><th>start</th><th>dur</th><th>beats</th><th>short</th><th>long</th><th>|ΔRR|</th><th>prem.</th></tr>` +
+      longest.slice(0, 14).map((e) => `<tr><td>${ymd(e.t0)}</td><td>${clock(e.t0)}</td><td>${dur(e.dur)}</td><td>${e.n}</td><td>${r0(e.shortMean)}</td><td>${r0(e.longMean)}</td><td>${r0(e.medDelta)}</td><td>${e.prematurity.toFixed(2)}</td></tr>`).join("") +
+      (eps.length > 14 ? `<tr><td colspan="8">… ${eps.length - 14} more</td></tr>` : "") + `</table>` : "no episodes in this range";
+
+    msg("loading the notes…");
+    const evs = (await Promise.all(sums.map((s) => fetch(`/api/sessions/${s.id}/events`).then((r) => r.json()).catch(() => []))))
+      .flat().filter((e) => e.note && e.t >= A0 && e.t < B0).sort((x, y) => x.t - y.t);
+    $("m-notes").innerHTML = evs.length ? evs.slice(0, 30).map((e) => `${ymd(e.t)} ${clock(e.t, false)} ${escapeHtml(e.note)}`).join("<br>") + (evs.length > 30 ? `<br>… ${evs.length - 30} more` : "") : "none";
+
+    msg("loading the ECG strips…");
+    const sesCache = new Map();
+    const resOf = async (id) => {                         // the episodes of the strip's recording, for the S / L tags
+      if (!sesCache.has(id)) sesCache.set(id, sums.find((s) => s.id === id).episodes || []);
+      return sesCache.get(id);
+    };
+    for (let k = 0; k < 3; k++) {
+      const e = pick[k], host = $(`m-s${k + 1}`), lab = $(`m-s${k + 1}-lab`);
+      if (!e) { host.innerHTML = ""; lab.textContent = k ? "" : "no episode in this range"; continue; }
+      const sa = (e.t0 + e.t1) / 2 - STRIP_S / 2;
+      let ecg = null;
+      try { ecg = await Alternans.fetchEcg(e.id, sa - 2, sa + STRIP_S + 2); } catch (err) { /* drawn as "no ECG" */ }
+      strip(host, lab, ecg, sa, `${ymd(e.t0)} · episode ${clock(e.t0, false)}, ${dur(e.dur)}`, await resOf(e.id));
+    }
+
+    // split average over the longest episodes, at most 15 min of ECG, one sample rate
+    if (eps.length) {
+      let left = 900, efs = 0, notched = 0, used = 0;
+      const segs = [], parts = [];
+      for (const e of longest) { if (left <= 0) break; const p1 = Math.min(e.t1, e.t0 + left); parts.push([e, e.t0, p1]); left -= p1 - e.t0; }
+      for (let k = 0; k < parts.length; k++) {
+        const [e, p0, p1] = parts[k];
+        let d;
+        try { d = await Alternans.fetchEcg(e.id, p0, p1, (fr) => msg(`split average: loading the ECG… ${Math.round(100 * (k + fr) / parts.length)} %`)); } catch (err) { continue; }
+        if (!d.segs.length) continue;
+        if (!efs) { efs = d.fs; notched = d.notched; }
+        if (d.fs !== efs) continue;                        // recordings at another sample rate are left out
+        segs.push(...d.segs); used++;
+      }
+      const sa = efs ? Alternans.splitAverage({ fs: efs, segs, notched }, parts.map((p) => ({ t0: p[1], t1: p[2] }))) : null;
+      $("m-split-sub").textContent = `R-aligned means of the beats ending a short (A) / long (B) R-R, ${used} longest episode${used === 1 ? "" : "s"} (≤ 15 min of ECG)`;
+      splitPlot(sa, "m-");
+    } else {
+      $("m-split-sub").textContent = "no alternans episode in this range";
+      $("m-split").innerHTML = ""; $("m-split-tab").innerHTML = "";
+    }
+    msg(eps.length ? "ready · print it, or save as PDF (A4 landscape, 2 pages)" : "ready · no alternans episode in this range");
+  }
+
   function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
   $("print").addEventListener("click", () => window.print());

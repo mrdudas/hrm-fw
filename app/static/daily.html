@@ -48,6 +48,9 @@
     <div class="card-head">
       <h2 title="RR alternans / bigeminy episodes found in every recording by the same detector as the live dashboard and the review page (alternans.js). Results are cached per recording (recordings/analysis/) and redone when the recording grew or the detector's parameters changed.">RR alternans, day by day</h2>
       <span class="hint rv-tools">
+        <label class="alt-range">from <input id="a-from" type="date"></label>
+        <label class="alt-range">to <input id="a-to" type="date"></label>
+        <a id="a-report" class="tool-btn" target="_blank" title="Two A4 pages: summary, day by day, by clock hour; the longest episodes' ECG and split average">Multi-day report (PDF)</a>
         <button id="a-rescan" class="tool-btn" title="Analyse every recording again, ignoring the cache">Rescan all recordings</button>
         <span id="a-info"></span>
       </span>

@@ -373,6 +373,18 @@ same result live and later from the file.
   range, RMSSD with and without the episodes, the user's notes). The strap's
   ADC-to-mV scale is not known: the page asks for the counts per mV (default
   1500, an estimate) and says so on the page.
+- **Multi-day report** (`/report#from=YYYY-MM-DD&to=YYYY-MM-DD`, *Multi-day
+  report (PDF)* on the daily view, last 30 days by default): two A4 landscape
+  pages built from the per-recording cache (recordings not yet analysed are
+  analysed first). Page 1: totals (days, time with signal, episodes, time in
+  episodes and its share, longest episode, mean short / long R-R, |ΔRR|,
+  prematurity, median HR, the strap's PVC / PAC / ARTIFACT labels), the share
+  of each clock hour spent in an episode, a day × hour map and a table per day.
+  Page 2: 10-s strips from the middle of the three longest episodes (from
+  different days when there are), the split average over the longest episodes
+  (at most 15 min of ECG, one sample rate), the longest episodes and the notes.
+  The cache keeps per clock hour the time with signal, the strap's labels and
+  the median R-R for this.
 
 ## Packaging (optional, later)
 
