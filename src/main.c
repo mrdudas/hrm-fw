@@ -732,18 +732,25 @@ static volatile uint32_t sample_idx, led_off_idx;
 static inline void led_on(void)  { nrf_gpio_pin_set(LED_PIN); }
 static inline void led_off(void) { nrf_gpio_pin_clear(LED_PIN); }
 
-/* Non-blocking ~0.5 Hz "awake / advertising" blink (60 ms on every 2 s). Called
- * once per main-loop iteration so it never stalls the 10 ms ADC drain the way the
- * old blocking k_msleep blink would. `active` is true only while advertising with
- * no live heartbeat flashing the LED; when false it just makes sure the LED is off
- * so the per-beat heartbeat flash (process_adc_buffer) can own the LED cleanly. */
+/* Non-blocking "awake / advertising, no heartbeat" indicator: a DOUBLE blink
+ * (60 ms on, 150 ms gap, 60 ms on) every ~2 s. The double flash distinguishes
+ * "advertising but not measuring a heartbeat" from the single per-beat heartbeat
+ * flash, so the state is readable at a glance on the strap. Called once per
+ * main-loop iteration so it never stalls the 10 ms ADC drain the way the old
+ * blocking k_msleep blink would. `active` is true only while advertising with no
+ * live heartbeat flashing the LED; when false it just makes sure the LED is off so
+ * the per-beat heartbeat flash (process_adc_buffer) can own the LED cleanly. */
 static void idle_blink(bool active)
 {
-	static int64_t t; static bool on;
-	if (!active) { if (on) { led_off(); on = false; } return; }
+	static int64_t t; static uint8_t phase;   /* 0=wait-off, 1=on1, 2=gap, 3=on2 */
+	if (!active) { if (phase) { led_off(); phase = 0; } return; }
 	int64_t now = k_uptime_get();
-	if (!on && now - t >= 1940)      { led_on();  on = true;  t = now; }
-	else if (on && now - t >= 60)    { led_off(); on = false; t = now; }
+	switch (phase) {
+	case 0: if (now - t >= 1740) { led_on();  phase = 1; t = now; } break; /* 1st flash */
+	case 1: if (now - t >=   60) { led_off(); phase = 2; t = now; } break; /* gap       */
+	case 2: if (now - t >=  150) { led_on();  phase = 3; t = now; } break; /* 2nd flash */
+	case 3: if (now - t >=   60) { led_off(); phase = 0; t = now; } break; /* -> wait   */
+	}
 }
 
 /* Direct Form II transposed IIR; n = tap count (order+1), z sized n-1 */
