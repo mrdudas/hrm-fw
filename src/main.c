@@ -92,6 +92,16 @@ LOG_MODULE_REGISTER(hrm, LOG_LEVEL_INF);
 #define MOTION_THR     1200               /* accel high-pass magnitude that counts as "moving" */
 #define LED_PULSE_N    (SAMPLE_HZ*12/1000) /* ~12 ms LED pulse per beat (fs-relative) */
 
+/* Quality gate: suppress a SUSTAINED implausibly-fast rhythm while the IMU shows
+ * the wearer is at REST. All-day ~350 ms "RR" (~170 bpm with the body still) is
+ * the detector self-triggering on electrode/EMG noise, not a heartbeat. The three
+ * conditions together keep it specific: a real premature beat (PVC/PAC) is one or
+ * two short RRs, not a run; real exertion tachycardia always moves the IMU; and
+ * only applied when an accelerometer is present (no IMU -> can't know rest). */
+#define FAST_RR_MS       400    /* RR below this (>150 bpm) is "suspiciously fast"   */
+#define MOTION_REST_MS   15000  /* no accel motion for this long = "at rest"         */
+#define FAST_RR_MIN_RUN  4      /* consecutive fast-at-rest beats before suppressing */
+
 /* HP (high-pass) compensation of the STREAM. The AFE still has a residual
  * high-pass (~fc) that flattens P/T and tilts the baseline; a first-order
  * shelving filter undoes it -- unity gain above fc, boosted below (DC gain
@@ -716,6 +726,7 @@ static void bt_ready(int e) { if (!e) k_work_submit(&adv_work); }
 /* ---- Power / status LED --------------------------------------------- */
 static volatile int64_t  last_beat_ms;
 static volatile int64_t  last_motion_ms;   /* updated by the accelerometer when moving */
+static bool accel_present;                  /* set at boot; fwd-declared for the quality gate */
 static volatile uint32_t sample_idx, led_off_idx;
 
 static inline void led_on(void)  { nrf_gpio_pin_set(LED_PIN); }
@@ -808,6 +819,7 @@ static void detector_feed(int16_t sample)
 	static uint32_t rail_recent;        /* >0 = raw ADC railed within the last RAIL_WIN samples */
 	static bool     pend_prem, pend_railed;
 	static float    warm_max;           /* peak energy seen during warm-up (threshold seed) */
+	static uint8_t  fast_rest_run;      /* run length of fast-at-rest beats (noise gate) */
 
 	/* 50 Hz notch is applied up front in the sampling loop (feeding both the streamed
 	 * signal and this detector), so here we only band-pass. */
@@ -895,12 +907,30 @@ static void detector_feed(int16_t sample)
 				if (rr_ms >= RR_MIN_MS && rr_ms <= RR_MAX_MS) {
 					uint16_t rr_1024 = (uint16_t)(d_f * 1024.0f / SAMPLE_HZ + 0.5f);
 					uint8_t hr = hr_from_rr(rr_ms);
+					rr_avg_cyc = rr_avg_cyc ? (rr_avg_cyc * 7 + d) / 8 : d;  /* adapt always (self-heal) */
+
+					/* quality gate: drop a SUSTAINED fast-at-rest noise burst
+					 * (all-day ~350 ms "RR" = the detector self-triggering on
+					 * electrode/EMG noise while the body is still). See FAST_RR_*
+					 * for why the three conditions keep it specific. The detector
+					 * state above/below is untouched, so it self-heals when the
+					 * noise stops (overdue -> threshold glides down). */
+					bool fast_at_rest = accel_present && rr_ms < FAST_RR_MS &&
+						(k_uptime_get() - last_motion_ms) > MOTION_REST_MS;
+					if (fast_at_rest) {
+						if (fast_rest_run < FAST_RR_MIN_RUN) fast_rest_run++;
+					} else {
+						fast_rest_run = 0;
+					}
+					if (fast_rest_run >= FAST_RR_MIN_RUN) goto beat_done;
+
 					LOG_INF("beat RR=%u HR=%u", rr_ms, hr);
 					hrm_notify(hr, rr_1024);
 					/* sensor-time beat timestamp (a1b20006): back-date the
-					 * fiducial to the true R so the app can use sensor time. */
+					 * fiducial to the true R so the app can use sensor time.
+					 * After the gate, so a suppressed beat skips this too and
+					 * beat_counter advances only on emitted beats. */
 					beat_notify(now - R_FIDUCIAL_DELAY_SAMPLES, rr_1024);
-					rr_avg_cyc = rr_avg_cyc ? (rr_avg_cyc * 7 + d) / 8 : d;
 
 					/* --- extrasystole classification (ectopy char only) ---
 					 * 1-beat look-ahead: hold a premature beat until the next
@@ -940,6 +970,7 @@ static void detector_feed(int16_t sample)
 							(sinus_qrs * 7.0f + cand_peak) / 8.0f : cand_peak;
 					}
 					ect_stats_to_buf();
+				beat_done: ;
 				}
 			}
 			last_cyc = now; last_delta = delta; have_last = true;
@@ -979,8 +1010,7 @@ static uint8_t acc_rd(uint8_t r){ a_st();a_wrb((ACC_ADDR<<1)|0);a_wrb(r);a_st();
 
 /* The accelerometer is optional (some HW variants omit it). Detect it by whether
  * it ACKs its I2C address, so we can skip accel work and, crucially, pick a wake
- * source that still works without it. */
-static bool accel_present;
+ * source that still works without it. (declared up by last_motion_ms for the gate) */
 static bool acc_detect(void)
 {
 	a_scl_hi(); a_sda_hi(); k_busy_wait(50);
