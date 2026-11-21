@@ -57,6 +57,11 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
     ECG's `unix_time` at `ecg_index`), independent of when the notification
     arrived; without raw ECG in the same connection it is the arrival time and
     `ecg_index` is empty. The analysis pages still use `rr_<session>.csv`.
+    The counter advances only on beats the strap sends: a counter gap means
+    notifications lost on the link (a break in the series), while a time gap
+    with consecutive counters is a stretch the strap's RR quality gate
+    suppressed as noise. The first beat after such a stretch carries the RR
+    across it (possibly clipped at RR_MAX): treat it like a post-gap RR.
   - `meta_<session>.json` — `{"ecg_fs": …}`, the ECG sample rate used for the
     session (read by `tools/analyze_recording.py`)
 - Live dashboard at **http://localhost:8770** (opened automatically): rolling
