@@ -20,7 +20,7 @@ import time
 
 from config import (DEVICE_NAME, LEGACY_NAMES, KNOWN_ADDRESS, HR_UUID, ECG_UUID, ACCEL_UUID,
                     ECTOPY_UUID, BATTERY_UUID, ECG_INFO_UUID, ECG_FS,
-                    LINK_UUID, HP_CFG_UUID)
+                    LINK_UUID, HP_CFG_UUID, BEAT_UUID)
 import parsers
 
 SCAN_S = 8          # length of one scan
@@ -415,6 +415,7 @@ class BLESource:
             (ACCEL_UUID, self._accel_cb, "accel (a1b30002)"),
             (ECTOPY_UUID, self._ecto_cb, "ectopy (a1b40002)"),
             (BATTERY_UUID, self._batt_cb, "battery (0x2A19)"),
+            (BEAT_UUID, self._beat_cb, "beats on the strap clock (a1b20006)"),
         ]
         for uuid, cb, label in subs:
             try:
@@ -494,6 +495,9 @@ class BLESource:
 
     def _ecto_cb(self, _sender, data):
         self.hub.publish_ectopy(parsers.parse_ectopy(data))
+
+    def _beat_cb(self, _sender, data):
+        self.hub.publish_beats(parsers.parse_beat(data))
 
     def _batt_cb(self, _sender, data):
         self.hub.publish_battery(parsers.parse_battery(data)["pct"])

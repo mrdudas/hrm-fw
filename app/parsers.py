@@ -150,6 +150,24 @@ def parse_accel(b: bytes) -> dict:
     return d
 
 
+def parse_beat(b: bytes) -> list:
+    """Beats on the strap's own clock, char a1b20006 (notify + read), 8 B per
+    record, little-endian, oldest first (the strap sends one per notify, live):
+      u16 counter        +1 per accepted beat, wraps
+      u32 r_sample_index the R peak's index in the strap's output-sample count
+                         since boot (same epoch as the raw-ECG packets: seq *
+                         raw_batch + offset), already back-dated by the
+                         detector's 50 ms filter delay, so it is the true R
+      u16 rr_1024        the RR in 1/1024 s, the same value as on 0x2A37
+    Returns [{"counter", "r_index", "rr_ms"}, ...]."""
+    b = bytes(b)
+    out = []
+    for k in range(len(b) // 8):
+        c, r, rr = struct.unpack_from("<HIH", b, 8 * k)
+        out.append({"counter": c, "r_index": r, "rr_ms": rr * 1000.0 / 1024.0})
+    return out
+
+
 def parse_ectopy(b: bytes) -> dict:
     """Ectopy/extrasystole, char a1b40002 (14 B LE):
 

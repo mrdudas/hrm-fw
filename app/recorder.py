@@ -17,6 +17,11 @@ class CSVRecorder:
         "ectopy":  ["unix_time", "type", "coupling_ms", "pause_ms",
                     "pvc", "pac", "artifact", "total", "burden_pct"],
         "battery": ["unix_time", "pct"],
+        # a1b20006 (newer firmware; header only otherwise): unix_time from the
+        # strap's sample clock (the ECG file's time base) when the beat could be
+        # placed on it, else the arrival time; ecg_index in ecg_<session>.csv's
+        # sample_index space (empty if not placed)
+        "beat":    ["unix_time", "rx_time", "counter", "r_sample_index", "ecg_index", "rr_ms"],
     }
 
     def __init__(self, outdir: str, session: str | None = None):
@@ -100,6 +105,14 @@ class CSVRecorder:
             d["pvc"], d["pac"], d["artifact"], d["total"], d["burden_pct"],
         ])
         self._files["ectopy"].flush()
+
+    def write_beat(self, rx, d, ecg_t0=None):
+        """d: a parsers.parse_beat record, plus "ecg_index" (or None)."""
+        idx = d.get("ecg_index")
+        t = ecg_t0 + idx / self.ecg_fs if idx is not None and ecg_t0 is not None else rx
+        self._writers["beat"].writerow([f"{t:.5f}", f"{rx:.4f}", d["counter"], d["r_index"],
+                                        "" if idx is None else idx, f"{d['rr_ms']:.1f}"])
+        self._files["beat"].flush()
 
     def write_battery(self, t, pct):
         self._writers["battery"].writerow([f"{t:.4f}", pct])

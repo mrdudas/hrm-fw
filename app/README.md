@@ -32,6 +32,7 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
   | HP comp  | `a1b20005-…` (read + write) | u8 flags (bit0 shelf comp, bit1 0.5 Hz high-pass; bit7 in a write = reset to defaults), u16 fc, u16 f0, u16 hpf in 0.1 Hz — read on connect, written only from the dashboard's "strap comp" control (↺ = defaults). Current firmware keeps it in flash across reboots and sleep; older firmware falls back to 5.0 Hz on every reboot |
   | Accel    | `a1b30002-…`        | ~25 Hz; legacy int16 x/y/z + u16 steps (8 B), or batched `u8 n, n×(x,y,z), u16 steps[, u16 ecg_seq, u8 ecg_off]` — v2 carries the ECG position of the last sample, so accel is drawn on the ECG clock |
   | Ectopy   | `a1b40002-…`        | PVC/PAC/artifact classifier + burden |
+  | Beat     | `a1b20006-…` (notify + read) | 8 B per beat (one per notify, live; parsed as n × 8 B): u16 counter (+1 per beat, wraps), u32 r_sample_index (the R peak in the strap's output-sample count since boot, the raw-ECG epoch: seq × raw_batch + offset; firmware already back-dates the detector's fiducial by 50 ms = 25 samples @ 500 Hz, so it is the true R), u16 RR in 1/1024 s (same as 0x2A37). Newer firmware only |
   | Battery  | `0x2A19`            | 1 byte percent (read + notify) |
 - **Auto-reconnects** if the BLE link drops (quick retry, then once a minute).
 - Records each stream to a timestamped CSV in `recordings/`, flushed after every
@@ -47,6 +48,15 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
     the sample's position in the ECG `sample_index` space, with v2 firmware)
   - `ectopy_<session>.csv` — `unix_time, type, coupling_ms, pause_ms, pvc, pac, artifact, total, burden_pct`
   - `battery_<session>.csv` — `unix_time, pct`
+  - `beat_<session>.csv` — `unix_time, rx_time, counter, r_sample_index, ecg_index, rr_ms`
+    (a1b20006; header only with older firmware). Each beat is placed on the ECG
+    file's time base: the ECG seq is the strap's packet number mod 65536, so the
+    latest ECG packet's full packet number is the one with that seq nearest the
+    beat's (`hub.beat_ecg_index`), and `ecg_index` = r_sample_index minus that
+    offset. `unix_time` is then the R peak's time on the strap's clock (the
+    ECG's `unix_time` at `ecg_index`), independent of when the notification
+    arrived; without raw ECG in the same connection it is the arrival time and
+    `ecg_index` is empty. The analysis pages still use `rr_<session>.csv`.
   - `meta_<session>.json` — `{"ecg_fs": …}`, the ECG sample rate used for the
     session (read by `tools/analyze_recording.py`)
 - Live dashboard at **http://localhost:8770** (opened automatically): rolling

@@ -605,7 +605,7 @@ def events_add(outdir, ses, ev):
     return ev
 
 
-CLIP_STREAMS = (("ecg", None), ("rr", 0), ("accel", 0), ("ectopy", 0), ("battery", 0))
+CLIP_STREAMS = (("ecg", None), ("rr", 0), ("accel", 0), ("ectopy", 0), ("battery", 0), ("beat", 0))
 
 
 def write_clip(outdir, ses, a, b, name, info=None):

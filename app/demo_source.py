@@ -85,6 +85,10 @@ class DemoSource:
     async def _ecg_and_beats(self, loop):
         fs = float(self.fs)
         seq = 0
+        # the strap's packet count does not start at 0 on connect: start near a
+        # 16-bit wrap so the unwrapping (ECG, accel, a1b20006 beats) is exercised
+        seq0 = 65520
+        beat_n = 0
         phase = 0.0                 # position within current RR interval (s)
         rr_s = 60.0 / self.base_hr  # current beat-to-beat interval (s)
         steps_since_beat = 0
@@ -115,7 +119,7 @@ class DemoSource:
                     if len(acc_buf) == 5:
                         if self.enabled:
                             self.hub.publish_accel_batch(acc_buf, self._steps,
-                                                         ecg_seq=seq & 0xFFFF, ecg_off=len(packet) - 1)
+                                                         ecg_seq=(seq0 + seq) & 0xFFFF, ecg_off=len(packet) - 1)
                         acc_buf = []
                 # like the firmware: report the beat shortly AFTER its R peak
                 # (R sits at 0.32 of the cycle; ~60 ms detector latency)
@@ -125,6 +129,11 @@ class DemoSource:
                     if last_r is not None and self.enabled:
                         rr_ms = (r_t - last_r) * 1000.0
                         self.hub.publish_rr(round(60000.0 / rr_ms), [rr_ms], "yes")
+                        # a1b20006: the same beat on the strap's sample clock
+                        beat_n += 1
+                        self.hub.publish_beats([{"counter": beat_n & 0xFFFF,
+                                                 "r_index": seq0 * self.batch + round(r_t * fs) - 1,
+                                                 "rr_ms": round(rr_ms * 1.024) / 1.024}])
                         # like the firmware: the premature beat is reported one beat
                         # later, when the interval after it (the pause) is known
                         if ecto_pend:
@@ -167,7 +176,7 @@ class DemoSource:
                         rr_s = 0.40
                         ecto_cycle = 2
             if self.enabled:
-                self.hub.publish_ecg(seq & 0xFFFF, list(packet))
+                self.hub.publish_ecg((seq0 + seq) & 0xFFFF, list(packet))
             seq += 1
             # pace on an absolute schedule so the simulated rate doesn't drift
             next_t += self.batch / fs

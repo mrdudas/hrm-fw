@@ -185,6 +185,27 @@ class Hub:
         event = {"type": "ectopy", "t": t, **d}
         self._emit(event, snapshot_key="ectopy")
 
+    def beat_ecg_index(self, r_index: int):
+        """A strap-clock beat (a1b20006 r_sample_index, 32-bit, since the strap's
+        boot) in this hub's ECG sample_index space, or None when there is no ECG
+        in this connection to tie it to. The ECG seq is the strap's packet
+        number mod 65536; the unwrapped packet number of the latest ECG packet
+        is the one with that seq nearest to the beat's packet (a live beat is a
+        few packets from it; anything within +-32768 packets, ~30 min, works)."""
+        if self._ecg_seq0 is None or self._ecg_last_seq is None:
+            return None
+        B = self._ecg_batch
+        p = r_index // B                                       # the beat's strap packet
+        latest = p + ((((self._ecg_seq_prev - p) & 0xFFFF) + 0x8000) & 0xFFFF) - 0x8000
+        return r_index - (latest - self._ecg_pkt) * B
+
+    def publish_beats(self, beats: list):
+        """Beats from a1b20006: recorded with their strap-clock time (beat_<session>.csv)."""
+        t = time.time()
+        for d in beats:
+            d["ecg_index"] = self.beat_ecg_index(d["r_index"])
+            self.recorder.write_beat(t, d, self._ecg_t0)
+
     def publish_battery(self, pct):
         t = time.time()
         self.recorder.write_battery(t, pct)
