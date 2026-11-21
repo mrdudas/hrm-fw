@@ -154,8 +154,8 @@ chart. Scroll to zoom (from 2 s out to the whole recording; "all" jumps there �
 wider than 200 s shows only the HR line), drag to scroll, ← → or ◀ ▶ step one window,
 M measures a time span, and there is a display-only mains notch. The session's
 beats sit as dots on their QRS peaks with the RR in ms; a hollow dot is a
-corrected beat. The beat-to-beat HR (bpm, right-hand axis) runs over the
-ECG on the same time axis, breaking at corrected and lost beats. This makes it easy to see whether a strange RR is a real beat
+corrected beat. The beat-to-beat HR (bpm) has its own lane under the ECG
+(half its height) on the same time axis; corrected beats are orange squares, and the line breaks at lost beats. This makes it easy to see whether a strange RR is a real beat
 or an artifact. The server serves only the window you look at
 (`/api/sessions/<id>/ecg?a=&b=`, at most 200 s), found by bisecting the CSV
 on its arrival-time column, so it is instant even in multi-GB files. The
@@ -168,6 +168,22 @@ the local median (artifacts, ectopic beats) are replaced by the median of the
 good beats around them. Breaks where beats were lost (dropped link, lost
 notifications) are found from the arrival times; no sliding window spans one.
 A window with more corrected beats than "max corrected" gets no value.
+
+That corrected series is used for the time-domain HRV (RMSSD, SDNN, pNN50,
+Poincaré, DC). The fractal and nonlinear measures (DFA α1 / α2, MFDFA,
+Chhabra–Jensen, chaos, determinism) use their own series. In it, PAC / PVC
+beats (the strap's events, with the compensatory RR after them), alternans
+beats and other unusual but real beats stay in: they are part of the heart's
+dynamics, and treating them as corrections would break the windows. Only
+errors are replaced there: out-of-range RRs, stale runs, a false R peak (a short RR that adds up to about one normal RR with a
+short neighbour) and a missed beat (RR ≥ 1.75 × the local median that does not
+follow a premature beat). The strap's ARTIFACT events are not used for
+this, since most of them mark a noisy ECG around a normal RR. Short breaks (a few lost notifications) do not
+cut these windows either: the lost beats count as errors in the window's
+"max corrected" budget, so only a window with too many errors or a long break
+gets no value. The summary shows both percentages ("corrected" and
+"fractal errors"). The exercise-threshold α1 (below) still uses the corrected
+series, as in the literature.
 
 Over time (sliding windows, all charts share the time axis):
 - RR tachogram with the corrected beats and the strap's PAC / PVC marks,

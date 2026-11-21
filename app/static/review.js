@@ -17,7 +17,8 @@
 
   let artBad = null;        // cl.bad without the alternans beats: real beats for the HR / RR lines
   let ses = null;           // loaded session: {id, beats:{t, rr, gap}, ectopy, activity}
-  let cl = null;            // HRV.clean() of it
+  let cl = null;            // HRV.clean() of it (time-domain HRV: ectopic / alternans beats replaced)
+  let fr = null;            // HRV.cleanReal(): fractal / chaos series, only errors replaced
   let roll = null, mf = null;
   let sel = null;           // [a, b] unix seconds
   const P = {};             // analysis parameters (from the inputs)
@@ -69,6 +70,19 @@
     await loadSession(sel.value, h.s === sel.value ? [h.a, h.b] : null);
   }
 
+  // beats the strap classified as one of `types` (its events carry the beat time minus a lag)
+  function ectoMask(beats, ecto, types) {
+    const t = beats.t, m = new Uint8Array(t.length);
+    for (const e of ecto || []) {
+      if (!types.includes(e[1])) continue;
+      const want = e[0] - (e[3] || 0) / 1000;
+      let k = nearest(t, want - 0.6), best = -1, bd = 0.6;
+      for (; k < t.length && t[k] <= want + 0.6; k++) { const d = Math.abs(t[k] - want); if (d < bd) { bd = d; best = k; } }
+      if (best >= 0) m[best] = 1;
+    }
+    return m;
+  }
+
   async function loadSession(id, range) {
     setText("ses-info", "loading…");
     const h = hashParams(), e = h.s === id ? h.e : null;     // strip position from the URL
@@ -80,6 +94,12 @@
     // RR alternans (alternans.js, as live): its beats are ALT-SHORT / ALT-LONG, left out of the HRV
     alt = Alternans.detect(b, ses.ectopy);
     altMask = Alternans.hrvMask(alt);
+    // fractal / nonlinear series: PAC / PVC / alternans beats are real, only errors are replaced
+    const keep = Uint8Array.from(alt.label, (v) => (v ? 1 : 0));
+    // (the strap's ARTIFACT events are not used: most mark a noisy ECG around a normal RR)
+    const ePac = ectoMask(b, ses.ectopy, ["PAC", "PVC"]);
+    for (let i = 0; i < keep.length; i++) if (ePac[i] || (i > 0 && ePac[i - 1])) keep[i] = 1;   // + its compensatory RR
+    fr = HRV.cleanReal(cl, b.rr, keep, null, b.gap);
     artBad = cl.bad.slice();                       // corrected beats before the alternans ones are added (HR / RR lines)
     for (let i = 0; i < altMask.length; i++) if (altMask[i]) cl.bad[i] = 1;
     Alternans.forSession(id, ses);                 // refresh the cached summary (daily view)
@@ -87,7 +107,7 @@
     $("alt-split-wrap").hidden = true;
     const nBad = cl.bad.reduce((s, v) => s + v, 0), nGap = b.gap.filter((g) => g).length;
     setText("ses-info", b.t.length
-      ? `${b.t.length} beats · ${(100 * nBad / b.t.length).toFixed(1)} % corrected · ${nGap} break${nGap === 1 ? "" : "s"} (lost beats) · ${ses.ectopy.filter((e) => e[1] !== "ARTIFACT").length} PAC/PVC`
+      ? `${b.t.length} beats · ${(100 * nBad / b.t.length).toFixed(1)} % corrected (fractal: ${(100 * fr.bad.reduce((s, v) => s + v, 0) / b.t.length).toFixed(1)} % errors) · ${nGap} break${nGap === 1 ? "" : "s"} (lost beats) · ${ses.ectopy.filter((e) => e[1] !== "ARTIFACT").length} PAC/PVC`
       : "no beats");
     if (!b.t.length) return;
     const t0 = b.t[0], t1 = b.t[b.t.length - 1];
@@ -106,8 +126,8 @@
     await new Promise((r) => setTimeout(r, 20));   // let "computing…" paint
     const t = ses.beats.t;
     const T = performance.now();
-    roll = HRV.rolling(t, cl, { winS: P.win, stepS: Math.max(5, P.win / 24), win2S: P.mfwin, maxBad: P.bad });
-    mf = HRV.rollingMF(t, cl, { winS: P.mfwin, stepS: Math.max(15, P.mfwin / 10), qMax: P.q, measure: P.cj, maxBad: P.bad });
+    roll = HRV.rolling(t, cl, { winS: P.win, stepS: Math.max(5, P.win / 24), win2S: P.mfwin, maxBad: P.bad, fr });
+    mf = HRV.rollingMF(t, fr, { winS: P.mfwin, stepS: Math.max(15, P.mfwin / 10), qMax: P.q, measure: P.cj, maxBad: P.bad });
     console.log(`[review] rolling analysis ${(performance.now() - T).toFixed(0)} ms`);
     $("rv-busy").hidden = true;
     ch = null;
@@ -123,8 +143,8 @@
     const b = ses.beats;
     setText("ch-progress", "chaos analysis… 0 %");
     Chaos.inWorker("roll", {
-      kind: "rollChaos", t: Float64Array.from(b.t), rrc: cl.rrc, bad: cl.bad, gap: cl.gap,
-      o: { winS: P.mfwin, stepS: Math.max(60, P.mfwin / 5), maxBad: P.bad },
+      kind: "rollChaos", t: Float64Array.from(b.t), rrc: fr.rrc, bad: fr.bad, gap: fr.gap,
+      o: { winS: P.mfwin, stepS: Math.max(60, P.mfwin / 5), maxBad: P.bad, lost: fr.lost },
     }, (r) => { ch = r; updateChaosLanes(); setText("ch-progress", ""); summaryChaosPts(); },
     (part, frac) => { ch = part; updateChaosLanes(); setText("ch-progress", `chaos analysis… ${Math.round(100 * frac)} %`); });
   }
@@ -475,14 +495,16 @@
     const a = nearest(t, sel[0]), b = Math.min(t.length, nearest(t, sel[1]) + 1);
     const st = HRV.stats(t, cl, a, b);
     if (!st) { $("sum-stats").innerHTML = ""; return; }
+    st.alpha1 = HRV.alpha1(fr.rrc, a, b); st.alpha2 = HRV.alpha2(fr.rrc, a, b);   // fractal: ectopic beats kept
     const qs = HRV.qRange(P.q, 0.5);
-    const m = b - a >= 200 ? HRV.mfdfa(cl.rrc, a, b, qs, HRV.scalesFor(b - a).filter((n) => n >= 10), cl.bad) : null;
-    const j = b - a >= 200 ? HRV.chhabraJensen(cl.rrc, a, b, qs, P.cj) : null;
+    const m = b - a >= 200 ? HRV.mfdfa(fr.rrc, a, b, qs, HRV.scalesFor(b - a).filter((n) => n >= 10), fr.bad) : null;
+    const j = b - a >= 200 ? HRV.chhabraJensen(fr.rrc, a, b, qs, P.cj) : null;
     const item = (k, v, tip) => `<div class="rv-stat" title="${tip || ""}"><span>${k}</span><b>${v}</b></div>`;
     $("sum-stats").innerHTML = [
       item("beats", st.beats, "in the selected period"),
       item("duration", fmtDur(st.dur)),
-      item("corrected", f(st.badPct, 1, " %"), "artifact / ectopic beats replaced by the local median before the analysis"),
+      item("corrected", f(st.badPct, 1, " %"), "time-domain HRV (RMSSD, SDNN, pNN50, Poincaré, DC): artifact / ectopic / alternans beats replaced by the local median"),
+      item("fractal errors", f(100 * fr.bad.slice(a, b).reduce((s, v) => s + v, 0) / (b - a), 1, " %"), "DFA, MFDFA, Chhabra–Jensen, chaos: PAC / PVC / alternans beats are kept, only errors (out of range, stale, false or missed R peak) are replaced"),
       item("lost beats", st.missing, "beats missing in breaks of the recording (lost notifications, dropped link)"),
       item("HR", f(st.hr, 0, " bpm")),
       item("mean RR", f(st.meanRR, 0, " ms")),
@@ -602,7 +624,7 @@
     if (b - a > NL_MAX) { i0 = a + Math.floor((b - a - NL_MAX) / 2); i1 = i0 + NL_MAX; }
     chSel = null; chSelRange = [a, b];
     summaryChaosPts();
-    Chaos.inWorker("sel", { kind: "chaos", rr: cl.rrc.slice(i0, i1) }, (r) => {
+    Chaos.inWorker("sel", { kind: "chaos", rr: fr.rrc.slice(i0, i1) }, (r) => {
       chSel = r;
       const set = (id, html, cls) => { const e = $(id); if (e) { const bb = e.querySelector("b"); bb.innerHTML = html; bb.className = cls || ""; } };
       if (!r || !r.ti) { set("st-nl", "–"); set("st-ce", "–"); summaryChaosPts(); return; }
@@ -634,7 +656,7 @@
     if (i1 - i0 < NonLin.N_MIN) { nlRes = null; NonLin.render($("nl-canvas"), $("nl-stats"), null); return; }
     setText("nl-stats", "computing…");
     const note = i1 - i0 < b - a ? `the middle ${i1 - i0} of ${b - a} beats` : "";
-    NonLin.analyzeAsync(cl.rrc.slice(i0, i1), NL_MAX, (r) => { nlRes = r; NonLin.render($("nl-canvas"), $("nl-stats"), r, note); });
+    NonLin.analyzeAsync(fr.rrc.slice(i0, i1), NL_MAX, (r) => { nlRes = r; NonLin.render($("nl-canvas"), $("nl-stats"), r, note); });
   }
 
   // ---------- small x-y charts on a plain canvas ----------

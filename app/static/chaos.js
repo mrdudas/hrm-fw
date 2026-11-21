@@ -262,15 +262,18 @@
   // sliding windows over a beat series: noise limit and plane position
   // (time windows of winS, every stepS; a window spanning a gap or with too
   // many corrected beats gives nulls); onPart(partial result) for progress
+  // o.lost (optional): beats lost before each beat; then a window may span
+  // short breaks, the lost beats counting as corrected ones
   function rolling(t, rrc, bad, gap, o, onPart) {
-    const n = t.length, out = { t: [], nl: [], H: [], C: [], dC: [] };
-    const pBad = new Int32Array(n + 1), pGap = new Int32Array(n + 1);
-    for (let i = 0; i < n; i++) { pBad[i + 1] = pBad[i] + bad[i]; pGap[i + 1] = pGap[i] + (gap[i] ? 1 : 0); }
+    const n = t.length, out = { t: [], nl: [], H: [], C: [], dC: [] }, lost = o.lost;
+    const pBad = new Int32Array(n + 1), pGap = new Int32Array(n + 1), pL = new Int32Array(n + 1);
+    for (let i = 0; i < n; i++) { pBad[i + 1] = pBad[i] + bad[i]; pGap[i + 1] = pGap[i] + (gap[i] ? 1 : 0); pL[i + 1] = pL[i] + (lost ? lost[i] : 0); }
     const lower = (x) => { let lo = 0, hi = n; while (lo < hi) { const m = (lo + hi) >> 1; if (t[m] < x) lo = m + 1; else hi = m; } return lo; };
     let lastPost = Date.now();
     for (let c = t[0] + o.winS / 2; c <= t[n - 1] - o.winS / 2 + 1e-9; c += o.stepS) {
       const a = lower(c - o.winS / 2), b = lower(c + o.winS / 2);
-      const good = b - a >= N_MIN && pGap[b] - pGap[a + 1] === 0 && 100 * (pBad[b] - pBad[a]) / (b - a) <= o.maxBad;
+      const nl = pL[b] - pL[Math.min(b, a + 1)];
+      const good = b - a >= N_MIN && (lost || pGap[b] - pGap[a + 1] === 0) && 100 * (pBad[b] - pBad[a] + nl) / (b - a + nl) <= o.maxBad;
       out.t.push(c);
       if (!good) { out.nl.push(null); out.H.push(null); out.C.push(null); out.dC.push(null); continue; }
       const seg = Array.prototype.slice.call(rrc, a, b);

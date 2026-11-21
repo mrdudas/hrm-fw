@@ -54,11 +54,59 @@
       med[i] = m == null ? Math.min(RR_MAX, Math.max(RR_MIN, rr[i])) : m;
       if (!bad[i] && m != null && Math.abs(rr[i] - m) > DEV_MAX * m) dev[i] = 1;
     }
+    const hard = bad.slice();                      // range / stale: never a real beat
     for (let i = 0; i < n; i++) {
       if (dev[i]) bad[i] = 1;
       rrc[i] = bad[i] ? med[i] : rr[i];
     }
-    return { rrc, bad, gap: gap || new Uint8Array(n) };
+    return { rrc, bad, gap: gap || new Uint8Array(n), med, hard };
+  }
+
+  // The series for the fractal / nonlinear measures (DFA, MFDFA, Chhabra–Jensen,
+  // chaos): ectopic (PAC / PVC), alternans and other real but unusual beats are
+  // part of the heart's dynamics, so only errors are replaced. From clean(cl):
+  //  - out of range or stale runs (cl.hard),
+  //  - error[i] set by the caller (e.g. the strap's ARTIFACT events),
+  //  - of the beats clean() flagged as off the local median m, keep[i] (beats a
+  //    detector classified: PAC / PVC / alternans) are kept, and so is anything
+  //    that looks like a heartbeat; replaced are only
+  //      a split beat: a short RR whose sum with a short neighbour is ~ m
+  //                    (an extra, false R peak), and
+  //      a missed beat: RR >= 1.75 m not after a short (premature) one.
+  // lost (optional): beats lost before each beat (counts). With it, a window
+  // may span short breaks: the lost beats count as errors in its budget.
+  function cleanReal(cl, rr, keep, error, lost) {
+    const n = rr.length, { med, hard } = cl, bad = new Uint8Array(n), rrc = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      let b = hard[i] || (error && error[i]) ? 1 : 0;
+      if (!b && cl.bad[i] && !(keep && keep[i])) {
+        const m = med[i], v = rr[i], ok = (j) => j >= 0 && j < n && !hard[j];
+        if (v < m) {
+          for (const j of [i - 1, i + 1]) if (ok(j) && rr[j] < 0.85 * m && Math.abs(v + rr[j] - m) < 0.25 * m) b = 1;
+        } else if (v >= 1.75 * m && !(ok(i - 1) && rr[i - 1] < 0.85 * m)) b = 1;
+      }
+      bad[i] = b;
+      rrc[i] = b ? med[i] : rr[i];
+    }
+    return { rrc, bad, gap: cl.gap, lost: lost ? Int32Array.from(lost, (v) => v || 0) : null };
+  }
+
+  // prefix sums of errors + lost beats for an error budget over windows:
+  // ok(a, b): (errors + lost) / (beats + lost) <= maxPct. Without lost
+  // counts a window may not span a break at all.
+  function budget(s, n, maxPct) {
+    const pB = new Int32Array(n + 1), pL = new Int32Array(n + 1), pG = new Int32Array(n + 1);
+    for (let i = 0; i < n; i++) {
+      pB[i + 1] = pB[i] + s.bad[i];
+      pL[i + 1] = pL[i] + (s.lost ? s.lost[i] : 0);
+      pG[i + 1] = pG[i] + (s.gap[i] ? 1 : 0);
+    }
+    return (a, b) => {
+      if (b - a < 3) return false;
+      if (!s.lost && pG[b] - pG[a + 1] !== 0) return false;
+      const lost = s.lost ? pL[b] - pL[a + 1] : 0;
+      return 100 * (pB[b] - pB[a] + lost) / (b - a + lost) <= maxPct;
+    };
   }
 
   // F(n) for each box size in `scales` over x[a..b): integrate, then detrend
@@ -165,35 +213,36 @@
   function rolling(t, cl, o) {
     const { rrc, bad, gap } = cl, n = t.length;
     const winS = o.winS, stepS = o.stepS, win2S = o.win2S, maxBad = o.maxBad;
+    const fr = o.fr || cl;                          // series for alpha1 / alpha2 (cleanReal), else the same
     const out = { t: [], a1: [], a2: [], rmssd: [], sdnn: [], hr: [], badPct: [] };
     if (n < 2) return out;
-    // prefix sums: corrected beats, missing beats; gap positions
+    // prefix sums: corrected beats (time domain, fractal), missing beats; gap positions
     const pBad = new Int32Array(n + 1), pGap = new Int32Array(n + 1);
     for (let i = 0; i < n; i++) { pBad[i + 1] = pBad[i] + bad[i]; pGap[i + 1] = pGap[i] + (gap[i] ? 1 : 0); }
+    const frOk = budget(fr, n, maxBad);
     const lower = (x) => { let lo = 0, hi = n; while (lo < hi) { const m = (lo + hi) >> 1; if (t[m] < x) lo = m + 1; else hi = m; } return lo; };
     const ok = (a, b) => b - a > 2 && pGap[b] - pGap[a + 1] === 0;
     for (let c = t[0] + winS / 2; c <= t[n - 1] - winS / 2 + 1e-9; c += stepS) {
       const a = lower(c - winS / 2), b = lower(c + winS / 2);
       const bp = b > a ? 100 * (pBad[b] - pBad[a]) / (b - a) : null;
       out.t.push(c); out.badPct.push(bp);
+      out.a1.push(frOk(a, b) ? alpha1(fr.rrc, a, b) : null);
       if (!ok(a, b) || bp > maxBad) {
-        out.a1.push(null); out.rmssd.push(null); out.sdnn.push(null); out.hr.push(null);
+        out.rmssd.push(null); out.sdnn.push(null); out.hr.push(null);
       } else {
         let s = 0, d2 = 0;
         for (let i = a; i < b; i++) { s += rrc[i]; if (i > a) d2 += (rrc[i] - rrc[i - 1]) ** 2; }
         const mean = s / (b - a);
         let v = 0;
         for (let i = a; i < b; i++) v += (rrc[i] - mean) ** 2;
-        out.a1.push(alpha1(rrc, a, b));
         out.rmssd.push(Math.sqrt(d2 / (b - a - 1)));
         out.sdnn.push(Math.sqrt(v / (b - a - 1)));
         out.hr.push(60000 / mean);
       }
       if (win2S) {
         const a2 = lower(c - win2S / 2), b2 = lower(c + win2S / 2);
-        const bp2 = b2 > a2 ? 100 * (pBad[b2] - pBad[a2]) / (b2 - a2) : 100;
-        out.a2.push(c - win2S / 2 >= t[0] && c + win2S / 2 <= t[n - 1] && ok(a2, b2) && bp2 <= maxBad
-          ? alpha2(rrc, a2, b2) : null);
+        out.a2.push(c - win2S / 2 >= t[0] && c + win2S / 2 <= t[n - 1] && frOk(a2, b2)
+          ? alpha2(fr.rrc, a2, b2) : null);
       }
     }
     return out;
@@ -349,14 +398,13 @@
     const { rrc, bad, gap } = cl, n = t.length;
     const out = { t: [], mfW: [], mfA0: [], cjW: [], cjA0: [] };
     if (n < 2) return out;
-    const pBad = new Int32Array(n + 1), pGap = new Int32Array(n + 1);
-    for (let i = 0; i < n; i++) { pBad[i + 1] = pBad[i] + bad[i]; pGap[i + 1] = pGap[i] + (gap[i] ? 1 : 0); }
+    const okW = budget(cl, n, o.maxBad);
     const lower = (x) => { let lo = 0, hi = n; while (lo < hi) { const m = (lo + hi) >> 1; if (t[m] < x) lo = m + 1; else hi = m; } return lo; };
     const qs = qRange(o.qMax, 1);
     for (let c = t[0] + o.winS / 2; c <= t[n - 1] - o.winS / 2 + 1e-9; c += o.stepS) {
       const a = lower(c - o.winS / 2), b = lower(c + o.winS / 2);
       out.t.push(c);
-      const good = b - a > 100 && pGap[b] - pGap[a + 1] === 0 && 100 * (pBad[b] - pBad[a]) / (b - a) <= o.maxBad;
+      const good = b - a > 100 && okW(a, b);
       const m = good ? mfdfa(rrc, a, b, qs, null, bad) : null;
       const j = good ? chhabraJensen(rrc, a, b, qs, o.measure) : null;
       out.mfW.push(m ? m.width : null); out.mfA0.push(m ? m.alpha0 : null);
@@ -365,7 +413,7 @@
     return out;
   }
 
-  const HRV = { clean, dc, dfaF, slope, alpha1, alpha2, scalesFor, stats, rolling, S1, S2,
+  const HRV = { clean, cleanReal, budget, dc, dfaF, slope, alpha1, alpha2, scalesFor, stats, rolling, S1, S2,
                 qRange, mfScales, mfdfa, legendre, chhabraJensen, rollingMF };
   if (typeof module !== "undefined" && module.exports) module.exports = HRV;
   else root.HRV = HRV;
