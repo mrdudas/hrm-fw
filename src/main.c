@@ -366,7 +366,7 @@ static uint8_t body_loc = 0x01;   /* chest */
  * K_NO_WAIT by the host, so a full pool returns -ENOMEM instead of blocking --
  * we then hold the packet and retry, rather than discarding the queue.
  * Queue full on enqueue -> drop newest; ECG seq lets the app see the gap. */
-enum { TX_ECG, TX_ACCEL, TX_HR, TX_ECTOPY };
+enum { TX_ECG, TX_ACCEL, TX_HR, TX_ECTOPY, TX_BEAT };
 struct tx_pkt { uint8_t type; uint8_t len; uint8_t data[62]; };   /* >= largest notify (ECG = 2 + RAW_BATCH*2) */
 #define TXQ_DEPTH 6
 K_MSGQ_DEFINE(txq, sizeof(struct tx_pkt), TXQ_DEPTH, 4);
@@ -417,15 +417,32 @@ static void hrm_notify(uint8_t hr, uint16_t rr_1024)
 #define CAP_INFO BT_UUID_128_ENCODE(0xa1b20003,0x0000,0x1000,0x8000,0x00805f9b34fb)
 #define CAP_LINK BT_UUID_128_ENCODE(0xa1b20004,0x0000,0x1000,0x8000,0x00805f9b34fb)
 #define CAP_CFG  BT_UUID_128_ENCODE(0xa1b20005,0x0000,0x1000,0x8000,0x00805f9b34fb)
+#define CAP_BEAT BT_UUID_128_ENCODE(0xa1b20006,0x0000,0x1000,0x8000,0x00805f9b34fb)
 static struct bt_uuid_128 cap_svc_uuid  = BT_UUID_INIT_128(CAP_SVC);
 static struct bt_uuid_128 cap_chr_uuid  = BT_UUID_INIT_128(CAP_CHR);
 static struct bt_uuid_128 cap_info_uuid = BT_UUID_INIT_128(CAP_INFO);
 static struct bt_uuid_128 cap_link_uuid = BT_UUID_INIT_128(CAP_LINK);
+static struct bt_uuid_128 cap_beat_uuid = BT_UUID_INIT_128(CAP_BEAT);
 #if HP_COMP
 static struct bt_uuid_128 cap_cfg_uuid  = BT_UUID_INIT_128(CAP_CFG);
 #endif
 static uint8_t cap_ccc;
 static void cap_ccc_changed(const struct bt_gatt_attr *a, uint16_t v) { cap_ccc = (v == BT_GATT_CCC_NOTIFY); }
+
+/* Per-beat sensor-time timestamp (a1b20006), notify + read, 8 bytes LE:
+ *   [0:2] u16 beat_counter   (+1 per accepted beat, wraps)
+ *   [2:6] u32 r_sample_index (free-running 500 Hz output-sample index since boot,
+ *          already back-dated to the true R by R_FIDUCIAL_DELAY_SAMPLES; same epoch
+ *          as the raw-ECG packet seq*RAW_BATCH + offset)
+ *   [6:8] u16 rr_1024        (identical to the 0x2a37 value)
+ * Lets the app timestamp beats from the sensor's own clock instead of BLE reception
+ * time, so a buffered/replayed stream keeps correct per-beat timing. Live, 1 record
+ * per notify. Format agreed with the app side (hrv_app). */
+#define R_FIDUCIAL_DELAY_SAMPLES 25   /* detector lag: Levkov 20 ms + bandpass ~30 ms = 50 ms @500 Hz */
+static uint8_t  cap_beat_ccc;
+static uint16_t beat_counter;
+static uint8_t  beat_buf[8];
+static void cap_beat_ccc_changed(const struct bt_gatt_attr *a, uint16_t v) { cap_beat_ccc = (v == BT_GATT_CCC_NOTIFY); }
 
 /* Stream descriptor so the host sets its time axis from the strap, not a hard-coded
  * rate. LE: u16 sample_hz, u16 raw_batch, u8 sample_bytes, u8 fmt_ver, u16 acc_div,
@@ -523,6 +540,21 @@ static ssize_t write_cap_cfg(struct bt_conn *c, const struct bt_gatt_attr *a,
 }
 #endif
 
+static ssize_t read_cap_beat(struct bt_conn *c, const struct bt_gatt_attr *a,
+			     void *buf, uint16_t len, uint16_t off)
+{
+	return bt_gatt_attr_read(c, a, buf, len, off, beat_buf, sizeof(beat_buf));
+}
+/* Called from the detector on each accepted beat. r_sample_index is already
+ * back-dated to the true R (see R_FIDUCIAL_DELAY_SAMPLES). */
+static void beat_notify(uint32_t r_sample_index, uint16_t rr_1024)
+{
+	sys_put_le16(++beat_counter, &beat_buf[0]);
+	sys_put_le32(r_sample_index, &beat_buf[2]);
+	sys_put_le16(rr_1024,        &beat_buf[6]);
+	if (cap_beat_ccc) tx_enqueue(TX_BEAT, beat_buf, sizeof(beat_buf));
+}
+
 BT_GATT_SERVICE_DEFINE(cap_svc,
 	BT_GATT_PRIMARY_SERVICE(&cap_svc_uuid),
 	BT_GATT_CHARACTERISTIC(&cap_chr_uuid.uuid, BT_GATT_CHRC_NOTIFY,
@@ -532,6 +564,12 @@ BT_GATT_SERVICE_DEFINE(cap_svc,
 			       BT_GATT_PERM_READ, read_cap_info, NULL, NULL),
 	BT_GATT_CHARACTERISTIC(&cap_link_uuid.uuid, BT_GATT_CHRC_READ,
 			       BT_GATT_PERM_READ, read_cap_link, NULL, NULL),
+	/* a1b20006 beat timestamp -- kept here (attrs[8]=decl, attrs[9]=value,
+	 * attrs[10]=ccc) ahead of the optional CAP_CFG so its index is fixed
+	 * regardless of HP_COMP; TX_BEAT notifies via cap_svc.attrs[9]. */
+	BT_GATT_CHARACTERISTIC(&cap_beat_uuid.uuid, BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_READ,
+			       BT_GATT_PERM_READ, read_cap_beat, NULL, NULL),
+	BT_GATT_CCC(cap_beat_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 #if HP_COMP
 	BT_GATT_CHARACTERISTIC(&cap_cfg_uuid.uuid, BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
 			       BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
@@ -614,6 +652,7 @@ static void tx_work_fn(struct k_work *w)
 		const struct bt_gatt_attr *attr;
 		switch (pend.type) {
 		case TX_ECG:    attr = &cap_svc.attrs[2];  break;
+		case TX_BEAT:   attr = &cap_svc.attrs[9];  break;
 		case TX_ACCEL:  attr = &accs_svc.attrs[2]; break;
 		case TX_HR:     attr = &hrm_svc.attrs[2];  break;
 		case TX_ECTOPY: attr = &ect_svc.attrs[2];  break;
@@ -858,6 +897,9 @@ static void detector_feed(int16_t sample)
 					uint8_t hr = hr_from_rr(rr_ms);
 					LOG_INF("beat RR=%u HR=%u", rr_ms, hr);
 					hrm_notify(hr, rr_1024);
+					/* sensor-time beat timestamp (a1b20006): back-date the
+					 * fiducial to the true R so the app can use sensor time. */
+					beat_notify(now - R_FIDUCIAL_DELAY_SAMPLES, rr_1024);
 					rr_avg_cyc = rr_avg_cyc ? (rr_avg_cyc * 7 + d) / 8 : d;
 
 					/* --- extrasystole classification (ectopy char only) ---
