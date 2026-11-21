@@ -1055,23 +1055,67 @@ static int acc_read6(int16_t *xyz)
 	return 1;
 }
 
-/* Simple pedometer: peak-detect the high-passed L1 acceleration magnitude. */
+/* Pedometer: band-pass the L1 accel magnitude into the step band, then peak-detect
+ * against an ADAPTIVE envelope threshold.
+ *
+ * The old detector used fixed thresholds (step if hp>3000, re-arm if hp<1500) on a
+ * slow-baseline high-pass. On real workouts the step peaks sit ~1500-2700 -- below
+ * 3000 -- so a 5-minute walk counted ~110 steps (~23/min) instead of ~500. Raising
+ * sensitivity with a lower fixed threshold would then false-count on rest fidget.
+ *
+ * Instead: a one-pole band-pass (LP 3 Hz -> HP 0.8 Hz, the walk/run cadence band
+ * ~0.8-3 Hz) removes gravity drift and HF noise; the threshold is K x a running
+ * envelope of the band-passed amplitude, so it follows the signal's own level --
+ * walking (~100/min) is caught while rest stays quiet. An absolute floor (ENVMIN)
+ * on the threshold blocks micro-motion when the envelope is near zero. Validated
+ * offline on accel_20261121_092025 (tail): 579 steps vs the old 118, quiet at rest.
+ *
+ * Coefficients are for the 25 Hz accel rate; a = 1 - exp(-2*pi*fc/fs). */
+#define STEP_LP_A    0.5295f   /* one-pole low-pass,  fc = 3.0 Hz @25 Hz */
+#define STEP_HP_A    0.1822f   /* one-pole high-pass, fc = 0.8 Hz @25 Hz */
+#define STEP_ENV_A   0.1889f   /* |band-pass| envelope follower (~0.19 s) */
+#define STEP_K       1.0f      /* threshold = K * envelope                */
+#define STEP_ENVMIN  400.0f    /* absolute min peak height (rest guard)   */
+#define STEP_REFR_MS 250       /* refractory between steps (~240/min cap) */
 static uint16_t step_count;
 static void step_update(int16_t x, int16_t y, int16_t z)
 {
-	static int32_t base; static bool armed = true; static int64_t last_ms;
-	static int warm;
+	static int32_t base; static int warm;
+	static float lpv, hpv, env, prev_bp, peak;
+	static bool rising;
+	static int64_t last_ms;
 	int32_t m = (x < 0 ? -x : x) + (y < 0 ? -y : y) + (z < 0 ? -z : z);
-	if (warm < 50) { warm++; base = m; return; }   /* ~2 s: settle baseline, no counting */
-	base += (m - base) >> 6;              /* slow baseline (gravity)          */
-	int32_t hp = m - base;                /* dynamic component                */
-	int64_t now = k_uptime_get();
-	if (hp > MOTION_THR || -hp > MOTION_THR) last_motion_ms = now;   /* "moving" for power mgmt */
-	if (armed && hp > 3000 && (now - last_ms) > 300) {   /* step: peak + 300ms refractory */
-		step_count++; armed = false; last_ms = now;
-	} else if (hp < 1500) {
-		armed = true;
+	if (warm < 50) {                       /* ~2 s: settle filters, no counting */
+		warm++; base = m; lpv = hpv = (float)m; return;
 	}
+
+	/* "moving" indicator for power management: unchanged slow-baseline high-pass,
+	 * kept independent of the step detector so the sleep logic is undisturbed. */
+	base += (m - base) >> 6;
+	int32_t hp = m - base;
+	int64_t now = k_uptime_get();
+	if (hp > MOTION_THR || -hp > MOTION_THR) last_motion_ms = now;
+
+	/* step band-pass: LP(3 Hz) then HP(0.8 Hz) == pass ~0.8-3 Hz */
+	lpv += STEP_LP_A * ((float)m - lpv);
+	hpv += STEP_HP_A * (lpv - hpv);
+	float bp = lpv - hpv;
+	float a  = bp < 0.0f ? -bp : bp;
+	env += STEP_ENV_A * (a - env);
+	float thr = STEP_K * (env > STEP_ENVMIN ? env : STEP_ENVMIN);
+
+	/* local-max peak detect (rise then fall) above the adaptive threshold */
+	if (bp > prev_bp) {
+		rising = true;
+		if (bp > peak) peak = bp;
+	} else if (rising && bp < prev_bp) {
+		rising = false;
+		if (peak > thr && (now - last_ms) > STEP_REFR_MS) {
+			step_count++; last_ms = now;
+		}
+		peak = 0.0f;
+	}
+	prev_bp = bp;
 }
 
 /* Accelerometer thread (25 Hz), decoupled from the 500 Hz sampling loop.
