@@ -62,6 +62,10 @@ Bluetooth share a radio), so the bursty packets scroll smoothly.
     with consecutive counters is a stretch the strap's RR quality gate
     suppressed as noise. The first beat after such a stretch carries the RR
     across it (possibly clipped at RR_MAX): treat it like a post-gap RR.
+    `tools/check_beats.py recordings/beat_<session>.csv` checks a recording:
+    counter gaps, r_sample_index monotonic and consistent with rr_ms, and the
+    R peak's position relative to `ecg_index` (a constant offset there means
+    the strap's 50 ms fiducial delay needs adjusting).
   - `meta_<session>.json` — `{"ecg_fs": …}`, the ECG sample rate used for the
     session (read by `tools/analyze_recording.py`)
 - Live dashboard at **http://localhost:8770** (opened automatically): rolling
