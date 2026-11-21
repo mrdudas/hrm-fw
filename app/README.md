@@ -139,6 +139,10 @@ dashboard in a separate Chrome window with its own profile
 more power on battery: `./run.sh --browser default` uses the default browser
 instead, and `--browser chrome-gpu` forces the dedicated window on any Mac.
 
+**Currently disabled:** the dedicated window is commented out in
+`browser.py` (`open_dashboard`), so the dashboard always opens in the default
+browser and `--browser` has no effect. Uncomment that block to bring it back.
+
 ## Reviewing recordings: HRV and fractal analysis
 
 `http://127.0.0.1:8770/review` (the **Recordings** button on the dashboard)

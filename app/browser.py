@@ -53,15 +53,17 @@ def use_chrome_gpu(mode: str) -> bool:
 
 
 def open_dashboard(url: str, mode: str = "auto", log=print):
-    if use_chrome_gpu(mode):
-        try:
-            os.makedirs(PROFILE_DIR, exist_ok=True)
-            subprocess.run(chrome_gpu_command(url), check=True, timeout=15)
-            log("dashboard opened in its own Chrome window on the discrete GPU "
-                "(--browser default for the default browser)")
-            return
-        except Exception as e:
-            log(f"could not start the dedicated Chrome window ({e}); using the default browser")
+    # Disabled: the dedicated Chrome window on a dual-GPU Mac. Uncomment to
+    # bring it back; for now every platform uses the default browser.
+    # if use_chrome_gpu(mode):
+    #     try:
+    #         os.makedirs(PROFILE_DIR, exist_ok=True)
+    #         subprocess.run(chrome_gpu_command(url), check=True, timeout=15)
+    #         log("dashboard opened in its own Chrome window on the discrete GPU "
+    #             "(--browser default for the default browser)")
+    #         return
+    #     except Exception as e:
+    #         log(f"could not start the dedicated Chrome window ({e}); using the default browser")
     try:
         webbrowser.open(url)
     except Exception:
